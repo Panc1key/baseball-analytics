@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+backend/data/*.db
+backend/data/*.db-*
+*.log
+.DS_Store
+.cursor/
+backend/scripts/debug-*.js
+backend/scripts/check-*.js

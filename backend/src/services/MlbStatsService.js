@@ -1,0 +1,160 @@
+/**
+ * MLB 官方 Stats API (免費、無需 key)
+ * https://statsapi.mlb.com/api/v1/
+ */
+
+const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
+
+async function mlbFetch(path, params = {}) {
+  const url = new URL(`${MLB_BASE}${path}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null) url.searchParams.set(k, v);
+  }
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error(`MLB API ${res.status}: ${path}`);
+  return res.json();
+}
+
+/** 取得今日/日期範圍賽程，含先發投手 */
+export async function getMlbSchedule(date) {
+  const d = date || new Date().toISOString().slice(0, 10);
+  const data = await mlbFetch('/schedule', {
+    sportId: 1,
+    date: d,
+    hydrate: 'team,probablePitcher,linescore',
+  });
+  return data.dates?.[0]?.games || [];
+}
+
+/** 取得分區戰績 */
+export async function getMlbStandings(season) {
+  const year = season || new Date().getFullYear();
+  const data = await mlbFetch('/standings', {
+    leagueId: '103,104',
+    season: year,
+    standingsTypes: 'regularSeason',
+    hydrate: 'team',
+  });
+  const teams = [];
+  for (const record of data.records || []) {
+    for (const teamRec of record.teamRecords || []) {
+      const t = teamRec.team;
+      teams.push({
+        teamId: t.id,
+        name: t.name,
+        abbreviation: t.abbreviation,
+        wins: teamRec.wins,
+        losses: teamRec.losses,
+        winPct: parseFloat(teamRec.winningPercentage || '0'),
+        runsScored: teamRec.runsScored,
+        runsAllowed: teamRec.runsAllowed,
+        runDiff: teamRec.runDifferential,
+        streak: teamRec.streak?.streakCode || '',
+        last10: `${teamRec.records?.splitRecords?.find((s) => s.type === 'lastTen')?.wins || 0}-${teamRec.records?.splitRecords?.find((s) => s.type === 'lastTen')?.losses || 0}`,
+        divisionRank: teamRec.divisionRank,
+      });
+    }
+  }
+  return teams;
+}
+
+/** 取得多日賽程 */
+export async function getMlbScheduleRange(dayCount = 3) {
+  const games = [];
+  for (let i = 0; i < dayCount; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const dayGames = await getMlbSchedule(dateStr);
+    games.push(...dayGames);
+  }
+  return games;
+}
+
+/** 傷兵名單摘要 */
+export async function getTeamInjurySummary(teamId) {
+  if (!teamId) return { count: 0, names: [] };
+  try {
+    const data = await mlbFetch(`/teams/${teamId}/roster`, { rosterType: 'injuryList' });
+    const names = (data.roster || [])
+      .map((r) => r.person?.fullName)
+      .filter(Boolean)
+      .slice(0, 5);
+    return { count: names.length, names };
+  } catch {
+    return { count: 0, names: [] };
+  }
+}
+
+/** 從賽程取得場地 */
+export function getVenueName(game) {
+  return game?.venue?.name || null;
+}
+export function matchMlbTeam(oddsTeamName, mlbTeams) {
+  if (!oddsTeamName) return null;
+
+  const normalize = (s) =>
+    (s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/(the|city|club)$/g, '');
+
+  const target = normalize(oddsTeamName);
+  if (!target) return null;
+  let best = null;
+  let bestScore = 0;
+
+  for (const team of mlbTeams) {
+    if (!team?.name && !team?.abbreviation) continue;
+    const candidates = [team.name, team.abbreviation].filter(Boolean).map(normalize);
+    for (const c of candidates) {
+      if (c === target) return team;
+      if (c.includes(target) || target.includes(c)) {
+        const score = Math.min(c.length, target.length) / Math.max(c.length, target.length);
+        if (score > bestScore) {
+          bestScore = score;
+          best = team;
+        }
+      }
+    }
+  }
+  return bestScore > 0.5 ? best : null;
+}
+
+/** 從賽程取得先發投手資訊 */
+export function getProbablePitchers(game) {
+  const home = game.teams?.home?.probablePitcher;
+  const away = game.teams?.away?.probablePitcher;
+  return {
+    home: home ? { id: home.id, name: home.fullName } : null,
+    away: away ? { id: away.id, name: away.fullName } : null,
+  };
+}
+
+/** 投手本季 ERA (簡化) */
+export async function getPitcherSeasonStats(pitcherId, season) {
+  if (!pitcherId) return null;
+  const year = season || new Date().getFullYear();
+  try {
+    const data = await mlbFetch(`/people/${pitcherId}/stats`, {
+      stats: 'season',
+      group: 'pitching',
+      season: year,
+    });
+    const split = data.stats?.[0]?.splits?.[0]?.stat;
+    if (!split) return null;
+    return {
+      era: parseFloat(split.era || 0),
+      whip: parseFloat(split.whip || 0),
+      inningsPitched: parseFloat(split.inningsPitched || 0),
+      strikeOuts: split.strikeOuts,
+      walks: split.baseOnBalls,
+      hits: split.hits,
+      gamesStarted: split.gamesStarted,
+      wins: split.wins,
+      losses: split.losses,
+    };
+  } catch {
+    return null;
+  }
+}
