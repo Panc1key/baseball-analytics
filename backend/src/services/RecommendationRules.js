@@ -41,9 +41,13 @@ function pickH2hCandidate(game, markets, analysis) {
     [game.home_team, markets.h2h[game.home_team]],
     [game.away_team, markets.h2h[game.away_team]],
   ]) {
-    if (!odds) continue;
-    const modelProb = team === game.home_team ? analysis.homeWinProb : analysis.awayWinProb;
-    const ev = calcEV(modelProb, decimalToNetOdds(odds.price));
+    if (!odds?.price) continue;
+
+    const isHome = team === game.home_team;
+    const modelProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
+    const impliedProb = decimalToImpliedProb(odds.price);
+    const edgePct = (modelProb - impliedProb) * 100;
+
     options.push({
       market: 'h2h',
       marketGroup: 'main',
@@ -52,22 +56,38 @@ function pickH2hCandidate(game, markets, analysis) {
       odds,
       oddsDecimal: odds.price,
       modelProb,
-      ev,
+      ev: calcEV(modelProb, decimalToNetOdds(odds.price)),
       confidence: analysis.confidence,
       structuralOk: true,
+      edgePct,
+      isFavorite: modelProb >= 0.5,
     });
   }
 
   if (!options.length) return null;
 
-  options.sort((a, b) => b.modelProb - a.modelProb);
-  const best = enrichCandidate(options[0], analysis, game.league, 'h2h');
-  const second = options[1];
+  // 以 EV 排序，選正 EV 且達標的一側（可選冷門）
+  options.sort((a, b) => b.ev - a.ev || b.edgePct - a.edgePct);
 
-  if (!best.tier) return null;
-  if (second && best.modelProb - second.modelProb < 0.02) return null;
+  for (const opt of options) {
+    if (opt.ev < config.minEvThreshold) continue;
+    if (opt.edgePct < config.h2hMinEdgePct) continue;
+    if (analysis.confidence < config.h2hMinConfidence) continue;
 
-  return best;
+    const enriched = enrichCandidate(opt, analysis, game.league, 'h2h');
+    if (!enriched.tier) continue;
+    if (enriched.ev < config.minEvThreshold) continue;
+    if (enriched.edgeProb <= 0) continue;
+
+    // 模型與推薦方向一致：推薦隊伍須為模型較看好的一方
+    const modelFavorsHome = analysis.homeWinProb >= analysis.awayWinProb;
+    const pickIsHome = opt.pick === game.home_team;
+    if (modelFavorsHome !== pickIsHome) continue;
+
+    return enriched;
+  }
+
+  return null;
 }
 
 function pickSpreadCandidate(game, markets, analysis) {

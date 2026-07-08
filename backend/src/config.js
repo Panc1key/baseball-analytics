@@ -25,6 +25,15 @@ export const config = {
   maxModelEdgePct: parseFloat(process.env.MAX_MODEL_EDGE_PCT || '0.08'),
   /** 串關每腿最低 EV（與單場門檻一致） */
   parlayMinLegEv: parseFloat(process.env.PARLAY_MIN_LEG_EV || '0.03'),
+  /** 獨贏：市場混合權重（數據完整時） */
+  h2hMarketBlendMlbFull: parseFloat(process.env.H2H_MARKET_BLEND_MLB_FULL || '0.4'),
+  h2hMarketBlendMlb: parseFloat(process.env.H2H_MARKET_BLEND_MLB || '0.45'),
+  h2hMarketBlendMlbLite: parseFloat(process.env.H2H_MARKET_BLEND_MLB_LITE || '0.5'),
+  h2hMarketBlendOther: parseFloat(process.env.H2H_MARKET_BLEND_OTHER || '0.55'),
+  /** 獨贏推薦：模型與市場最小優勢（%） */
+  h2hMinEdgePct: parseFloat(process.env.H2H_MIN_EDGE_PCT || '1.5'),
+  /** 獨贏：避免 50/50 場次 */
+  h2hMinConfidence: parseFloat(process.env.H2H_MIN_CONFIDENCE || '0.08'),
 };
 
 export const LEAGUES = {
