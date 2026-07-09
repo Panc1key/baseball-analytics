@@ -118,6 +118,8 @@ function migrateSchema() {
   addCol('ALTER TABLE recommendations ADD COLUMN data_quality REAL DEFAULT 0');
   addCol('ALTER TABLE recommendations ADD COLUMN market_group TEXT DEFAULT \'main\'');
   addCol('ALTER TABLE games ADD COLUMN raw_props TEXT');
+  addCol('ALTER TABLE recommendations ADD COLUMN bet_strategy TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_bet_strategy ON recommendations(bet_strategy)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_score ON recommendations(score DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_tier ON recommendations(tier)');
 }

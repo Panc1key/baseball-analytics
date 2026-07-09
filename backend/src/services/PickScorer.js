@@ -3,9 +3,9 @@ import { decimalToImpliedProb, calibrateModelProb, calcEV, decimalToNetOdds } fr
 
 /** 各盤口水位帶 */
 export const MARKET_BANDS = {
-  h2h: { min: 1.7, max: 3.5, sweetMin: 1.75, sweetMax: 2.8 },
-  spreads: { min: 1.75, max: 2.6, sweetMin: 1.8, sweetMax: 2.3 },
-  totals: { min: 1.85, max: 2.1, sweetMin: 1.88, sweetMax: 2.05 },
+  h2h: { min: 1.4, max: 3.5, sweetMin: 1.65, sweetMax: 2.8 },
+  spreads: { min: 1.4, max: 2.6, sweetMin: 1.65, sweetMax: 2.35 },
+  totals: { min: 1.6, max: 2.3, sweetMin: 1.7, sweetMax: 2.15 },
   props: { min: 1.7, max: 3.0, sweetMin: 1.75, sweetMax: 2.5 },
 };
 

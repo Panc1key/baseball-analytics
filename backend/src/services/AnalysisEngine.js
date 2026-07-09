@@ -13,6 +13,7 @@ import { buildParlaysFromDb, LEAGUE_MARKETS_INFO } from './ParlayBuilder.js';
 import { extractPlayerProps } from './PlayerPropAnalyzer.js';
 import { extractMarkets } from '../utils/odds.js';
 import { config } from '../config.js';
+import { classifyBetStrategy } from './BetStrategy.js';
 
 let refreshPromise = null;
 
@@ -82,11 +83,22 @@ function buildRecEntry(game, pick, id) {
 }
 
 function saveRecommendation(rec) {
+  const betStrategy = rec.betStrategy ?? classifyBetStrategy({
+    tier: rec.tier,
+    market: rec.market,
+    league: rec.league,
+    ev: rec.ev,
+    edge_prob: rec.edgeProb,
+    model_prob: rec.modelProb,
+    odds_decimal: rec.oddsDecimal,
+    data_quality: rec.dataQuality,
+  });
+
   return db
     .prepare(`
     INSERT INTO recommendations
-      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob, implied_prob, ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob, implied_prob, ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group, bet_strategy)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       rec.gameId,
@@ -105,7 +117,8 @@ function saveRecommendation(rec) {
       rec.score,
       rec.edgeProb,
       rec.dataQuality,
-      rec.marketGroup || 'main'
+      rec.marketGroup || 'main',
+      betStrategy
     ).lastInsertRowid;
 }
 
@@ -232,8 +245,9 @@ export async function runAnalysis() {
     const markets = extractMarkets(bookmakers);
     const reasoning = analysis.factors.join(' | ');
 
-    let propsContext = {};
-    if (game.league === 'MLB') {
+    let propsContext = { bookmakers };
+
+    if (game.league === 'MLB' && config.enablePlayerProps) {
       const rawProps = JSON.parse(game.raw_props || '[]');
       const propsMap = extractPlayerProps(rawProps);
       let homePitcherStats = null;
@@ -252,12 +266,20 @@ export async function runAnalysis() {
       }
 
       propsContext = {
+        ...propsContext,
         propsMap,
         homePitcherStats,
         awayPitcherStats,
         homePitcherName,
         awayPitcherName,
       };
+    } else if (game.league === 'MLB' && mlbScheduleGame) {
+      const pitchers = getProbablePitchers(mlbScheduleGame);
+      const [homePitcherStats, awayPitcherStats] = await Promise.all([
+        getPitcherSeasonStats(pitchers.home?.id),
+        getPitcherSeasonStats(pitchers.away?.id),
+      ]);
+      propsContext = { ...propsContext, homePitcherStats, awayPitcherStats };
     }
 
     const picks = pickGameRecommendations(game, markets, analysis, reasoning, propsContext);
@@ -358,12 +380,13 @@ export function getParlayRecommendations(limit = 40) {
 export { LEAGUE_MARKETS_INFO };
 
 export function getRecommendations(filters = {}) {
-  const { league, minEv = 0, market, marketGroup, tier, limit = 80 } = filters;
+  const { league, minEv = 0, market, marketGroup, tier, betStrategy, limit = 80 } = filters;
   let sql = `
     SELECT r.*, g.home_team, g.away_team, g.commence_time
     FROM recommendations r
     JOIN games g ON g.id = r.game_id
     WHERE r.ev >= ?
+      AND datetime(g.commence_time) > datetime('now')
   `;
   const params = [minEv];
 
@@ -384,10 +407,52 @@ export function getRecommendations(filters = {}) {
   } else if (marketGroup === 'main') {
     sql += " AND r.market_group = 'main'";
   }
+  if (betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor') {
+    sql += ' AND r.bet_strategy = ?';
+    params.push(betStrategy);
+  }
 
-  sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, r.score DESC, r.model_prob DESC";
+  if (betStrategy === 'flat_bet') {
+    sql += ' ORDER BY r.ev DESC, r.score DESC';
+  } else if (betStrategy === 'parlay_anchor') {
+    sql += ' ORDER BY r.model_prob DESC, r.ev DESC';
+  } else {
+    sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, r.score DESC, r.model_prob DESC";
+  }
+
   const rows = db.prepare(sql).all(...params);
-  return rows.slice(0, limit);
+  const enriched = rows.map((r) => ({
+    ...r,
+    bet_strategy: r.bet_strategy || classifyBetStrategy(r),
+  }));
+
+  const filtered =
+    betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor'
+      ? enriched.filter((r) => r.bet_strategy === betStrategy)
+      : enriched;
+
+  return filtered.slice(0, limit);
+}
+
+export function getBettingStrategyMeta() {
+  return {
+    flatBet: {
+      label: '均注精選',
+      minOdds: config.flatBetMinOdds,
+      minProb: config.flatBetMinProb,
+      minEv: config.minEvThreshold,
+      stake: config.flatBetUsd,
+      description: '高賠正 EV · 避開低水臭水 · 每場均注',
+    },
+    parlayAnchor: {
+      label: '串關錨腿',
+      minOdds: config.parlayAnchorMinOdds,
+      maxOdds: config.parlayAnchorMaxOdds,
+      minProb: config.parlayAnchorMinProb,
+      stake: config.parlayBetUsd,
+      description: '低水高勝率 · 用於組串抬命中率',
+    },
+  };
 }
 
 export function getUpcomingGames(league) {

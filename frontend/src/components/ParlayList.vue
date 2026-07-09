@@ -50,18 +50,23 @@
           :closable="false"
           show-icon
           class="lottery-alert"
-          title="長串不要求全中；此為高賠率彩券型，單場均注正 EV 才是長期盈利核心"
+          title="長串不要求全中；涵蓋當日全部場次，$1 博高賠。長期盈利仍靠均注精選正 EV。"
         />
         <div class="parlay-summary">{{ translatePick(p.pickSummary || buildSummary(p.legs)) }}</div>
         <div class="parlay-header">
           <span>合計賠率 <strong>{{ p.combined_odds?.toFixed(2) }}</strong></span>
           <span class="hit-prob">模型勝率 <strong>{{ (p.combined_prob * 100).toFixed(2) }}%</strong></span>
+          <span v-if="p.avg_leg_prob != null" class="avg-leg-prob">
+            腿均勝率 <strong>{{ (p.avg_leg_prob * 100).toFixed(1) }}%</strong>
+          </span>
           <span v-if="p.combined_implied_prob != null" class="market-prob">
             市場隱含 <strong>{{ formatTinyPct(p.combined_implied_prob) }}</strong>
           </span>
           <span v-if="p.combined_score">評分 {{ p.combined_score?.toFixed(0) }}</span>
           <span>涵蓋 {{ p.games_covered || p.legs?.length }} 場</span>
-          <el-tag v-if="p.combined_ev > 0" type="warning" size="small">
+          <span v-if="p.anchor_leg_count != null">錨腿 {{ p.anchor_leg_count }}/{{ p.leg_count }}</span>
+          <span v-if="p.fill_leg_count">補腿 {{ p.fill_leg_count }}</span>
+          <el-tag v-if="p.combined_ev > 0 && !isFullSlateLottery(p)" type="warning" size="small">
             EV +{{ (p.combined_ev * 100).toFixed(1) }}%
           </el-tag>
         </div>
@@ -101,9 +106,17 @@ const formatTime = formatGameTime;
 const legFilter = ref('');
 
 const GROUP_LABELS = {
-  full_slate: '當日全場',
+  lottery_full_slate: '當日全場彩券（主推）',
+  anchor_full_slate: '錨腿全場',
+  anchor_short: '高命中短串',
+  anchor_slate: '錨腿全場',
+  anchor_cover: '錨腿場次覆蓋',
+  main_markets: '主盤均衡',
+  h2h_spread: '獨贏 / 讓分串',
   best_ev: '正 EV 精選',
-  main_markets: '主盤串關',
+  h2h_focus: '純獨贏串',
+  spread_focus: '純讓分串',
+  full_slate: '當日全場',
   best_hit: '最高命中',
   value_hit: '穩健小博大',
   daily_cover: '場次覆蓋',
@@ -149,7 +162,23 @@ const groupedParlays = computed(() => {
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(p);
   }
-  const order = ['best_ev', 'main_markets', 'full_slate', 'best_hit', 'value_hit', 'daily_cover', 'combo'];
+  const order = [
+    'lottery_full_slate',
+    'anchor_full_slate',
+    'anchor_short',
+    'anchor_slate',
+    'anchor_cover',
+    'main_markets',
+    'h2h_spread',
+    'best_ev',
+    'h2h_focus',
+    'spread_focus',
+    'full_slate',
+    'best_hit',
+    'value_hit',
+    'daily_cover',
+    'combo',
+  ];
   return order
     .filter((k) => map.has(k))
     .map((k) => ({ key: k, title: GROUP_LABELS[k] || k, items: map.get(k) }));
@@ -166,6 +195,10 @@ watch(
 
 function buildSummary(legs) {
   return (legs || []).map((l) => l.pick).join(' + ');
+}
+
+function isFullSlateLottery(p) {
+  return p.category === 'lottery_full_slate' || (p.is_lottery && (p.leg_count || p.legs?.length) >= 10);
 }
 
 function formatTinyPct(prob) {
@@ -245,6 +278,7 @@ function formatMoney(n) {
   font-size: 14px;
 }
 .hit-prob strong { color: #67c23a; }
+.avg-leg-prob strong { color: #409eff; }
 .market-prob strong { color: #909399; font-weight: 600; }
 .legs { margin: 0; padding: 0; list-style: none; }
 .leg-item {

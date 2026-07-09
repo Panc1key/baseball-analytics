@@ -6,6 +6,7 @@ import {
   getAppStatus,
   getRecommendations,
   getParlayRecommendations,
+  getBettingStrategyMeta,
   getUpcomingGames,
   getBetStats,
   logBet,
@@ -73,9 +74,14 @@ router.get('/recommendations', (req, res) => {
     market: req.query.market || undefined,
     marketGroup: req.query.marketGroup || undefined,
     tier: req.query.tier || undefined,
+    betStrategy: req.query.betStrategy || undefined,
     limit: parseInt(req.query.limit || '80', 10),
   });
-  res.json({ success: true, data: recs });
+  res.json({
+    success: true,
+    data: recs,
+    meta: getBettingStrategyMeta(),
+  });
 });
 
 router.get('/parlays', (req, res) => {
@@ -84,11 +90,15 @@ router.get('/parlays', (req, res) => {
     success: true,
     data: parlays,
     meta: {
+      ...getBettingStrategyMeta(),
       baseStake: config.parlayBetUsd,
-      minLegOdds: config.minParlayLegOdds,
+      minLegOdds: config.parlayAnchorMinOdds,
+      maxLegOdds: config.parlayAnchorMaxOdds,
       maxLegs: config.maxParlayLegs,
-      minLegEv: config.parlayMinLegEv,
-      strategy: '均注正 EV · 每腿須正優勢 · 長期盈利導向',
+      minLegProb: config.parlayAnchorMinProb,
+      strategy: '當日全場大串 · 錨腿優先 · $1 六合彩型',
+      parlayMarkets: ['h2h', 'spreads'],
+      lotteryStyle: true,
     },
   });
 });

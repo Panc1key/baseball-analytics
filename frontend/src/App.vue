@@ -3,7 +3,7 @@
     <header class="header">
       <div>
         <h1>棒球初盤分析</h1>
-        <p class="subtitle">MLB / NPB / KBO · 評分制推薦 · 請至外部平台下注</p>
+        <p class="subtitle">MLB / NPB / KBO · 均注高賠 EV · 串關低水錨腿</p>
         <div v-if="hasApiKey && lastSyncAt" class="status-line">
           <span>{{ syncStatusText }}</span>
           <span v-if="oddsQuota != null" class="quota">API 剩餘 {{ oddsQuota }} 次</span>
@@ -30,40 +30,59 @@
     <StatsCards :items="statItems" />
 
     <el-tabs v-model="activeTab">
-      <el-tab-pane label="單場推薦" name="singles">
+      <el-tab-pane label="均注精選" name="flat">
+        <div v-if="bettingMeta?.flatBet" class="strategy-banner flat">
+          <strong>{{ bettingMeta.flatBet.label }}</strong>
+          <span>賠率 ≥ {{ bettingMeta.flatBet.minOdds }}</span>
+          <span>勝率 ≥ {{ (bettingMeta.flatBet.minProb * 100).toFixed(0) }}%</span>
+          <span>EV ≥ {{ (bettingMeta.flatBet.minEv * 100).toFixed(0) }}%</span>
+          <span>建議每注 ${{ bettingMeta.flatBet.stake }}</span>
+          <span class="desc">{{ bettingMeta.flatBet.description }}</span>
+        </div>
         <div class="filter-bar">
-          <el-radio-group v-model="tierFilter" size="small" @change="loadRecommendations">
-            <el-radio-button label="">全部等級</el-radio-button>
-            <el-radio-button label="primary">主推</el-radio-button>
-            <el-radio-button label="watch">觀察</el-radio-button>
-          </el-radio-group>
-          <el-radio-group v-model="leagueFilter" size="small" @change="loadRecommendations">
+          <el-radio-group v-model="leagueFilter" size="small" @change="loadFlat">
             <el-radio-button label="">全部聯盟</el-radio-button>
             <el-radio-button label="MLB">MLB</el-radio-button>
             <el-radio-button label="NPB">NPB</el-radio-button>
             <el-radio-button label="KBO">KBO</el-radio-button>
           </el-radio-group>
-          <el-radio-group v-model="marketFilter" size="small" @change="loadRecommendations">
-            <el-radio-button label="">全部盤口</el-radio-button>
-            <el-radio-button label="h2h">獨贏</el-radio-button>
-            <el-radio-button label="spreads">讓分</el-radio-button>
-            <el-radio-button label="totals">大小</el-radio-button>
-            <el-radio-button label="props">球員</el-radio-button>
-          </el-radio-group>
         </div>
-        <p class="hint">
-          主推 ≥65 分 · 觀察 50–64 分 · 依勝率與概率優勢評分 · 禁止陰陽盤 · MLB 含球員盤口
-        </p>
         <RecommendationsTable
-          :recommendations="recommendations"
+          :recommendations="flatRecs"
           :loading="loading"
-          :empty-text="recEmptyText"
+          :empty-text="flatEmptyText"
+          sort-hint="依 EV 排序 · 高賠實現價值"
         />
       </el-tab-pane>
 
-      <el-tab-pane label="串關推薦" name="parlays">
+      <el-tab-pane label="串關錨腿" name="anchors">
+        <div v-if="bettingMeta?.parlayAnchor" class="strategy-banner anchor">
+          <strong>{{ bettingMeta.parlayAnchor.label }}</strong>
+          <span>賠率 {{ bettingMeta.parlayAnchor.minOdds }}～{{ bettingMeta.parlayAnchor.maxOdds }}</span>
+          <span>勝率 ≥ {{ (bettingMeta.parlayAnchor.minProb * 100).toFixed(0) }}%</span>
+          <span>建議串關每注 ${{ bettingMeta.parlayAnchor.stake }}</span>
+          <span class="desc">{{ bettingMeta.parlayAnchor.description }}</span>
+        </div>
+        <div class="filter-bar">
+          <el-radio-group v-model="leagueFilter" size="small" @change="loadAnchors">
+            <el-radio-button label="">全部聯盟</el-radio-button>
+            <el-radio-button label="MLB">MLB</el-radio-button>
+            <el-radio-button label="NPB">NPB</el-radio-button>
+            <el-radio-button label="KBO">KBO</el-radio-button>
+          </el-radio-group>
+        </div>
+        <RecommendationsTable
+          :recommendations="anchorRecs"
+          :loading="loading"
+          :empty-text="anchorEmptyText"
+          sort-hint="依模型勝率排序 · 低水穩腿"
+          highlight-prob
+        />
+      </el-tab-pane>
+
+      <el-tab-pane label="串關組合" name="parlays">
         <p class="hint parlay-hint">
-          均注正 EV · 每注 $1 · 每腿須正優勢 · 長期盈利導向（長串為彩券型，不要求全中）
+          $1 六合彩型大串：盡量涵蓋當日全部場次（錨腿優先）· 不要求全中 · 均注請用「均注精選」
         </p>
         <ParlayList
           :parlays="parlays"
@@ -102,30 +121,31 @@ import StatsCards from './components/StatsCards.vue';
 import RecommendationsTable from './components/RecommendationsTable.vue';
 import ParlayList from './components/ParlayList.vue';
 import { refreshData, getRecommendations, getParlays, getStatus, getMarkets } from './api/index.js';
-import { isPropMarket } from './utils/market.js';
 
-const activeTab = ref('singles');
+const activeTab = ref('flat');
 const loading = ref(false);
 const refreshing = ref(false);
-const recommendations = ref([]);
+const flatRecs = ref([]);
+const anchorRecs = ref([]);
 const parlays = ref([]);
 const parlayMeta = ref(null);
+const bettingMeta = ref(null);
 const marketsInfo = ref(null);
 const hasApiKey = ref(false);
-const minEv = ref(0.03);
 const leagueFilter = ref('');
-const marketFilter = ref('');
-const tierFilter = ref('');
 const lastSyncAt = ref(null);
 const oddsQuota = ref(null);
 
 const statItems = computed(() => [
-  { label: '推薦總數', value: recommendations.value.length },
-  { label: '主推', value: recommendations.value.filter((r) => r.tier === 'primary').length, class: 'positive' },
-  { label: '觀察', value: recommendations.value.filter((r) => r.tier === 'watch').length },
-  { label: '獨贏', value: recommendations.value.filter((r) => r.market === 'h2h').length },
-  { label: '讓分', value: recommendations.value.filter((r) => r.market === 'spreads').length },
-  { label: '大小/球員', value: recommendations.value.filter((r) => r.market === 'totals' || isPropMarket(r.market)).length },
+  { label: '均注精選', value: flatRecs.value.length, class: 'positive' },
+  { label: '串關錨腿', value: anchorRecs.value.length },
+  { label: '串關組合', value: parlays.value.length },
+  {
+    label: '錨腿均勝率',
+    value: anchorRecs.value.length
+      ? `${(anchorRecs.value.reduce((a, r) => a + r.model_prob, 0) / anchorRecs.value.length * 100).toFixed(1)}%`
+      : '—',
+  },
 ]);
 
 const syncStatusText = computed(() => {
@@ -139,67 +159,71 @@ const syncStatusText = computed(() => {
   return `上次同步：${lastSyncAt.value.slice(0, 16).replace('T', ' ')}`;
 });
 
-const recEmptyText = computed(() => {
-  if (!hasApiKey.value) return '請先設定 API Key（見上方說明）';
-  if (!lastSyncAt.value) return '尚無推薦，請點擊右上角「同步並分析」';
-  return '本次同步無達觀察門檻(50分)的推薦，可稍後再同步';
+const flatEmptyText = computed(() => {
+  if (!hasApiKey.value) return '請先設定 API Key';
+  if (!lastSyncAt.value) return '請點擊「同步並分析」';
+  return '暫無符合均注條件的高賠推薦（賠率≥1.80、正EV）';
+});
+
+const anchorEmptyText = computed(() => {
+  if (!hasApiKey.value) return '請先設定 API Key';
+  if (!lastSyncAt.value) return '請點擊「同步並分析」';
+  return '暫無串關錨腿（需低水 1.55～1.79 且勝率≥58%）';
 });
 
 const parlayEmptyText = computed(() => {
   if (!hasApiKey.value) return '請先設定 API Key';
   if (!lastSyncAt.value) return '請先點擊「同步並分析」';
-  const primary = recommendations.value.filter((r) => r.tier === 'primary').length;
-  if (primary < 2) return `目前僅 ${primary} 條主推，需至少 2 條不同場次才可組串關`;
-  return '暫無合適串關組合，請稍後再同步';
+  if (anchorRecs.value.length < 2) return `目前僅 ${anchorRecs.value.length} 條錨腿，需至少 2 條不同場次`;
+  return '暫無錨腿串關組合';
 });
 
-function buildQueryParams() {
-  const params = {
-    league: leagueFilter.value || undefined,
-    minEv: minEv.value,
-    tier: tierFilter.value || undefined,
-  };
-  if (marketFilter.value === 'props') {
-    params.marketGroup = 'props';
-  } else if (marketFilter.value) {
-    params.market = marketFilter.value;
-  }
-  return params;
+function leagueParams() {
+  return { league: leagueFilter.value || undefined };
 }
 
 function applyStatus(cfg) {
   hasApiKey.value = cfg?.hasApiKey;
-  minEv.value = cfg?.minEvThreshold || 0.03;
   lastSyncAt.value = cfg?.lastSyncAt || null;
   oddsQuota.value = cfg?.oddsQuotaRemaining ?? null;
+}
+
+async function loadFlat() {
+  const res = await getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() });
+  flatRecs.value = res.data || [];
+  if (res.meta) bettingMeta.value = res.meta;
+}
+
+async function loadAnchors() {
+  const res = await getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() });
+  anchorRecs.value = res.data || [];
+  if (res.meta) bettingMeta.value = res.meta;
 }
 
 async function loadAll() {
   loading.value = true;
   try {
-    const [recRes, parRes, statusRes, marketsRes] = await Promise.all([
-      getRecommendations(buildQueryParams()),
+    const [flatRes, anchorRes, parRes, statusRes, marketsRes] = await Promise.all([
+      getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() }),
+      getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() }),
       getParlays(40),
       getStatus(),
       getMarkets(),
     ]);
-    recommendations.value = recRes.data || [];
+    flatRecs.value = flatRes.data || [];
+    anchorRecs.value = anchorRes.data || [];
+    bettingMeta.value = flatRes.meta || anchorRes.meta || null;
     parlays.value = parRes.data || [];
     parlayMeta.value = parRes.meta || null;
     marketsInfo.value = marketsRes.data || null;
     applyStatus(statusRes.data);
   } catch (err) {
-    ElMessage.error(err.response?.data?.error || err.message || '載入失敗');
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function loadRecommendations() {
-  loading.value = true;
-  try {
-    const res = await getRecommendations(buildQueryParams());
-    recommendations.value = res.data || [];
+    const msg = err.response?.data?.error || err.message || '載入失敗';
+    if (!err.response) {
+      ElMessage.error('無法連接後端（請確認 backend 已啟動在 port 3101）');
+    } else {
+      ElMessage.error(msg);
+    }
   } finally {
     loading.value = false;
   }
@@ -235,6 +259,19 @@ body { margin: 0; background: #f5f7fa; font-family: -apple-system, BlinkMacSyste
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
 .hint { font-size: 13px; color: #909399; margin: 0 0 12px; }
 .parlay-hint { margin-bottom: 12px; }
+.strategy-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.strategy-banner.flat { background: #ecf5ff; border: 1px solid #d9ecff; color: #303133; }
+.strategy-banner.anchor { background: #f0f9eb; border: 1px solid #e1f3d8; color: #303133; }
+.strategy-banner .desc { color: #909399; flex-basis: 100%; margin-top: 2px; }
 .markets-panel { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .market-card :deep(.el-card__header) { padding: 12px 16px; }
 .market-section-title { font-size: 13px; color: #606266; margin: 12px 0 8px; }

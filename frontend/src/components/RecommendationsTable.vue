@@ -1,5 +1,7 @@
 <template>
-  <el-table :data="recommendations" stripe v-loading="loading" :empty-text="emptyText">
+  <div>
+    <p v-if="sortHint" class="sort-hint">{{ sortHint }}</p>
+    <el-table :data="recommendations" stripe v-loading="loading" :empty-text="emptyText">
     <el-table-column label="等級" width="72" fixed="left">
       <template #default="{ row }">
         <el-tag :type="row.tier === 'primary' ? 'success' : 'warning'" size="small">
@@ -27,7 +29,7 @@
     </el-table-column>
     <el-table-column label="勝率" width="72">
       <template #default="{ row }">
-        <strong>{{ (row.model_prob * 100).toFixed(1) }}%</strong>
+        <strong :class="highlightProb ? 'prob-em' : ''">{{ (row.model_prob * 100).toFixed(1) }}%</strong>
       </template>
     </el-table-column>
     <el-table-column label="優勢" width="72">
@@ -52,6 +54,7 @@
       <template #default="{ row }">{{ translateReasoning(row.reasoning) }}</template>
     </el-table-column>
   </el-table>
+  </div>
 </template>
 
 <script setup>
@@ -62,6 +65,8 @@ defineProps({
   recommendations: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   emptyText: { type: String, default: '尚無推薦' },
+  sortHint: { type: String, default: '' },
+  highlightProb: { type: Boolean, default: false },
 });
 
 function formatTime(iso) {
@@ -77,6 +82,8 @@ function evTag(ev) {
 </script>
 
 <style scoped>
+.sort-hint { font-size: 12px; color: #909399; margin: 0 0 8px; }
 .sub { font-size: 12px; color: #909399; }
 .pos { color: #67c23a; font-weight: 600; }
+.prob-em { color: #67c23a; }
 </style>

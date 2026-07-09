@@ -4,11 +4,13 @@ import {
   decimalToImpliedProb,
   decimalToNetOdds,
   estimateCoverProb,
-  estimateProjectedTotal,
-  probTotalOver,
 } from '../utils/odds.js';
 import { enrichCandidate } from './PickScorer.js';
 import { pickPropCandidates } from './PlayerPropAnalyzer.js';
+import {
+  computeTotalsProjection,
+  buildTotalCandidates,
+} from './TotalsModel.js';
 
 export function formatSpreadPick(team, point) {
   return `${team} ${point > 0 ? '+' : ''}${point}`;
@@ -66,7 +68,6 @@ function pickH2hCandidate(game, markets, analysis) {
 
   if (!options.length) return null;
 
-  // 以 EV 排序，選正 EV 且達標的一側（可選冷門）
   options.sort((a, b) => b.ev - a.ev || b.edgePct - a.edgePct);
 
   for (const opt of options) {
@@ -79,7 +80,6 @@ function pickH2hCandidate(game, markets, analysis) {
     if (enriched.ev < config.minEvThreshold) continue;
     if (enriched.edgeProb <= 0) continue;
 
-    // 模型與推薦方向一致：推薦隊伍須為模型較看好的一方
     const modelFavorsHome = analysis.homeWinProb >= analysis.awayWinProb;
     const pickIsHome = opt.pick === game.home_team;
     if (modelFavorsHome !== pickIsHome) continue;
@@ -159,42 +159,50 @@ function pickSpreadCandidate(game, markets, analysis) {
   return lineCandidates[0];
 }
 
-function pickTotalCandidate(game, markets, analysis) {
-  const projectedTotal = estimateProjectedTotal(
-    game.league,
-    analysis.homePitcherEra,
-    analysis.awayPitcherEra
-  );
-
-  const options = [];
-  for (const [, total] of Object.entries(markets.totals)) {
-    const isOver = total.name === 'Over';
-    const modelProb = isOver
-      ? probTotalOver(projectedTotal, total.point)
-      : 1 - probTotalOver(projectedTotal, total.point);
-    const ev = calcEV(modelProb, decimalToNetOdds(total.price));
-
-    options.push({
-      market: 'totals',
-      marketGroup: 'main',
-      pick: formatTotalPick(total.name, total.point),
-      line: total.point,
-      odds: total,
-      oddsDecimal: total.price,
-      modelProb,
-      ev,
-      projectedTotal,
-      structuralOk: true,
+function pickTotalCandidate(game, markets, analysis, bookmakers) {
+  const projection = analysis.totalsProjection
+    ?? computeTotalsProjection({
+      league: game.league,
+      homeMlb: analysis.homeMlb,
+      awayMlb: analysis.awayMlb,
+      homePitcherStats: analysis.homePitcherStats,
+      awayPitcherStats: analysis.awayPitcherStats,
+      venueName: analysis.venueName,
+      bookmakers: bookmakers || [],
     });
-  }
 
-  const scored = options
-    .map((o) => enrichCandidate(o, analysis, game.league, 'totals'))
+  const raw = buildTotalCandidates(markets, projection, game.league)
+    .filter((c) => c.structuralOk)
+    .filter((c) => c.ev >= (config.totalsMinEv ?? config.minEvThreshold));
+
+  if (!raw.length) return null;
+
+  const scored = raw
+    .map((o) => {
+      const enriched = enrichCandidate(
+        { ...o, confidence: analysis.confidence },
+        { ...analysis, factors: [...(analysis.factors || []), ...(projection.factors || [])] },
+        game.league,
+        'totals'
+      );
+      // 大小盤數據品質較低時降低評分，讓獨贏/讓分有機會成為主推
+      if (projection.dataQuality < 0.7) {
+        enriched.score = Math.max(0, enriched.score - (config.totalsPrimaryScorePenalty || 8));
+        if (enriched.score < config.recommendWatchScore) enriched.tier = null;
+      }
+      return enriched;
+    })
     .filter((o) => o.tier);
 
   if (!scored.length) return null;
-  scored.sort((a, b) => b.score - a.score || b.modelProb - a.modelProb);
+  scored.sort((a, b) => b.score - a.score || b.ev - a.ev);
   return scored[0];
+}
+
+/** 單場主推：主盤中評分最高者（大小盤不再默認霸佔） */
+export function pickPrimaryRecommendation(candidates) {
+  if (!candidates.length) return null;
+  return [...candidates].sort((a, b) => b.score - a.score || b.ev - a.ev)[0];
 }
 
 /**
@@ -203,40 +211,45 @@ function pickTotalCandidate(game, markets, analysis) {
 export function pickGameRecommendations(game, markets, analysis, baseReasoning, propsContext = {}) {
   const results = [];
   const usedMarkets = new Set();
+  const bookmakers = propsContext.bookmakers || [];
 
   const h2h = pickH2hCandidate(game, markets, analysis);
-  if (h2h) {
-    results.push({
-      ...h2h,
-      reasoning: `${baseReasoning} | 獨贏`,
-      bookmaker: h2h.odds.bookmaker,
-    });
-    usedMarkets.add('h2h');
-  }
-
   const spread = pickSpreadCandidate(game, markets, analysis);
-  if (spread) {
-    results.push({
-      ...spread,
-      reasoning: `${baseReasoning} | 讓分 ${spread.line}`,
-      bookmaker: spread.odds.bookmaker,
-    });
-    usedMarkets.add('spreads');
+  const total = pickTotalCandidate(game, markets, analysis, bookmakers);
+
+  const mainCandidates = [h2h, spread, total].filter(Boolean);
+  const primary = pickPrimaryRecommendation(mainCandidates);
+
+  const ordered = [];
+  if (primary) ordered.push(primary);
+  for (const c of mainCandidates) {
+    if (c && c !== primary) ordered.push(c);
   }
 
-  const total = pickTotalCandidate(game, markets, analysis);
-  if (total) {
+  for (const pick of ordered) {
+    if (usedMarkets.has(pick.market)) continue;
+    const reasoningParts = [baseReasoning];
+    if (pick.market === 'h2h') reasoningParts.push('獨贏');
+    else if (pick.market === 'spreads') reasoningParts.push(`讓分 ${pick.line}`);
+    else if (pick.market === 'totals') {
+      reasoningParts.push(
+        `預估總分 ${pick.projectedTotal?.toFixed(1) ?? '?'}` +
+          `（市場${pick.marketLine ?? '?'}）| 盤口 ${pick.line}`
+      );
+    }
+
     results.push({
-      ...total,
-      reasoning: `${baseReasoning} | 預估總分 ${total.projectedTotal?.toFixed(1)} | 盤口 ${total.line}`,
-      bookmaker: total.odds.bookmaker,
+      ...pick,
+      isPrimary: pick === primary,
+      reasoning: reasoningParts.join(' | '),
+      bookmaker: pick.odds.bookmaker,
     });
-    usedMarkets.add('totals');
+    usedMarkets.add(pick.market);
   }
 
-  if (propsContext.propsMap && Object.keys(propsContext.propsMap).length) {
+  if (config.enablePlayerProps && propsContext.propsMap && Object.keys(propsContext.propsMap).length) {
     const props = pickPropCandidates(game, propsContext.propsMap, analysis, propsContext);
-    for (const p of props.slice(0, 4)) {
+    for (const p of props.slice(0, 2)) {
       if (usedMarkets.has(p.market)) continue;
       results.push(p);
       usedMarkets.add(p.market);
@@ -244,6 +257,6 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
   }
 
   return results
-    .sort((a, b) => b.score - a.score || b.modelProb - a.modelProb)
+    .sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0) || b.score - a.score)
     .slice(0, config.maxPicksPerGame);
 }

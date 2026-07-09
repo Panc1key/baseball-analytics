@@ -7,6 +7,7 @@ import {
   getVenueName,
 } from './MlbStatsService.js';
 import { computeH2hProbabilities } from './H2hModel.js';
+import { computeTotalsProjection } from './TotalsModel.js';
 
 /**
  * 從比分歷史更新 NPB/KBO 隊伍近期狀態 (無免費統計 API 時的 fallback)
@@ -143,6 +144,16 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     venueName: getVenueName(mlbScheduleGame),
   });
 
+  const totalsProjection = computeTotalsProjection({
+    league,
+    homeMlb,
+    awayMlb,
+    homePitcherStats,
+    awayPitcherStats,
+    venueName: getVenueName(mlbScheduleGame),
+    bookmakers,
+  });
+
   return {
     homeTeam,
     awayTeam,
@@ -151,11 +162,18 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     confidence: h2h.confidence,
     homeL10,
     awayL10,
-    factors: h2h.factors,
+    factors: [...h2h.factors, ...totalsProjection.factors],
     marketHomeProb: h2h.marketHomeProb,
     marketAwayProb: h2h.marketAwayProb,
     homePitcherEra,
     awayPitcherEra,
     h2hComponents: h2h.components,
+    homeMlb,
+    awayMlb,
+    homePitcherStats,
+    awayPitcherStats,
+    venueName: getVenueName(mlbScheduleGame),
+    totalsProjection,
+    projectedTotal: totalsProjection.finalTotal,
   };
 }
