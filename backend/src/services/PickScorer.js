@@ -19,6 +19,7 @@ export function oddsBandFit(odds, band) {
 }
 
 export function calcDataQuality(analysis, league) {
+  if (analysis?.dataQuality != null) return analysis.dataQuality;
   let q = 0.25;
   if (league === 'MLB') {
     if (analysis.homePitcherEra != null && analysis.awayPitcherEra != null) q += 0.25;

@@ -1,0 +1,36 @@
+{
+  "MLB": {
+    "name": "MLB 美職",
+    "timezone": "America/New_York",
+    "regular": { "start": "03-25", "end": "09-27" },
+    "postseason": { "start": "09-29", "end": "10-31" },
+    "notes": "2026 例行賽 3/25 開幕～9/27 收官"
+  },
+  "NPB": {
+    "name": "NPB 日職",
+    "timezone": "Asia/Tokyo",
+    "regular": { "start": "03-28", "end": "10-31" }
+  },
+  "KBO": {
+    "name": "KBO 韓職",
+    "timezone": "Asia/Seoul",
+    "regular": { "start": "04-01", "end": "10-31" }
+  },
+  "NBA": {
+    "name": "NBA",
+    "timezone": "America/New_York",
+    "regular": { "start": "10-22", "end": "06-20" },
+    "notes": "含季後賽，休賽 7～9 月"
+  },
+  "NFL": {
+    "name": "NFL",
+    "timezone": "America/New_York",
+    "regular": { "start": "09-04", "end": "01-15" },
+    "notes": "跨年賽季，以季後賽結束為準"
+  },
+  "SOCCER_EPL": {
+    "name": "英超",
+    "timezone": "Europe/London",
+    "regular": { "start": "08-15", "end": "05-25" }
+  }
+}

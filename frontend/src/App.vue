@@ -3,7 +3,7 @@
     <header class="header">
       <div>
         <h1>棒球初盤分析</h1>
-        <p class="subtitle">MLB / NPB / KBO · 均注高賠 EV · 串關低水錨腿</p>
+        <p class="subtitle">MLB / NPB / KBO · 動態建議投注 · 串關低水錨腿</p>
         <div v-if="hasApiKey && lastSyncAt" class="status-line">
           <span>{{ syncStatusText }}</span>
           <span v-if="oddsQuota != null" class="quota">API 剩餘 {{ oddsQuota }} 次</span>
@@ -33,10 +33,11 @@
       <el-tab-pane label="均注精選" name="flat">
         <div v-if="bettingMeta?.flatBet" class="strategy-banner flat">
           <strong>{{ bettingMeta.flatBet.label }}</strong>
+          <span>基準均注 {{ bettingMeta.flatBet.baseUnit }}{{ bettingMeta.flatBet.currency || '元' }}</span>
+          <span>依 EV / 優勢動態建議額</span>
           <span>賠率 ≥ {{ bettingMeta.flatBet.minOdds }}</span>
           <span>勝率 ≥ {{ (bettingMeta.flatBet.minProb * 100).toFixed(0) }}%</span>
-          <span>EV ≥ {{ (bettingMeta.flatBet.minEv * 100).toFixed(0) }}%</span>
-          <span>建議每注 ${{ bettingMeta.flatBet.stake }}</span>
+          <span>同一場可主推+次推（不同盤口）</span>
           <span class="desc">{{ bettingMeta.flatBet.description }}</span>
         </div>
         <div class="filter-bar">
@@ -51,7 +52,8 @@
           :recommendations="flatRecs"
           :loading="loading"
           :empty-text="flatEmptyText"
-          sort-hint="依 EV 排序 · 高賠實現價值"
+          :currency="bettingMeta?.flatBet?.currency || '元'"
+          sort-hint="依開賽時間 · 同場主推→次推 · 建議投注額依 EV 動態調整"
         />
       </el-tab-pane>
 
@@ -60,7 +62,7 @@
           <strong>{{ bettingMeta.parlayAnchor.label }}</strong>
           <span>賠率 {{ bettingMeta.parlayAnchor.minOdds }}～{{ bettingMeta.parlayAnchor.maxOdds }}</span>
           <span>勝率 ≥ {{ (bettingMeta.parlayAnchor.minProb * 100).toFixed(0) }}%</span>
-          <span>建議串關每注 ${{ bettingMeta.parlayAnchor.stake }}</span>
+          <span>建議額約基準均注 × {{ ((bettingMeta.parlayAnchor.stakeRatio || 0.35) * 100).toFixed(0) }}%</span>
           <span class="desc">{{ bettingMeta.parlayAnchor.description }}</span>
         </div>
         <div class="filter-bar">
@@ -75,7 +77,8 @@
           :recommendations="anchorRecs"
           :loading="loading"
           :empty-text="anchorEmptyText"
-          sort-hint="依模型勝率排序 · 低水穩腿"
+          :currency="bettingMeta?.parlayAnchor?.currency || '元'"
+          sort-hint="依模型勝率排序 · 低水穩腿 · 建議額為縮倉比例"
           highlight-prob
         />
       </el-tab-pane>
@@ -189,7 +192,7 @@ function applyStatus(cfg) {
 }
 
 async function loadFlat() {
-  const res = await getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() });
+  const res = await getRecommendations({ gamePicks: true, ...leagueParams() });
   flatRecs.value = res.data || [];
   if (res.meta) bettingMeta.value = res.meta;
 }
@@ -204,7 +207,7 @@ async function loadAll() {
   loading.value = true;
   try {
     const [flatRes, anchorRes, parRes, statusRes, marketsRes] = await Promise.all([
-      getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() }),
+      getRecommendations({ gamePicks: true, ...leagueParams() }),
       getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() }),
       getParlays(40),
       getStatus(),

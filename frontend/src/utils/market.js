@@ -15,7 +15,14 @@ export function marketLabel(market) {
 }
 
 export function tierLabel(tier) {
-  return { primary: '主推', watch: '觀察' }[tier] || tier;
+  return { primary: '精選', watch: '觀察' }[tier] || tier;
+}
+
+export function rankLabel(rank) {
+  if (rank === 1) return '主推';
+  if (rank === 2) return '次推';
+  if (rank) return `第${rank}推`;
+  return '';
 }
 
 export function formatGameTime(iso) {

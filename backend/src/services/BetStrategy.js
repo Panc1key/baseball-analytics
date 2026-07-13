@@ -1,15 +1,20 @@
 /**
  * 雙軌投注策略分類
- * - flat_bet：均注精選（高賠 + 正 EV，避開低水臭水）
- * - parlay_anchor：串關錨腿（低水 + 高勝率，用於組串抬命中）
+ * - flat_bet：均注精選（同一場可多盤口，依序位與門檻）
+ * - parlay_anchor：串關錨腿（低水 + 高勝率）
  */
 
 import { config } from '../config.js';
 
 const MAIN_MARKETS = new Set(['h2h', 'spreads', 'totals']);
+const PROP_MARKET_PREFIX = /^(batter_|pitcher_)/;
 
 export function isMainMarket(market) {
   return MAIN_MARKETS.has(market);
+}
+
+export function isPropMarket(market) {
+  return PROP_MARKET_PREFIX.test(market || '');
 }
 
 function pickNum(rec, ...keys) {
@@ -20,7 +25,6 @@ function pickNum(rec, ...keys) {
   return null;
 }
 
-/** 均注 / 錨腿共用基礎門檻 */
 function passesBaseGates(rec) {
   const tier = rec.tier;
   const market = rec.market;
@@ -29,41 +33,52 @@ function passesBaseGates(rec) {
   const modelProb = pickNum(rec, 'model_prob', 'modelProb');
 
   if (!['primary', 'watch'].includes(tier)) return false;
-  if (!isMainMarket(market)) return false;
+  if (!isMainMarket(market) && !isPropMarket(market)) return false;
   if (ev == null || ev < config.minEvThreshold) return false;
   if (edge == null || edge <= 0) return false;
   if (modelProb == null || modelProb <= 0) return false;
   return true;
 }
 
-/** 大小盤均注/錨腿：僅 MLB 且數據完整度足夠 */
 function totalsAllowed(rec) {
-  const market = rec.market;
-  if (market !== 'totals') return true;
-  const league = rec.league;
+  if (rec.market !== 'totals') return true;
   const dq = pickNum(rec, 'data_quality', 'dataQuality') ?? 0;
-  return league === 'MLB' && dq >= (config.flatBetMinDataQuality ?? 0.65);
+  return rec.league === 'MLB' && dq >= (config.flatBetMinDataQuality ?? 0.65);
+}
+
+function minEdgeForMarket(market) {
+  if (market === 'totals') return config.flatBetMinEdgePctTotals ?? 4;
+  if (isPropMarket(market)) return config.flatBetMinEdgePctProps ?? 4;
+  return config.flatBetMinEdgePct ?? 2.5;
 }
 
 /**
- * 均注精選：賠率 ≥ 門檻、用高賠實現 EV
+ * 均注精選：依盤口類型差異化門檻；次推（pickRank≥2）允許 watch 級
  */
-export function qualifiesFlatBet(rec) {
+export function qualifiesFlatBet(rec, options = {}) {
   if (!passesBaseGates(rec)) return false;
-  if (!totalsAllowed(rec)) return false;
 
+  const market = rec.market;
+  const tier = rec.tier;
+  const pickRank = options.pickRank ?? pickNum(rec, 'pick_rank', 'pickRank') ?? 1;
   const odds = pickNum(rec, 'odds_decimal', 'oddsDecimal');
   const modelProb = pickNum(rec, 'model_prob', 'modelProb');
+  const edge = pickNum(rec, 'edge_prob', 'edgeProb');
 
+  if (config.flatBetPrimaryOnly) {
+    if (pickRank === 1 && tier !== 'primary') return false;
+    if (pickRank > 1 && tier === 'watch' && edge < minEdgeForMarket(market)) return false;
+  }
   if (odds == null || odds < config.flatBetMinOdds) return false;
   if (modelProb < config.flatBetMinProb) return false;
+  if (edge < minEdgeForMarket(market)) return false;
 
-  return true;
+  if (market === 'totals') return totalsAllowed(rec);
+  if (isPropMarket(market)) return config.enablePlayerProps;
+
+  return market === 'h2h' || market === 'spreads';
 }
 
-/**
- * 串關錨腿：低水區間 + 高模型勝率（獨贏/讓分優先）
- */
 export function qualifiesParlayAnchor(rec) {
   if (!passesBaseGates(rec)) return false;
 
@@ -75,7 +90,6 @@ export function qualifiesParlayAnchor(rec) {
   if (odds < config.parlayAnchorMinOdds || odds > config.parlayAnchorMaxOdds) return false;
   if (modelProb < config.parlayAnchorMinProb) return false;
 
-  // 錨腿以獨贏/讓分為主；大小僅 MLB 高完整度
   if (market === 'totals') {
     return totalsAllowed(rec) && modelProb >= (config.parlayAnchorMinProb + 0.02);
   }
@@ -83,15 +97,27 @@ export function qualifiesParlayAnchor(rec) {
   return market === 'h2h' || market === 'spreads';
 }
 
-/** 分類：flat_bet 優先於 parlay_anchor（賠率區間互斥） */
-export function classifyBetStrategy(rec) {
-  if (qualifiesFlatBet(rec)) return 'flat_bet';
+export function assignBetStrategies(picks, context = {}) {
+  const pool = (picks || []).filter((p) => p.tier);
+  return pool.map((p) => ({
+    ...p,
+    bet_strategy: classifyBetStrategy(p, context),
+  }));
+}
+
+export function classifyBetStrategy(rec, context = {}) {
+  const pickRank = pickNum(rec, 'pick_rank', 'pickRank') ?? 99;
+  const maxFlat = config.maxFlatBetsPerGame ?? 2;
+
+  if (pickRank <= maxFlat && qualifiesFlatBet(rec, { pickRank })) {
+    return 'flat_bet';
+  }
   if (qualifiesParlayAnchor(rec)) return 'parlay_anchor';
   return null;
 }
 
-export function enrichWithBetStrategy(rec) {
-  const betStrategy = rec.bet_strategy || classifyBetStrategy(rec);
+export function enrichWithBetStrategy(rec, context = {}) {
+  const betStrategy = rec.bet_strategy || classifyBetStrategy(rec, context);
   return { ...rec, bet_strategy: betStrategy };
 }
 

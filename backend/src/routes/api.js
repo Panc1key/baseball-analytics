@@ -75,7 +75,8 @@ router.get('/recommendations', (req, res) => {
     marketGroup: req.query.marketGroup || undefined,
     tier: req.query.tier || undefined,
     betStrategy: req.query.betStrategy || undefined,
-    limit: parseInt(req.query.limit || '80', 10),
+    gamePicks: req.query.gamePicks === 'true' || req.query.gamePicks === '1',
+    limit: parseInt(req.query.limit || '120', 10),
   });
   res.json({
     success: true,

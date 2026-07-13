@@ -11,6 +11,10 @@ import {
   computeTotalsProjection,
   buildTotalCandidates,
 } from './TotalsModel.js';
+import { computeActionableScore } from './EdgeSignals.js';
+import { assignBetStrategies } from './BetStrategy.js';
+import { enrichWithSuggestedStake } from './StakeSizer.js';
+import { qualifiesH2hSide } from './MatchupCore.js';
 
 export function formatSpreadPick(team, point) {
   return `${team} ${point > 0 ? '+' : ''}${point}`;
@@ -21,36 +25,58 @@ export function formatTotalPick(name, point) {
   return `${label} ${point}`;
 }
 
-/** 讓分方向與模型一致，禁止雙方皆為讓分方 */
+export function rankLabel(rank) {
+  if (rank === 1) return '主推';
+  if (rank === 2) return '次推';
+  return `第${rank}推`;
+}
+
+/** 讓分方向：與情境一致，或市場熱門陷阱時允許受讓方 */
 export function isSpreadAlignedWithModel(spread, game, analysis) {
   const isHome = spread.name === game.home_team;
   const teamWinProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
   const oppWinProb = isHome ? analysis.awayWinProb : analysis.homeWinProb;
+  const side = isHome ? 'home' : 'away';
+  const matchup = analysis.matchupCore;
+
+  if (spread.point > 0) {
+    if (matchup?.edges?.favoriteTrap && matchup.edges.bestSide === side) return true;
+    if (teamWinProb >= 0.4) return true;
+    const edge = matchup?.edges?.[side];
+    if (edge?.ev >= config.minEvThreshold && edge?.edgePct >= config.h2hMinEdgePct) return true;
+    return teamWinProb >= 0.38;
+  }
 
   if (spread.point < 0) {
     return teamWinProb > oppWinProb && teamWinProb >= 0.51;
-  }
-  if (spread.point > 0) {
-    return teamWinProb >= 0.38;
   }
   return false;
 }
 
 function pickH2hCandidate(game, markets, analysis) {
   const options = [];
+  const matchup = analysis.matchupCore;
 
-  for (const [team, odds] of [
-    [game.home_team, markets.h2h[game.home_team]],
-    [game.away_team, markets.h2h[game.away_team]],
+  for (const [team, side] of [
+    [game.home_team, 'home'],
+    [game.away_team, 'away'],
   ]) {
+    const odds = markets.h2h[team];
     if (!odds?.price) continue;
 
-    const isHome = team === game.home_team;
-    const modelProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
+    const modelProb = side === 'home' ? analysis.homeWinProb : analysis.awayWinProb;
     const impliedProb = decimalToImpliedProb(odds.price);
     const edgePct = (modelProb - impliedProb) * 100;
 
-    options.push({
+    if (matchup) {
+      const gate = qualifiesH2hSide(matchup, side);
+      if (!gate.ok) continue;
+    } else {
+      if (edgePct < config.h2hMinEdgePct) continue;
+      if (analysis.confidence < config.h2hMinConfidence) continue;
+    }
+
+    const opt = {
       market: 'h2h',
       marketGroup: 'main',
       pick: team,
@@ -63,31 +89,19 @@ function pickH2hCandidate(game, markets, analysis) {
       structuralOk: true,
       edgePct,
       isFavorite: modelProb >= 0.5,
-    });
-  }
-
-  if (!options.length) return null;
-
-  options.sort((a, b) => b.ev - a.ev || b.edgePct - a.edgePct);
-
-  for (const opt of options) {
-    if (opt.ev < config.minEvThreshold) continue;
-    if (opt.edgePct < config.h2hMinEdgePct) continue;
-    if (analysis.confidence < config.h2hMinConfidence) continue;
+      dataQuality: analysis.dataQuality,
+    };
 
     const enriched = enrichCandidate(opt, analysis, game.league, 'h2h');
     if (!enriched.tier) continue;
     if (enriched.ev < config.minEvThreshold) continue;
     if (enriched.edgeProb <= 0) continue;
-
-    const modelFavorsHome = analysis.homeWinProb >= analysis.awayWinProb;
-    const pickIsHome = opt.pick === game.home_team;
-    if (modelFavorsHome !== pickIsHome) continue;
-
-    return enriched;
+    options.push(enriched);
   }
 
-  return null;
+  if (!options.length) return null;
+  options.sort((a, b) => b.ev - a.ev || b.edgeProb - a.edgeProb);
+  return options[0];
 }
 
 function pickSpreadCandidate(game, markets, analysis) {
@@ -178,20 +192,14 @@ function pickTotalCandidate(game, markets, analysis, bookmakers) {
   if (!raw.length) return null;
 
   const scored = raw
-    .map((o) => {
-      const enriched = enrichCandidate(
+    .map((o) =>
+      enrichCandidate(
         { ...o, confidence: analysis.confidence },
         { ...analysis, factors: [...(analysis.factors || []), ...(projection.factors || [])] },
         game.league,
         'totals'
-      );
-      // 大小盤數據品質較低時降低評分，讓獨贏/讓分有機會成為主推
-      if (projection.dataQuality < 0.7) {
-        enriched.score = Math.max(0, enriched.score - (config.totalsPrimaryScorePenalty || 8));
-        if (enriched.score < config.recommendWatchScore) enriched.tier = null;
-      }
-      return enriched;
-    })
+      )
+    )
     .filter((o) => o.tier);
 
   if (!scored.length) return null;
@@ -199,64 +207,95 @@ function pickTotalCandidate(game, markets, analysis, bookmakers) {
   return scored[0];
 }
 
-/** 單場主推：主盤中評分最高者（大小盤不再默認霸佔） */
-export function pickPrimaryRecommendation(candidates) {
-  if (!candidates.length) return null;
-  return [...candidates].sort((a, b) => b.score - a.score || b.ev - a.ev)[0];
+function buildPickReasoning(pick, baseReasoning) {
+  const reasoningParts = [baseReasoning];
+  if (pick.edgeSignals?.length) {
+    reasoningParts.push(`訊號: ${pick.edgeSignals.join('、')}`);
+  }
+  if (pick.market === 'h2h') reasoningParts.push('獨贏');
+  else if (pick.market === 'spreads') reasoningParts.push(`讓分 ${pick.line}`);
+  else if (pick.market === 'totals') {
+    reasoningParts.push(
+      `預估總分 ${pick.projectedTotal?.toFixed(1) ?? '?'}` +
+        `（市場${pick.marketLine ?? '?'}）| 盤口 ${pick.line}`
+    );
+  }
+  return reasoningParts.filter(Boolean).join(' | ');
+}
+
+/** 單場主推（相容舊邏輯） */
+export function pickPrimaryRecommendation(candidates, context = {}) {
+  if (!candidates?.length) return null;
+  const ranked = candidates
+    .map((c) => {
+      const { score, signals } = computeActionableScore(c, context);
+      return { ...c, actionableScore: score, edgeSignals: signals };
+    })
+    .filter((c) => c.actionableScore >= 0)
+    .sort((a, b) => b.actionableScore - a.actionableScore || b.ev - a.ev);
+  return ranked[0] || null;
 }
 
 /**
- * 每場可有多條推薦（不同盤口），但同類盤口互斥
+ * 每場多盤口排序推薦：跨獨贏/讓分/大小/球員盤比較優勢分，各盤口最多一條
  */
 export function pickGameRecommendations(game, markets, analysis, baseReasoning, propsContext = {}) {
-  const results = [];
-  const usedMarkets = new Set();
   const bookmakers = propsContext.bookmakers || [];
 
   const h2h = pickH2hCandidate(game, markets, analysis);
   const spread = pickSpreadCandidate(game, markets, analysis);
   const total = pickTotalCandidate(game, markets, analysis, bookmakers);
 
-  const mainCandidates = [h2h, spread, total].filter(Boolean);
-  const primary = pickPrimaryRecommendation(mainCandidates);
-
-  const ordered = [];
-  if (primary) ordered.push(primary);
-  for (const c of mainCandidates) {
-    if (c && c !== primary) ordered.push(c);
+  let propCandidates = [];
+  if (config.enablePlayerProps && propsContext.propsMap && Object.keys(propsContext.propsMap).length) {
+    propCandidates = pickPropCandidates(game, propsContext.propsMap, analysis, propsContext);
   }
 
-  for (const pick of ordered) {
+  const allCandidates = [...[h2h, spread, total].filter(Boolean), ...propCandidates];
+  if (!allCandidates.length) return [];
+
+  const pickContext = {
+    analysis: { ...analysis, homeTeam: game.home_team, awayTeam: game.away_team },
+    homeMlb: analysis.homeMlb,
+    awayMlb: analysis.awayMlb,
+  };
+
+  const scored = allCandidates
+    .map((c) => {
+      const { score, signals } = computeActionableScore(c, pickContext);
+      return {
+        ...c,
+        actionableScore: score,
+        edgeSignals: signals?.length ? signals : c.edgeSignals,
+      };
+    })
+    .filter((c) => c.tier && c.actionableScore >= 0)
+    .sort(
+      (a, b) =>
+        b.actionableScore - a.actionableScore ||
+        b.ev - a.ev ||
+        b.score - a.score
+    );
+
+  const results = [];
+  const usedMarkets = new Set();
+  let rank = 0;
+
+  for (const pick of scored) {
     if (usedMarkets.has(pick.market)) continue;
-    const reasoningParts = [baseReasoning];
-    if (pick.market === 'h2h') reasoningParts.push('獨贏');
-    else if (pick.market === 'spreads') reasoningParts.push(`讓分 ${pick.line}`);
-    else if (pick.market === 'totals') {
-      reasoningParts.push(
-        `預估總分 ${pick.projectedTotal?.toFixed(1) ?? '?'}` +
-          `（市場${pick.marketLine ?? '?'}）| 盤口 ${pick.line}`
-      );
-    }
+    rank += 1;
 
     results.push({
       ...pick,
-      isPrimary: pick === primary,
-      reasoning: reasoningParts.join(' | '),
-      bookmaker: pick.odds.bookmaker,
+      pickRank: rank,
+      isPrimary: rank === 1,
+      rankLabel: rankLabel(rank),
+      reasoning: buildPickReasoning(pick, baseReasoning),
+      bookmaker: pick.odds?.bookmaker || pick.bookmaker,
     });
     usedMarkets.add(pick.market);
+    if (rank >= config.maxPicksPerGame) break;
   }
 
-  if (config.enablePlayerProps && propsContext.propsMap && Object.keys(propsContext.propsMap).length) {
-    const props = pickPropCandidates(game, propsContext.propsMap, analysis, propsContext);
-    for (const p of props.slice(0, 2)) {
-      if (usedMarkets.has(p.market)) continue;
-      results.push(p);
-      usedMarkets.add(p.market);
-    }
-  }
-
-  return results
-    .sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0) || b.score - a.score)
-    .slice(0, config.maxPicksPerGame);
+  return assignBetStrategies(results, pickContext).map(enrichWithSuggestedStake);
 }

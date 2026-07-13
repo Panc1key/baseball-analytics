@@ -14,6 +14,7 @@ import { extractPlayerProps } from './PlayerPropAnalyzer.js';
 import { extractMarkets } from '../utils/odds.js';
 import { config } from '../config.js';
 import { classifyBetStrategy } from './BetStrategy.js';
+import { getStakeSizingMeta, enrichWithSuggestedStake } from './StakeSizer.js';
 
 let refreshPromise = null;
 
@@ -83,22 +84,28 @@ function buildRecEntry(game, pick, id) {
 }
 
 function saveRecommendation(rec) {
-  const betStrategy = rec.betStrategy ?? classifyBetStrategy({
-    tier: rec.tier,
-    market: rec.market,
-    league: rec.league,
-    ev: rec.ev,
-    edge_prob: rec.edgeProb,
-    model_prob: rec.modelProb,
-    odds_decimal: rec.oddsDecimal,
-    data_quality: rec.dataQuality,
-  });
+  const betStrategy =
+    rec.betStrategy ??
+    classifyBetStrategy(
+      {
+        tier: rec.tier,
+        market: rec.market,
+        league: rec.league,
+        ev: rec.ev,
+        edge_prob: rec.edgeProb,
+        model_prob: rec.modelProb,
+        odds_decimal: rec.oddsDecimal,
+        data_quality: rec.dataQuality,
+        pick_rank: rec.pickRank,
+      },
+      { pickRank: rec.pickRank }
+    );
 
   return db
     .prepare(`
     INSERT INTO recommendations
-      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob, implied_prob, ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group, bet_strategy)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob, implied_prob, ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group, bet_strategy, pick_rank, actionable_score, suggested_stake, stake_multiplier)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       rec.gameId,
@@ -118,7 +125,11 @@ function saveRecommendation(rec) {
       rec.edgeProb,
       rec.dataQuality,
       rec.marketGroup || 'main',
-      betStrategy
+      betStrategy,
+      rec.pickRank ?? null,
+      rec.actionableScore ?? null,
+      rec.suggestedStake ?? rec.suggested_stake ?? null,
+      rec.stakeMultiplier ?? rec.stake_multiplier ?? null
     ).lastInsertRowid;
 }
 
@@ -303,6 +314,11 @@ export async function runAnalysis() {
         score: pick.score,
         edgeProb: pick.edgeProb,
         dataQuality: pick.dataQuality,
+        pickRank: pick.pickRank,
+        actionableScore: pick.actionableScore,
+        suggestedStake: pick.suggestedStake,
+        stakeMultiplier: pick.stakeMultiplier,
+        betStrategy: pick.bet_strategy,
       });
       allRecs.push(buildRecEntry(game, pick, id));
     }
@@ -380,7 +396,16 @@ export function getParlayRecommendations(limit = 40) {
 export { LEAGUE_MARKETS_INFO };
 
 export function getRecommendations(filters = {}) {
-  const { league, minEv = 0, market, marketGroup, tier, betStrategy, limit = 80 } = filters;
+  const {
+    league,
+    minEv = 0,
+    market,
+    marketGroup,
+    tier,
+    betStrategy,
+    gamePicks,
+    limit = 80,
+  } = filters;
   let sql = `
     SELECT r.*, g.home_team, g.away_team, g.commence_time
     FROM recommendations r
@@ -407,27 +432,40 @@ export function getRecommendations(filters = {}) {
   } else if (marketGroup === 'main') {
     sql += " AND r.market_group = 'main'";
   }
-  if (betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor') {
+
+  if (gamePicks) {
+    sql += ' AND r.pick_rank IS NOT NULL';
+    sql += ' ORDER BY g.commence_time ASC, r.pick_rank ASC, r.actionable_score DESC';
+  } else if (betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor') {
     sql += ' AND r.bet_strategy = ?';
     params.push(betStrategy);
-  }
-
-  if (betStrategy === 'flat_bet') {
-    sql += ' ORDER BY r.ev DESC, r.score DESC';
-  } else if (betStrategy === 'parlay_anchor') {
-    sql += ' ORDER BY r.model_prob DESC, r.ev DESC';
+    if (betStrategy === 'flat_bet') {
+      sql += " AND r.tier = 'primary' AND r.odds_decimal >= ?";
+      params.push(config.flatBetMinOdds);
+      sql += ' ORDER BY g.commence_time ASC, COALESCE(r.pick_rank, 99) ASC, r.ev DESC';
+    } else {
+      sql += ' ORDER BY r.model_prob DESC, r.ev DESC';
+    }
   } else {
     sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, r.score DESC, r.model_prob DESC";
   }
 
   const rows = db.prepare(sql).all(...params);
-  const enriched = rows.map((r) => ({
-    ...r,
-    bet_strategy: r.bet_strategy || classifyBetStrategy(r),
-  }));
+  const enriched = rows.map((r) => {
+    const base = {
+      ...r,
+      pick_rank: r.pick_rank,
+      rank_label: r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,
+      bet_strategy: r.bet_strategy || classifyBetStrategy(r),
+    };
+    if (base.suggested_stake == null && base.pick_rank != null) {
+      return enrichWithSuggestedStake(base);
+    }
+    return base;
+  });
 
   const filtered =
-    betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor'
+    !gamePicks && (betStrategy === 'flat_bet' || betStrategy === 'parlay_anchor')
       ? enriched.filter((r) => r.bet_strategy === betStrategy)
       : enriched;
 
@@ -435,22 +473,29 @@ export function getRecommendations(filters = {}) {
 }
 
 export function getBettingStrategyMeta() {
+  const stakeMeta = getStakeSizingMeta();
   return {
     flatBet: {
       label: '均注精選',
       minOdds: config.flatBetMinOdds,
       minProb: config.flatBetMinProb,
+      minEdgePct: config.flatBetMinEdgePct,
       minEv: config.minEvThreshold,
-      stake: config.flatBetUsd,
-      description: '高賠正 EV · 避開低水臭水 · 每場均注',
+      baseUnit: stakeMeta.baseUnit,
+      currency: stakeMeta.currency,
+      stakeSizing: stakeMeta,
+      markets: ['h2h', 'spreads', 'totals', 'props'],
+      description: '跨盤口排序 · 基準均注動態建議額 · 高 EV 多投',
     },
     parlayAnchor: {
       label: '串關錨腿',
       minOdds: config.parlayAnchorMinOdds,
       maxOdds: config.parlayAnchorMaxOdds,
       minProb: config.parlayAnchorMinProb,
-      stake: config.parlayBetUsd,
-      description: '低水高勝率 · 用於組串抬命中率',
+      baseUnit: stakeMeta.baseUnit,
+      currency: stakeMeta.currency,
+      stakeRatio: config.parlayAnchorStakeRatio,
+      description: '低水高勝率 · 建議額為基準均注的縮倉比例',
     },
   };
 }

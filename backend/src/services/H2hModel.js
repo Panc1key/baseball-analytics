@@ -189,6 +189,24 @@ export function computeH2hProbabilities({
   homeStrength = Math.max(0.05, Math.min(0.95, homeStrength));
   awayStrength = Math.max(0.05, Math.min(0.95, awayStrength));
 
+  // 近況動量：近 10 場明顯優於季賽時，向該隊傾斜（捕捉黑馬/頹勢）
+  if (league === 'MLB' && homeMlb && awayMlb) {
+    const homeSeason = homeMlb.winPct ?? 0.5;
+    const awaySeason = awayMlb.winPct ?? 0.5;
+    const homeL10 = parseL10Rate(homeMlb.last10) ?? homeSeason;
+    const awayL10 = parseL10Rate(awayMlb.last10) ?? awaySeason;
+    const homeMom = homeL10 - homeSeason;
+    const awayMom = awayL10 - awaySeason;
+    if (homeMom >= 0.06) {
+      homeStrength += Math.min(0.045, homeMom * 0.4);
+      factors.push(`主隊近況熱 L10 高於季賽 ${(homeMom * 100).toFixed(0)}%`);
+    }
+    if (awayMom >= 0.06) {
+      awayStrength += Math.min(0.045, awayMom * 0.4);
+      factors.push(`客隊近況熱 L10 高於季賽 ${(awayMom * 100).toFixed(0)}%`);
+    }
+  }
+
   // 主場優勢：提升主隊實力後再 Log5
   const homeWithField = Math.min(0.95, homeStrength + MLB_HOME_FIELD);
   let modelHomeProb = log5WinProb(homeWithField, awayStrength);

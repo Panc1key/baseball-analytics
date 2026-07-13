@@ -7,6 +7,7 @@ import {
   getVenueName,
 } from './MlbStatsService.js';
 import { computeH2hProbabilities } from './H2hModel.js';
+import { buildMatchupAnalysis } from './MatchupCore.js';
 import { computeTotalsProjection } from './TotalsModel.js';
 
 /**
@@ -73,7 +74,7 @@ export function getTeamStats(league, teamName) {
 }
 
 /**
- * 綜合分析（獨贏模型為核心，其他盤口沿用同一 homeWinProb）
+ * 綜合分析：MLB 走 MatchupCore 場次核心，其他聯盟沿用簡化模型
  */
 export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, options = {}) {
   const { mlbStandings = [], mlbScheduleGame = null } = options;
@@ -82,14 +83,15 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
   let awayMlb = null;
   let homePitcherStats = null;
   let awayPitcherStats = null;
-  let homeInjuryCount = 0;
-  let awayInjuryCount = 0;
+  let homeInjurySummary = { count: 0, names: [] };
+  let awayInjurySummary = { count: 0, names: [] };
   let homeFallbackRating = 0.5;
   let awayFallbackRating = 0.5;
   let homeL10 = 'N/A';
   let awayL10 = 'N/A';
   let homePitcherEra = null;
   let awayPitcherEra = null;
+  const venueName = getVenueName(mlbScheduleGame);
 
   if (league === 'MLB' && mlbStandings.length > 0) {
     homeMlb = matchMlbTeam(homeTeam, mlbStandings);
@@ -101,8 +103,8 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       getTeamInjurySummary(homeMlb?.teamId),
       getTeamInjurySummary(awayMlb?.teamId),
     ]);
-    homeInjuryCount = homeInj.count;
-    awayInjuryCount = awayInj.count;
+    homeInjurySummary = homeInj;
+    awayInjurySummary = awayInj;
 
     if (mlbScheduleGame) {
       const pitchers = getProbablePitchers(mlbScheduleGame);
@@ -128,21 +130,57 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     }
   }
 
-  const h2h = computeH2hProbabilities({
-    league,
-    homeTeam,
-    awayTeam,
-    bookmakers,
-    homeMlb,
-    awayMlb,
-    homePitcherStats,
-    awayPitcherStats,
-    homeInjuryCount,
-    awayInjuryCount,
-    homeFallbackRating,
-    awayFallbackRating,
-    venueName: getVenueName(mlbScheduleGame),
-  });
+  let matchupCore = null;
+  let h2h;
+
+  if (league === 'MLB') {
+    matchupCore = buildMatchupAnalysis({
+      league,
+      homeTeam,
+      awayTeam,
+      bookmakers,
+      homeMlb,
+      awayMlb,
+      homePitcherStats,
+      awayPitcherStats,
+      homeInjurySummary,
+      awayInjurySummary,
+      homeFallbackRating,
+      awayFallbackRating,
+      venueName,
+    });
+    h2h = {
+      homeWinProb: matchupCore.homeWinProb,
+      awayWinProb: matchupCore.awayWinProb,
+      confidence: matchupCore.confidence,
+      factors: matchupCore.factors,
+      marketHomeProb: matchupCore.marketHomeProb,
+      marketAwayProb: matchupCore.marketAwayProb,
+      components: {
+        homeStrength: matchupCore.homeSituation?.score,
+        awayStrength: matchupCore.awaySituation?.score,
+        marketWeight: matchupCore.marketWeight,
+        hasMlbCore: matchupCore.hasMlbCore,
+        hasPitchers: matchupCore.hasPitchers,
+      },
+    };
+  } else {
+    h2h = computeH2hProbabilities({
+      league,
+      homeTeam,
+      awayTeam,
+      bookmakers,
+      homeMlb,
+      awayMlb,
+      homePitcherStats,
+      awayPitcherStats,
+      homeInjuryCount: homeInjurySummary.count,
+      awayInjuryCount: awayInjurySummary.count,
+      homeFallbackRating,
+      awayFallbackRating,
+      venueName,
+    });
+  }
 
   const totalsProjection = computeTotalsProjection({
     league,
@@ -150,9 +188,14 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     awayMlb,
     homePitcherStats,
     awayPitcherStats,
-    venueName: getVenueName(mlbScheduleGame),
+    venueName,
     bookmakers,
   });
+
+  const coreFactors = h2h.factors || [];
+  const totalsFactors = totalsProjection.factors.filter(
+    (f) => !coreFactors.some((c) => c === f)
+  );
 
   return {
     homeTeam,
@@ -162,7 +205,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     confidence: h2h.confidence,
     homeL10,
     awayL10,
-    factors: [...h2h.factors, ...totalsProjection.factors],
+    factors: [...coreFactors, ...totalsFactors],
     marketHomeProb: h2h.marketHomeProb,
     marketAwayProb: h2h.marketAwayProb,
     homePitcherEra,
@@ -172,8 +215,12 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     awayMlb,
     homePitcherStats,
     awayPitcherStats,
-    venueName: getVenueName(mlbScheduleGame),
+    homeInjurySummary,
+    awayInjurySummary,
+    venueName,
     totalsProjection,
     projectedTotal: totalsProjection.finalTotal,
+    matchupCore,
+    dataQuality: matchupCore?.dataQuality,
   };
 }

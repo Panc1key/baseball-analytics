@@ -2,9 +2,12 @@
   <div>
     <p v-if="sortHint" class="sort-hint">{{ sortHint }}</p>
     <el-table :data="recommendations" stripe v-loading="loading" :empty-text="emptyText">
-    <el-table-column label="等級" width="72" fixed="left">
+    <el-table-column label="序位" width="72" fixed="left">
       <template #default="{ row }">
-        <el-tag :type="row.tier === 'primary' ? 'success' : 'warning'" size="small">
+        <el-tag v-if="row.pick_rank" :type="row.pick_rank === 1 ? 'success' : 'warning'" size="small">
+          {{ row.rank_label || rankLabel(row.pick_rank) }}
+        </el-tag>
+        <el-tag v-else :type="row.tier === 'primary' ? 'success' : 'warning'" size="small">
           {{ tierLabel(row.tier) }}
         </el-tag>
       </template>
@@ -16,6 +19,14 @@
       <template #default="{ row }">
         <div>{{ formatMatchup(row.away_team, row.home_team) }}</div>
         <div class="sub">{{ formatTime(row.commence_time) }}</div>
+      </template>
+    </el-table-column>
+    <el-table-column label="建議投注" width="96">
+      <template #default="{ row }">
+        <strong v-if="row.suggested_stake != null" class="stake-em">
+          {{ formatStake(row.suggested_stake) }}
+        </strong>
+        <span v-else class="sub">—</span>
       </template>
     </el-table-column>
     <el-table-column label="盤口" width="88">
@@ -58,15 +69,22 @@
 </template>
 
 <script setup>
-import { marketLabel, tierLabel } from '../utils/market.js';
+import { marketLabel, tierLabel, rankLabel } from '../utils/market.js';
 import { formatMatchup, leagueLabel, translatePick, translateReasoning, bookmakerLabel } from '../utils/teams.js';
 
-defineProps({
+function formatStake(amount) {
+  const n = Number(amount);
+  if (Number.isNaN(n)) return '—';
+  return `${n % 1 === 0 ? n.toFixed(0) : n.toFixed(1)}${props.currency || '元'}`;
+}
+
+const props = defineProps({
   recommendations: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   emptyText: { type: String, default: '尚無推薦' },
   sortHint: { type: String, default: '' },
   highlightProb: { type: Boolean, default: false },
+  currency: { type: String, default: '元' },
 });
 
 function formatTime(iso) {
@@ -86,4 +104,5 @@ function evTag(ev) {
 .sub { font-size: 12px; color: #909399; }
 .pos { color: #67c23a; font-weight: 600; }
 .prob-em { color: #67c23a; }
+.stake-em { color: #409eff; }
 </style>
