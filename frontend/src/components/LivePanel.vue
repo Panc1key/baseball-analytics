@@ -2,9 +2,9 @@
   <div class="live-panel">
     <div class="live-toolbar">
       <div class="live-meta">
-        <el-tag type="danger" effect="dark" size="small">滾球 v1</el-tag>
+        <el-tag type="danger" effect="dark" size="small">滾球 v1.2</el-tag>
         <span v-if="meta">進行中 {{ meta.liveGameCount }} 場 · 推薦 {{ meta.recommendationCount }} 條</span>
-        <span class="hint-inline">初盤 prior + 比分條件更新 · 優先獨贏</span>
+        <span class="hint-inline">MLB linescore 優先 · 初盤 prior + 條件勝率</span>
       </div>
       <div class="live-actions">
         <el-radio-group v-model="league" size="small" @change="loadLive">
@@ -14,16 +14,22 @@
           <el-radio-button label="KBO">KBO</el-radio-button>
         </el-radio-group>
         <el-button size="small" :loading="loading" @click="loadLive">重新載入</el-button>
+        <el-button type="primary" size="small" :loading="refreshing" @click="handleRefreshLive">
+          同步滾球
+        </el-button>
       </div>
     </div>
 
     <el-alert type="info" :closable="false" show-icon class="live-alert">
       <template #title>
-        v1.1 硬閘：無比分不推 · 勝率&lt;65%不得主推 · 與市場差&gt;12pt拒絕 · 一邊倒降速 · 注碼折減並標最壞風險。局數暫由開賽時間粗估。
+        v1.2：MLB 用官方 linescore；NPB 用 Yahoo 補比分（Odds API 常回傳空比分）· KBO 仍靠 Odds API。
+        無比分不推 · 賠率&lt;{{ meta?.thresholds?.minOdds ?? 1.55 }}不推 · &lt;{{ meta?.thresholds?.primaryMinOdds ?? 1.7 }}不得主推 ·
+        &lt;65% 禁主推 ·「同步滾球」更新比分+賠率後重算。
+        <span v-if="pollMinutes > 0">列表每 {{ pollMinutes }} 分鐘自動重載（不耗 API）；更新比分/盤口請按「同步滾球」。</span>
       </template>
     </el-alert>
 
-    <el-table :data="recs" stripe v-loading="loading" empty-text="目前無滾球推薦（可能無進行中賽事，或尚未同步）">
+    <el-table :data="recs" stripe v-loading="loading || refreshing" empty-text="目前無滾球推薦（可能無進行中賽事，或尚未同步）">
       <el-table-column label="聯盟" width="88">
         <template #default="{ row }">{{ leagueLabel(row.league) }}</template>
       </el-table-column>
@@ -77,8 +83,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
-import { getLiveRecommendations } from '../api/index.js';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ElMessage } from 'element-plus';
+import { getLiveRecommendations, refreshLive } from '../api/index.js';
 import { marketLabel } from '../utils/market.js';
 import { formatMatchup, leagueLabel, translatePick, translateReasoning } from '../utils/teams.js';
 
@@ -89,7 +96,11 @@ const props = defineProps({
 const recs = ref([]);
 const meta = ref(null);
 const loading = ref(false);
+const refreshing = ref(false);
 const league = ref('');
+let pollTimer = null;
+
+const pollMinutes = computed(() => Number(meta.value?.thresholds?.pollMinutes ?? 5));
 
 function formatTime(iso) {
   if (!iso) return '';
@@ -120,11 +131,48 @@ async function loadLive() {
   }
 }
 
-defineExpose({ loadLive, recs, meta });
+async function handleRefreshLive() {
+  refreshing.value = true;
+  try {
+    const res = await refreshLive();
+    const status = res.data?.status;
+    if (status) meta.value = status;
+    ElMessage.success(
+      `滾球已同步 · 場次 ${status?.liveGameCount ?? '?'} · 推薦 ${status?.recommendationCount ?? res.data?.analysis?.recommendations ?? '?'}`
+    );
+    await loadLive();
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || err.message || '滾球同步失敗');
+  } finally {
+    refreshing.value = false;
+  }
+}
 
-onMounted(() => {
-  if (props.autoLoad) loadLive();
+function setupPoll() {
+  clearPoll();
+  const mins = pollMinutes.value;
+  if (!mins || mins <= 0) return;
+  // 僅重讀庫內滾球推薦，不打 Odds API（額度保護）；更新盤口請按「同步滾球」
+  pollTimer = setInterval(() => {
+    loadLive();
+  }, mins * 60 * 1000);
+}
+
+function clearPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+defineExpose({ loadLive, handleRefreshLive, recs, meta });
+
+onMounted(async () => {
+  if (props.autoLoad) await loadLive();
+  setupPoll();
 });
+
+onUnmounted(clearPoll);
 </script>
 
 <style scoped>

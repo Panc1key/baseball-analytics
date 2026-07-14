@@ -168,6 +168,10 @@ export function liveTotalDistribution({
   );
 }
 
+/**
+ * @param {object} opts
+ * @param {object} [opts.linescore] extractLinescoreState 結果；優先於開賽時間粗估
+ */
 export function projectLiveState({
   commenceTime,
   homeScore,
@@ -176,36 +180,46 @@ export function projectLiveState({
   awayRunsPrior,
   priorHomeWin = 0.5,
   now = Date.now(),
+  linescore = null,
 }) {
-  const inningsPlayed = estimateInningsPlayed(commenceTime, now);
-  const inningsRemaining = estimateInningsRemaining(commenceTime, now);
+  const hasLinescore =
+    linescore?.inningsPlayed != null && linescore?.inningsRemaining != null;
+
+  const inningsPlayed = hasLinescore
+    ? clamp(Number(linescore.inningsPlayed), 0.2, 12)
+    : estimateInningsPlayed(commenceTime, now);
+  const inningsRemaining = hasLinescore
+    ? clamp(Number(linescore.inningsRemaining), 0.25, 8.8)
+    : estimateInningsRemaining(commenceTime, now);
+
+  // linescore 比分優先（與 odds 比分不一致時以官方局況為準）
+  const hs =
+    linescore?.homeScore != null ? Number(linescore.homeScore) : Number(homeScore) || 0;
+  const as =
+    linescore?.awayScore != null ? Number(linescore.awayScore) : Number(awayScore) || 0;
+
   const { homeLambdaRem, awayLambdaRem, remainingFrac, slowdownFactor, absMargin } =
     remainingLambdas(homeRunsPrior, awayRunsPrior, inningsRemaining, {
-      homeScore,
-      awayScore,
+      homeScore: hs,
+      awayScore: as,
       inningsPlayed,
     });
 
   let homeWinProb = liveHomeWinProb({
-    homeScore,
-    awayScore,
+    homeScore: hs,
+    awayScore: as,
     homeLambdaRem,
     awayLambdaRem,
     priorHomeWin,
   });
   homeWinProb = applyCloseGameHomeBoost(homeWinProb, { absMargin, remainingFrac });
 
-  const expectedFinalTotal =
-    (Number(homeScore) || 0) +
-    (Number(awayScore) || 0) +
-    homeLambdaRem +
-    awayLambdaRem;
-
+  const expectedFinalTotal = hs + as + homeLambdaRem + awayLambdaRem;
   const residualOnlyWin = poissonHomeWinProb(homeLambdaRem, awayLambdaRem);
 
   return {
-    homeScore: Number(homeScore) || 0,
-    awayScore: Number(awayScore) || 0,
+    homeScore: hs,
+    awayScore: as,
     inningsPlayed: Math.round(inningsPlayed * 10) / 10,
     inningsRemaining: Math.round(inningsRemaining * 10) / 10,
     remainingFrac: Math.round(remainingFrac * 100) / 100,
@@ -215,10 +229,19 @@ export function projectLiveState({
     awayWinProb: 1 - homeWinProb,
     expectedFinalTotal: Math.round(expectedFinalTotal * 10) / 10,
     residualOnlyWin,
-    scoreMargin: (Number(homeScore) || 0) - (Number(awayScore) || 0),
+    scoreMargin: hs - as,
     absMargin,
     slowdownFactor,
     isBlowout: absMargin >= (config.liveBlowoutMarginSoft ?? 4),
+    inningSource: hasLinescore
+      ? linescore.source || 'mlb_linescore'
+      : 'time_estimate',
+    inningLabel: hasLinescore
+      ? linescore.label
+      : `約第 ${Math.round(inningsPlayed * 10) / 10} 局（時間粗估）`,
+    outs: linescore?.outs ?? null,
+    currentInning: linescore?.currentInning ?? null,
+    inningState: linescore?.inningState ?? null,
   };
 }
 

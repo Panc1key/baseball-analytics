@@ -1,5 +1,5 @@
 import { footballConfig } from './config.js';
-import { calcEV, decimalToImpliedProb, decimalToNetOdds, calibrateModelProb } from '../utils/odds.js';
+import { calcEV, calcEVWithPush, decimalToImpliedProb, decimalToNetOdds, calibrateModelProb } from '../utils/odds.js';
 
 const MARKET_BANDS = {
   h2h: { min: 1.35, max: 8.0, sweetMin: 1.55, sweetMax: 3.2 },
@@ -54,7 +54,11 @@ export function enrichFootballCandidate(candidate, analysis, league, marketType)
   const oddsDecimal = candidate.oddsDecimal ?? candidate.odds?.price;
   const rawModelProb = candidate.modelProb;
   const modelProb = calibrateModelProb(rawModelProb, impliedProb, footballConfig.maxModelEdgePct);
-  const ev = calcEV(modelProb, decimalToNetOdds(oddsDecimal));
+  const pushProb = candidate.pushProb ?? 0;
+  const ev =
+    pushProb > 0
+      ? calcEVWithPush(modelProb, pushProb, decimalToNetOdds(oddsDecimal))
+      : calcEV(modelProb, decimalToNetOdds(oddsDecimal));
   const dataQuality = calcFootballDataQuality(analysis);
   const scored = scorePick({
     modelProb,

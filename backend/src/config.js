@@ -165,6 +165,14 @@ export const config = {
   /** 滾球注碼更保守 */
   liveStakeHaircut: parseFloat(process.env.LIVE_STAKE_HAIRCUT || '0.7'),
   liveMaxStake: parseFloat(process.env.LIVE_MAX_STAKE || '8'),
+  /** 滾球最低賠率：低於此直接不推（避開 1.05～1.20 鎖死熱門） */
+  liveMinOdds: parseFloat(process.env.LIVE_MIN_ODDS || '1.55'),
+  /** 低於此不得主推，僅觀察且加砍注 */
+  livePrimaryMinOdds: parseFloat(process.env.LIVE_PRIMARY_MIN_ODDS || '1.70'),
+  /** 低水區間額外 EV 門檻（賠率越低要求越高） */
+  liveLowOddsExtraEv: parseFloat(process.env.LIVE_LOW_ODDS_EXTRA_EV || '0.04'),
+  /** 前端滾球面板自動刷新間隔（分鐘，0=關閉） */
+  livePollMinutes: parseFloat(process.env.LIVE_POLL_MINUTES || '5'),
 };
 
 export const LEAGUES = {

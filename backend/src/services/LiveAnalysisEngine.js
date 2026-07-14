@@ -32,9 +32,18 @@ import {
 } from './LiveDiscipline.js';
 import {
   getMlbStandings,
-  getMlbScheduleRange,
+  getMlbScheduleWindow,
   matchMlbTeam,
+  extractLinescoreState,
 } from './MlbStatsService.js';
+import {
+  fetchYahooNpbLiveScores,
+  matchYahooScoreToGame,
+} from './NpbYahooScores.js';
+import {
+  fetchAllLeagueOdds,
+  fetchAllLeagueScores,
+} from './OddsApiClient.js';
 
 function clearLiveRecommendations() {
   db.prepare(
@@ -154,6 +163,7 @@ function liveDataQuality(analysis, live, hasScore) {
   if (hasScore) q += 0.25;
   if (live.inningsRemaining <= 6) q += 0.1;
   if (analysis?.homeMlb && analysis?.awayMlb) q += 0.1;
+  if (live.inningSource === 'mlb_linescore' || live.inningSource === 'yahoo_npb') q += 0.12;
   return Math.min(1, q);
 }
 
@@ -194,6 +204,7 @@ function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
   ]) {
     const odds = markets.h2h?.[team];
     if (!odds?.price) continue;
+    if (odds.price < (config.liveMinOdds ?? 1.55)) continue;
 
     const rawProb = side === 'home' ? live.homeWinProb : live.awayWinProb;
     const implied = decimalToImpliedProb(odds.price);
@@ -264,6 +275,7 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
 
   for (const [, tot] of Object.entries(markets.totals || {})) {
     if (!tot?.price || tot.point == null) continue;
+    if (tot.price < (config.liveMinOdds ?? 1.55)) continue;
     const isOver = tot.name === 'Over' || tot.name === '大';
     const distribution = liveTotalDistribution({
       homeScore: live.homeScore,
@@ -350,8 +362,11 @@ function buildLiveReasoning(game, live, hasScore, market, pick) {
   const scoreTxt = hasScore
     ? `比分 ${live.awayScore}-${live.homeScore}（客-主）`
     : '比分待同步';
+  const inningCore =
+    live.inningLabel ||
+    `約第 ${live.inningsPlayed} 局`;
   const parts = [
-    `滾球 · 約第 ${live.inningsPlayed} 局 · 剩 ${live.inningsRemaining} 局`,
+    `滾球 · ${inningCore} · 剩 ${live.inningsRemaining} 局`,
     scoreTxt,
     live.slowdownFactor != null && live.slowdownFactor < 0.99
       ? `節奏折減 ×${live.slowdownFactor}${live.isBlowout ? '（一邊倒降速）' : ''}`
@@ -395,16 +410,26 @@ export async function runLiveAnalysis() {
   try {
     [mlbStandings, mlbSchedule] = await Promise.all([
       getMlbStandings(),
-      getMlbScheduleRange(1),
+      getMlbScheduleWindow({ daysBack: 1, daysForward: 1 }),
     ]);
   } catch (err) {
     console.warn('[live] MLB 資料失敗:', err.message);
+  }
+
+  let yahooNpbScores = [];
+  try {
+    yahooNpbScores = await fetchYahooNpbLiveScores();
+    console.log(`[live] Yahoo NPB 比分 ${yahooNpbScores.length} 場`);
+  } catch (err) {
+    console.warn('[live] Yahoo NPB 比分失敗:', err.message);
   }
 
   const liveGames = getLiveGames();
   const saved = [];
   let analyzed = 0;
   let rejected = 0;
+  let linescoreHits = 0;
+  let yahooScoreHits = 0;
 
   for (const game of liveGames) {
     let bookmakers = [];
@@ -428,6 +453,36 @@ export async function runLiveAnalysis() {
           })
         : null;
 
+    let linescore = mlbScheduleGame ? extractLinescoreState(mlbScheduleGame) : null;
+    if (linescore) linescoreHits += 1;
+
+    // NPB：Odds API 常無比分，用 Yahoo 補
+    let yahooHit = null;
+    if (game.league === 'NPB' && yahooNpbScores.length) {
+      yahooHit = matchYahooScoreToGame(game, yahooNpbScores);
+      if (yahooHit?.linescore?.inningsPlayed != null) {
+        linescore = {
+          ...yahooHit.linescore,
+          homeScore: yahooHit.homeScore,
+          awayScore: yahooHit.awayScore,
+        };
+        linescoreHits += 1;
+      }
+      if (yahooHit?.homeScore != null && yahooHit?.awayScore != null) {
+        yahooScoreHits += 1;
+        // 寫回 DB 供前端顯示
+        db.prepare(`
+          UPDATE games SET home_score = ?, away_score = ?, status = ?, updated_at = datetime('now')
+          WHERE id = ?
+        `).run(
+          yahooHit.homeScore,
+          yahooHit.awayScore,
+          yahooHit.status || 'in_progress',
+          game.id
+        );
+      }
+    }
+
     const analysis = await analyzeMatchup(
       game.league,
       game.home_team,
@@ -436,7 +491,23 @@ export async function runLiveAnalysis() {
       { mlbStandings, mlbScheduleGame }
     );
 
-    const { homeScore, awayScore, hasScore } = parseScores(game);
+    const parsed = parseScores(game);
+    const homeScore =
+      linescore?.homeScore != null
+        ? linescore.homeScore
+        : yahooHit?.homeScore != null
+          ? yahooHit.homeScore
+          : parsed.homeScore;
+    const awayScore =
+      linescore?.awayScore != null
+        ? linescore.awayScore
+        : yahooHit?.awayScore != null
+          ? yahooHit.awayScore
+          : parsed.awayScore;
+    const hasScore =
+      (homeScore != null && awayScore != null && !Number.isNaN(Number(homeScore))) ||
+      parsed.hasScore;
+
     const priorHome =
       analysis.homeRuns != null && analysis.awayRuns != null ? analysis.homeRuns : 4.5;
     const priorAway =
@@ -444,11 +515,12 @@ export async function runLiveAnalysis() {
 
     const live = projectLiveState({
       commenceTime: game.commence_time,
-      homeScore,
-      awayScore,
+      homeScore: Number(homeScore) || 0,
+      awayScore: Number(awayScore) || 0,
       homeRunsPrior: priorHome,
       awayRunsPrior: priorAway,
       priorHomeWin: analysis.homeWinProb ?? 0.5,
+      linescore,
     });
 
     const markets = extractMarkets(bookmakers);
@@ -522,6 +594,7 @@ export async function runLiveAnalysis() {
         tier: withStake.tier,
         liveScore: `${live.awayScore}-${live.homeScore}`,
         inningsPlayed: live.inningsPlayed,
+        inningSource: live.inningSource,
         confidenceLabel: withStake.confidenceLabel,
       });
     }
@@ -533,7 +606,13 @@ export async function runLiveAnalysis() {
     WHERE id = ?
   `).run(
     saved.length,
-    JSON.stringify({ liveGames: liveGames.length, rejectedNoScore: rejected }),
+    JSON.stringify({
+      liveGames: liveGames.length,
+      rejectedNoScore: rejected,
+      linescoreHits,
+      yahooScoreHits,
+      yahooNpbFetched: yahooNpbScores.length,
+    }),
     analysisRunId
   );
 
@@ -541,6 +620,8 @@ export async function runLiveAnalysis() {
     liveGames: liveGames.length,
     analyzed,
     rejectedNoScore: rejected,
+    linescoreHits,
+    yahooScoreHits,
     recommendations: saved.length,
     analysisRunId,
     modelVersion: config.modelVersion,
@@ -585,6 +666,7 @@ export function getLiveRecommendations(filters = {}) {
         r.home_score != null && r.away_score != null
           ? `${r.away_score}-${r.home_score}`
           : null,
+      is_started: true,
     }));
 }
 
@@ -599,7 +681,13 @@ export function getLiveStatus() {
     liveGameCount: games.length,
     recommendationCount: recCount ?? 0,
     leagues: Object.keys(LEAGUES),
-    note: 'v1.1：一邊倒降速 + 主場殘差 + LiveDiscipline 硬閘（市場衝突/<65%禁強推/最壞風險）',
+    note: 'v1.2：MLB linescore + NPB Yahoo 比分補源 + LiveDiscipline',
+    version: 'live-v1.2',
+    scoreSources: {
+      MLB: 'statsapi.mlb.com linescore',
+      NPB: 'Yahoo Sportsnavi（Odds API 常無 NPB 滾球比分）',
+      KBO: 'The Odds API scores',
+    },
     thresholds: {
       minEv: config.liveMinEvThreshold,
       h2hMinEdgePct: config.liveH2hMinEdgePct,
@@ -608,11 +696,135 @@ export function getLiveStatus() {
       maxMarketGap: config.liveMaxMarketProbGap,
       enableTotals: config.liveEnableTotals !== false,
       maxStake: config.liveMaxStake,
+      minOdds: config.liveMinOdds,
+      primaryMinOdds: config.livePrimaryMinOdds,
+      pollMinutes: config.livePollMinutes ?? 5,
     },
   };
 }
 
+/**
+ * 滾球輕量同步：只更新比分 + 主盤賠率，再跑滾球分析（不重算初盤）
+ */
+export async function syncLiveDataLite() {
+  // Odds API 額度可能已耗盡：比分/賠率失敗時仍繼續 Yahoo NPB
+  let scoresData = { results: {}, quota: null };
+  let oddsData = { results: {}, quota: null };
+  try {
+    scoresData = await fetchAllLeagueScores();
+  } catch (err) {
+    console.warn('[live-sync] Odds 比分整體失敗:', err.message);
+  }
+  try {
+    oddsData = await fetchAllLeagueOdds();
+  } catch (err) {
+    console.warn('[live-sync] Odds 賠率整體失敗:', err.message);
+  }
+
+  let scoreUpdates = 0;
+  for (const [code, { scores, error }] of Object.entries(scoresData.results || {})) {
+    if (error) {
+      console.warn(`[live-sync] ${code} 比分失敗:`, error);
+      continue;
+    }
+    for (const game of scores || []) {
+      const hsRaw = game.scores?.find((s) => s.name === game.home_team)?.score;
+      const asRaw = game.scores?.find((s) => s.name === game.away_team)?.score;
+      const hs = hsRaw != null && hsRaw !== '' ? parseInt(hsRaw, 10) : null;
+      const as = asRaw != null && asRaw !== '' ? parseInt(asRaw, 10) : null;
+      const gameStatus =
+        game.status || (game.completed ? 'completed' : 'in_progress');
+
+      if (game.completed) {
+        db.prepare(`
+          INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, datetime('now'))
+          ON CONFLICT(id) DO UPDATE SET
+            completed=1, home_score=?, away_score=?, status=?, updated_at=datetime('now')
+        `).run(
+          game.id, code, game.commence_time, game.home_team, game.away_team,
+          hs, as, gameStatus, hs, as, gameStatus
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, datetime('now'))
+          ON CONFLICT(id) DO UPDATE SET
+            completed = 0,
+            commence_time = excluded.commence_time,
+            home_score = COALESCE(excluded.home_score, games.home_score),
+            away_score = COALESCE(excluded.away_score, games.away_score),
+            status = excluded.status,
+            updated_at = datetime('now')
+        `).run(
+          game.id, code, game.commence_time, game.home_team, game.away_team,
+          hs, as, gameStatus
+        );
+        scoreUpdates += 1;
+      }
+    }
+  }
+
+  let oddsUpdates = 0;
+  for (const [code, { games, error }] of Object.entries(oddsData.results || {})) {
+    if (error) {
+      console.warn(`[live-sync] ${code} 賠率失敗:`, error);
+      continue;
+    }
+    for (const game of games || []) {
+      db.prepare(`
+        INSERT INTO games (id, league, commence_time, home_team, away_team, raw_odds, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          raw_odds = excluded.raw_odds,
+          commence_time = excluded.commence_time,
+          updated_at = datetime('now')
+      `).run(
+        game.id,
+        code,
+        game.commence_time,
+        game.home_team,
+        game.away_team,
+        JSON.stringify(game.bookmakers || [])
+      );
+      oddsUpdates += 1;
+    }
+  }
+
+  let yahooNpbMatched = 0;
+  try {
+    const yahooScores = await fetchYahooNpbLiveScores();
+    const npbGames = db
+      .prepare(
+        `SELECT id, home_team, away_team FROM games WHERE league = 'NPB' AND completed = 0`
+      )
+      .all();
+    for (const g of npbGames) {
+      const hit = matchYahooScoreToGame(g, yahooScores);
+      if (!hit || hit.homeScore == null || hit.awayScore == null) continue;
+      db.prepare(`
+        UPDATE games
+        SET home_score = ?, away_score = ?, status = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(hit.homeScore, hit.awayScore, hit.status || 'in_progress', g.id);
+      yahooNpbMatched += 1;
+      scoreUpdates += 1;
+    }
+  } catch (err) {
+    console.warn('[live-sync] Yahoo NPB 比分失敗:', err.message);
+  }
+
+  return {
+    scoreUpdates,
+    oddsUpdates,
+    yahooNpbMatched,
+    oddsQuota: oddsData.quota,
+    scoresQuota: scoresData.quota,
+  };
+}
+
 export async function liveFullRefresh() {
+  const sync = await syncLiveDataLite();
   const analysis = await runLiveAnalysis();
-  return { analysis, status: getLiveStatus() };
+  return { sync, analysis, status: getLiveStatus() };
 }

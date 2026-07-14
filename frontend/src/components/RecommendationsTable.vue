@@ -20,6 +20,7 @@
         <div>{{ formatMatchup(row.away_team, row.home_team) }}</div>
         <div class="sub">
           <el-tag v-if="row.is_live" type="danger" size="small" effect="plain" class="live-tag">滾球</el-tag>
+          <el-tag v-else-if="row.is_started" type="warning" size="small" effect="plain" class="live-tag">進行中</el-tag>
           {{ formatTime(row.commence_time) }}
         </div>
       </template>

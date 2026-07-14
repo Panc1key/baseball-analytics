@@ -168,6 +168,4 @@ export function blendScoreWithLog5({
   return { homeWinProb, scoreHomeProb, scoreBlend: blend };
 }
 
-}
-
 

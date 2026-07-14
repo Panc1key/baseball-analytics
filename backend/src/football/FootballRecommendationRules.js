@@ -1,5 +1,5 @@
 import { footballConfig } from './config.js';
-import { calcEV, decimalToNetOdds } from '../utils/odds.js';
+import { calcEVWithPush, decimalToNetOdds } from '../utils/odds.js';
 import { estimateSoccerCoverProb } from './utils/footballOdds.js';
 import { buildTotalCandidates } from './models/FootballTotalsModel.js';
 import { enrichFootballCandidate } from './FootballPickScorer.js';
@@ -61,13 +61,16 @@ function pickSpreadCandidate(game, markets, analysis) {
 
   for (const [, spread] of Object.entries(markets.spreads || {})) {
     const isHome = spread.name === game.home_team;
-    const teamWinProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
-    const coverProb = estimateSoccerCoverProb(
-      teamWinProb,
+    const cover = estimateSoccerCoverProb(
+      isHome ? analysis.homeWinProb : analysis.awayWinProb,
       analysis.drawProb,
-      spread.point
+      spread.point,
+      analysis.scoreGrid,
+      isHome
     );
-    const ev = calcEV(coverProb, decimalToNetOdds(spread.price));
+    const coverProb = cover.winProb ?? cover;
+    const pushProb = cover.pushProb ?? 0;
+    const ev = calcEVWithPush(coverProb, pushProb, decimalToNetOdds(spread.price));
 
     raw.push({
       spread,
@@ -75,6 +78,7 @@ function pickSpreadCandidate(game, markets, analysis) {
       line: spread.point,
       oddsDecimal: spread.price,
       modelProb: coverProb,
+      pushProb,
       ev,
       odds: spread,
     });
@@ -93,6 +97,7 @@ function pickSpreadCandidate(game, markets, analysis) {
           odds: g.odds,
           oddsDecimal: g.oddsDecimal,
           modelProb: g.modelProb,
+          pushProb: g.pushProb,
           ev: g.ev,
           confidence: analysis.confidence,
           structuralOk: g.ev >= footballConfig.minEvThreshold,

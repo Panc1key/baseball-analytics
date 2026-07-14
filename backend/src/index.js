@@ -3,6 +3,8 @@ import cors from 'cors';
 import { config } from './config.js';
 import apiRouter from './routes/api.js';
 import footballRouter from './routes/football.js';
+import basketballRouter from './routes/basketball.js';
+import tennisRouter from './routes/tennis.js';
 
 const app = express();
 
@@ -15,10 +17,12 @@ app.get('/health', (_req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/api/football', footballRouter);
+app.use('/api/basketball', basketballRouter);
+app.use('/api/tennis', tennisRouter);
 
 app.listen(config.port, () => {
   console.log(`Baseball Analytics API: http://localhost:${config.port}`);
-  console.log(`Football Analytics API: http://localhost:${config.port}/api/football`);
+  console.log(`Football: /api/football · Basketball: /api/basketball · Tennis: /api/tennis`);
   if (!config.oddsApiKey) {
     console.warn('警告: 未設定 ODDS_API_KEY，請複製 .env.example 為 .env 並填入 key');
   } else {

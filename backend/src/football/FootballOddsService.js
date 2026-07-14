@@ -1,7 +1,11 @@
 /**
  * 足球賠率抓取（The Odds API）
  */
-import { OddsApiClient } from '../services/OddsApiClient.js';
+import {
+  OddsApiClient,
+  isOddsQuotaExhaustedError,
+  remainingQuota,
+} from '../services/OddsApiClient.js';
 import { FOOTBALL_LEAGUES, SOCCER_BULK_MARKETS, SOCCER_PROP_MARKETS, footballConfig } from './config.js';
 
 export async function fetchFootballOdds() {
@@ -17,6 +21,10 @@ export async function fetchFootballOdds() {
       results[code] = { league, games, error: null };
     } catch (err) {
       results[code] = { league, games: [], error: err.message };
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[football-odds] 額度耗盡，停止後續聯盟主盤');
+        break;
+      }
     }
   }
 
@@ -33,6 +41,10 @@ export async function fetchFootballScores() {
       results[code] = { league, scores, error: null };
     } catch (err) {
       results[code] = { league, scores: [], error: err.message };
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[football-scores] 額度耗盡，停止後續聯盟比分');
+        break;
+      }
     }
   }
 
@@ -41,7 +53,7 @@ export async function fetchFootballScores() {
 
 export async function fetchFootballPlayerProps(games, leagueKey, maxGames = footballConfig.maxPropGames) {
   if (!footballConfig.enablePlayerProps || !games?.length) {
-    return { propsByGameId: {}, quota: null };
+    return { propsByGameId: {}, quota: null, aborted: false };
   }
 
   const client = new OddsApiClient();
@@ -52,6 +64,7 @@ export async function fetchFootballPlayerProps(games, leagueKey, maxGames = foot
     .slice(0, maxGames);
 
   const markets = SOCCER_PROP_MARKETS.join(',');
+  let aborted = false;
 
   for (const game of sorted) {
     try {
@@ -60,13 +73,25 @@ export async function fetchFootballPlayerProps(games, leagueKey, maxGames = foot
       });
       const bookmakers = Array.isArray(event) ? event : event?.bookmakers || [];
       propsByGameId[game.id] = bookmakers;
+
+      const left = remainingQuota(client.getQuota());
+      if (left != null && left < 8) {
+        console.warn(`[football-props] 剩餘額度 ${left}，停止球員盤（每場 event-odds 很燒額度）`);
+        aborted = true;
+        break;
+      }
     } catch (err) {
       console.warn(`[football-props] ${game.id}:`, err.message);
       propsByGameId[game.id] = [];
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[football-props] 額度耗盡，立刻停止本聯盟球員盤（不再逐場重試）');
+        aborted = true;
+        break;
+      }
     }
   }
 
-  return { propsByGameId, quota: client.getQuota() };
+  return { propsByGameId, quota: client.getQuota(), aborted };
 }
 
 export async function listActiveFootballSports() {

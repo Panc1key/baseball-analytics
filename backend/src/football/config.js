@@ -16,7 +16,8 @@ export const footballConfig = {
   recommendWatchScore: parseFloat(process.env.FOOTBALL_WATCH_SCORE || '48'),
   maxPicksPerGame: parseInt(process.env.FOOTBALL_MAX_PICKS || '6', 10),
   maxPropGames: parseInt(process.env.FOOTBALL_MAX_PROP_GAMES || '8', 10),
-  enablePlayerProps: process.env.FOOTBALL_ENABLE_PROPS !== 'false',
+  /** 足球球員盤極耗 Odds API（逐場 event-odds）；額度不足時請保持 false */
+  enablePlayerProps: process.env.FOOTBALL_ENABLE_PROPS === 'true',
   maxModelEdgePct: parseFloat(process.env.FOOTBALL_MAX_MODEL_EDGE || '0.10'),
   marketBlendFull: parseFloat(process.env.FOOTBALL_MARKET_BLEND_FULL || '0.35'),
   marketBlendLite: parseFloat(process.env.FOOTBALL_MARKET_BLEND_LITE || '0.50'),
@@ -30,9 +31,11 @@ export const footballConfig = {
   parlayAnchorMinOdds: parseFloat(process.env.FOOTBALL_ANCHOR_MIN_ODDS || '1.45'),
   parlayAnchorMaxOdds: parseFloat(process.env.FOOTBALL_ANCHOR_MAX_ODDS || '1.85'),
   parlayAnchorMinProb: parseFloat(process.env.FOOTBALL_ANCHOR_MIN_PROB || '0.56'),
-  /** 世界盃多為中立場，主場優勢較低 */
+  /** 世界盃多為中立場，主場優勢較低（以勝率尺度表達，再映到進球加成） */
   homeAdvantageNeutral: parseFloat(process.env.FOOTBALL_HOME_ADV_NEUTRAL || '0.015'),
   homeAdvantageNormal: parseFloat(process.env.FOOTBALL_HOME_ADV_NORMAL || '0.055'),
+  /** Dixon–Coles ρ：負值提高 0-0/1-1 相關（文獻常見 -0.03~-0.13） */
+  dixonColesRho: parseFloat(process.env.FOOTBALL_DC_RHO || '-0.08'),
   baseDrawRate: parseFloat(process.env.FOOTBALL_BASE_DRAW_RATE || '0.24'),
 };
 

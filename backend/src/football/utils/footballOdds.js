@@ -2,6 +2,7 @@
  * 足球賠率工具（含三向獨贏去抽水）
  */
 import { calcEV, decimalToImpliedProb, decimalToNetOdds } from '../../utils/odds.js';
+import { asianHandicapFromGrid } from '../models/DixonColesScoreModel.js';
 
 export { calcEV, decimalToImpliedProb, decimalToNetOdds };
 
@@ -46,16 +47,24 @@ export function extractFairH2h3(bookmakers, homeTeam, awayTeam) {
   return null;
 }
 
-/** 亞洲讓球蓋盤機率（足球係數） */
-export function estimateSoccerCoverProb(winProb, drawProb, spreadPoint) {
-  const absLine = Math.abs(spreadPoint);
-  if (spreadPoint < 0) {
-    return Math.max(0.05, Math.min(0.92, winProb - drawProb * 0.35 - absLine * 0.14));
+/**
+ * 亞盤蓋盤（標準）：比分矩陣積分；無矩陣時退回啟發式
+ * @returns {{ winProb, pushProb, lossProb }}
+ */
+export function estimateSoccerCoverProb(winProb, drawProb, spreadPoint, scoreGrid = null, pickIsHome = true) {
+  if (scoreGrid) {
+    return asianHandicapFromGrid(scoreGrid, pickIsHome, spreadPoint);
   }
-  return Math.max(0.05, Math.min(0.92, winProb + drawProb * 0.4 + absLine * 0.11));
+  const absLine = Math.abs(spreadPoint);
+  const approx =
+    spreadPoint < 0
+      ? winProb - drawProb * 0.35 - absLine * 0.14
+      : winProb + drawProb * 0.4 + absLine * 0.11;
+  const win = Math.max(0.05, Math.min(0.92, approx));
+  return { winProb: win, pushProb: 0, lossProb: 1 - win };
 }
 
-/** 大於盤口總進球線的機率（預估值直接對比盤口線，非 line+0.5） */
+/** @deprecated 留給舊呼叫；新路徑請用 totalFromGrid */
 export function probGoalsOver(projectedGoals, line) {
   const diff = projectedGoals - line;
   return 1 / (1 + Math.exp(-diff / 0.42));

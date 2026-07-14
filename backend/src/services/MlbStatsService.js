@@ -58,7 +58,7 @@ export async function getMlbStandings(season) {
   return teams;
 }
 
-/** 取得多日賽程 */
+/** 取得多日賽程（從今天起往後） */
 export async function getMlbScheduleRange(dayCount = 3) {
   const games = [];
   for (let i = 0; i < dayCount; i++) {
@@ -69,6 +69,76 @@ export async function getMlbScheduleRange(dayCount = 3) {
     games.push(...dayGames);
   }
   return games;
+}
+
+/**
+ * 滾球用賽程窗口：昨天～明天（涵蓋跨日進行中場次 + linescore）
+ */
+export async function getMlbScheduleWindow({ daysBack = 1, daysForward = 1 } = {}) {
+  const games = [];
+  for (let i = -daysBack; i <= daysForward; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const dayGames = await getMlbSchedule(dateStr);
+    games.push(...dayGames);
+  }
+  return games;
+}
+
+/**
+ * 從 MLB schedule hydrate linescore 解析局數進度
+ * @returns {null|{inningsPlayed,inningsRemaining,currentInning,inningState,outs,balls,strikes,homeScore,awayScore,label,source}}
+ */
+export function extractLinescoreState(mlbGame) {
+  const ls = mlbGame?.linescore;
+  if (!ls) return null;
+
+  const currentInning = Number(ls.currentInning) || 0;
+  if (!currentInning) return null;
+
+  const inningState = String(ls.inningState || '').toLowerCase();
+  const outs = Math.min(2, Math.max(0, Number(ls.outs) || 0));
+  const halfProgress = outs / 3;
+
+  let inningsPlayed;
+  if (inningState === 'end') {
+    inningsPlayed = currentInning;
+  } else if (inningState === 'middle') {
+    inningsPlayed = currentInning - 0.5;
+  } else if (inningState === 'bottom') {
+    inningsPlayed = currentInning - 1 + 0.5 + halfProgress * 0.5;
+  } else if (inningState === 'top') {
+    inningsPlayed = currentInning - 1 + halfProgress * 0.5;
+  } else {
+    inningsPlayed = Math.max(0.4, currentInning - 0.5);
+  }
+
+  const regulation = 9;
+  let inningsRemaining;
+  if (currentInning > regulation) {
+    // 延長賽：至少再半局
+    inningsRemaining = inningState === 'end' ? 0.5 : Math.max(0.35, 1 - halfProgress * 0.5);
+  } else {
+    inningsRemaining = Math.max(0.3, regulation - inningsPlayed);
+  }
+
+  const stateLabel =
+    { top: '上', bottom: '下', middle: '中', end: '結束' }[inningState] || inningState || '';
+
+  return {
+    inningsPlayed: Math.round(inningsPlayed * 100) / 100,
+    inningsRemaining: Math.round(inningsRemaining * 100) / 100,
+    currentInning,
+    inningState: ls.inningState || null,
+    outs,
+    balls: ls.balls != null ? Number(ls.balls) : null,
+    strikes: ls.strikes != null ? Number(ls.strikes) : null,
+    homeScore: ls.teams?.home?.runs != null ? Number(ls.teams.home.runs) : null,
+    awayScore: ls.teams?.away?.runs != null ? Number(ls.teams.away.runs) : null,
+    label: `第${currentInning}局${stateLabel}${outs != null ? ` · ${outs}出局` : ''}`,
+    source: 'mlb_linescore',
+  };
 }
 
 /** 傷兵名單摘要 */

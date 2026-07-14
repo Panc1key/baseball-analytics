@@ -3,7 +3,7 @@
     <header class="header">
       <div>
         <h1>初盤分析系統</h1>
-        <p class="subtitle">MLB / NPB / KBO · 世界盃 / MLS / 墨超 / K聯 · 香港時間按日推薦</p>
+        <p class="subtitle">MLB / NPB / KBO · 足球 · 籃球 · 網球 · 香港時間按日推薦</p>
         <div v-if="hasApiKey && lastSyncAt" class="status-line">
           <span>{{ syncStatusText }}</span>
           <span v-if="oddsQuota != null" class="quota">API 剩餘 {{ oddsQuota }} 次</span>
@@ -32,14 +32,14 @@
     <el-tabs v-model="activeTab">
       <el-tab-pane label="按日推薦" name="slate">
         <p class="hint">
-          跨聯盟按<strong>香港時間</strong>分組 · 棒球 + 足球統一 Slate · 支援未來 7 天初盤
+          跨聯盟按<strong>香港時間</strong>分組 · 棒球 / 足球 / 籃球 / 網球 · 支援未來 7 天初盤
         </p>
         <DailySlatePanel ref="slatePanelRef" :auto-load="false" />
       </el-tab-pane>
 
       <el-tab-pane label="滾球推薦" name="live">
         <p class="hint">
-          棒球滾球 v1 · 初盤 prior + 即時比分條件更新 · 對滾球獨贏（與可選大小）算 EV
+          棒球滾球 v1.2 · MLB 官方局數 + 條件勝率 · 請用「同步滾球」更新（不等於初盤已開賽）
         </p>
         <LivePanel ref="livePanelRef" :auto-load="false" />
       </el-tab-pane>
@@ -128,6 +128,14 @@
       <el-tab-pane label="世界盃" name="football">
         <FootballPanel />
       </el-tab-pane>
+
+      <el-tab-pane label="籃球" name="basketball">
+        <BasketballPanel />
+      </el-tab-pane>
+
+      <el-tab-pane label="網球" name="tennis">
+        <TennisPanel />
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -139,6 +147,8 @@ import StatsCards from './components/StatsCards.vue';
 import RecommendationsTable from './components/RecommendationsTable.vue';
 import ParlayList from './components/ParlayList.vue';
 import FootballPanel from './components/FootballPanel.vue';
+import BasketballPanel from './components/BasketballPanel.vue';
+import TennisPanel from './components/TennisPanel.vue';
 import DailySlatePanel from './components/DailySlatePanel.vue';
 import LivePanel from './components/LivePanel.vue';
 import { refreshSlate, getRecommendations, getParlays, getStatus, getMarkets } from './api/index.js';

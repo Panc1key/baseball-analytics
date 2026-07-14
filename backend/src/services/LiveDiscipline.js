@@ -46,6 +46,19 @@ export function enforceLiveDiscipline(candidate, context = {}) {
   const ev = candidate.ev ?? -1;
   const edge = candidate.edgeProb ?? 0;
   const market = candidate.market;
+  const odds =
+    candidate.oddsDecimal ??
+    candidate.odds_decimal ??
+    candidate.odds?.price ??
+    0;
+
+  const minOdds = config.liveMinOdds ?? 1.55;
+  const primaryMinOdds = config.livePrimaryMinOdds ?? 1.7;
+  if (odds > 0 && odds < minOdds) {
+    rejectReasons.push(
+      `賠率 ${Number(odds).toFixed(2)} 過低（滾球最低 ${minOdds}，避開鎖死熱門）`
+    );
+  }
 
   const minEv = config.liveMinEvThreshold ?? 0.03;
   const minEdge =
@@ -53,7 +66,18 @@ export function enforceLiveDiscipline(candidate, context = {}) {
       ? (config.liveTotalsMinEdgePct ?? 3.5)
       : (config.liveH2hMinEdgePct ?? 2.5);
 
-  if (ev < minEv) rejectReasons.push(`EV ${(ev * 100).toFixed(1)}% < 門檻 ${(minEv * 100).toFixed(0)}%`);
+  // 低水需更高 EV：否則薄利高方差，實用不值得
+  let effectiveMinEv = minEv;
+  if (odds > 0 && odds < primaryMinOdds) {
+    effectiveMinEv = minEv + (config.liveLowOddsExtraEv ?? 0.04);
+  }
+
+  if (ev < effectiveMinEv) {
+    rejectReasons.push(
+      `EV ${(ev * 100).toFixed(1)}% < 門檻 ${(effectiveMinEv * 100).toFixed(0)}%` +
+        (effectiveMinEv > minEv ? '（低水加嚴）' : '')
+    );
+  }
   if (edge < minEdge) rejectReasons.push(`優勢 ${edge.toFixed(1)}% < 門檻 ${minEdge}%`);
 
   // 與市場嚴重衝突：模型比市場樂觀過多 → 拒絕（防幻覺硬剛莊家）
@@ -106,8 +130,25 @@ export function enforceLiveDiscipline(candidate, context = {}) {
     }
   }
 
+  // 低水不得主推（即使勝率很高）
+  if (odds > 0 && odds < primaryMinOdds) {
+    if (tierCap === 'primary') tierCap = 'watch';
+    warnings.push(`賠率 ${Number(odds).toFixed(2)} < ${primaryMinOdds}，禁止主推（低水縮倉）`);
+  }
+
   if (candidate.tier === 'primary' && modelProb < WATCH_ONLY_BELOW()) {
     tierCap = 'watch';
+  }
+
+  // 一邊倒領先方的低水獨贏：再砍注提示
+  if (
+    market === 'h2h' &&
+    context.live?.isBlowout &&
+    odds > 0 &&
+    odds < primaryMinOdds &&
+    modelProb >= 0.8
+  ) {
+    warnings.push('一邊倒鎖勝熱門：實用價值低，寧可不推或極小注');
   }
 
   const loseProb = Math.max(0, Math.min(1, 1 - modelProb));
@@ -138,12 +179,22 @@ export function applyDisciplineToCandidate(candidate, discipline, baseStake) {
   }
 
   const stakeCap = config.liveMaxStake ?? 8;
-  const stakeMult = config.liveStakeHaircut ?? 0.7;
+  let stakeMult = config.liveStakeHaircut ?? 0.7;
+  const odds =
+    candidate.oddsDecimal ?? candidate.odds_decimal ?? candidate.odds?.price ?? 0;
+  const primaryMinOdds = config.livePrimaryMinOdds ?? 1.7;
+  if (odds > 0 && odds < primaryMinOdds) {
+    stakeMult *= 0.55; // 低水再砍倉
+  }
+  if (discipline.warnings?.some((w) => w.includes('一邊倒鎖勝'))) {
+    stakeMult *= 0.5;
+  }
+
   let suggestedStake = candidate.suggestedStake ?? candidate.suggested_stake;
   if (suggestedStake != null) {
-    suggestedStake = Math.min(stakeCap, Math.round(suggestedStake * stakeMult));
+    suggestedStake = Math.min(stakeCap, Math.max(1, Math.round(suggestedStake * stakeMult)));
   } else if (baseStake != null) {
-    suggestedStake = Math.min(stakeCap, Math.round(baseStake * stakeMult));
+    suggestedStake = Math.min(stakeCap, Math.max(1, Math.round(baseStake * stakeMult)));
   }
 
   const riskLine = `風險: ${discipline.worstCase.note}`;

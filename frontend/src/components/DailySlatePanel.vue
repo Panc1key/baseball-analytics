@@ -58,6 +58,8 @@
                   {{ day.summary.count }} 條
                   <span v-if="day.summary.bySport.baseball"> · 棒球 {{ day.summary.bySport.baseball }}</span>
                   <span v-if="day.summary.bySport.football"> · 足球 {{ day.summary.bySport.football }}</span>
+                  <span v-if="day.summary.bySport.basketball"> · 籃球 {{ day.summary.bySport.basketball }}</span>
+                  <span v-if="day.summary.bySport.tennis"> · 網球 {{ day.summary.bySport.tennis }}</span>
                   <span v-if="day.summary.totalSuggestedStake"> · 建議 {{ day.summary.totalSuggestedStake }}元</span>
                 </template>
                 <template v-else>無推薦</template>
@@ -77,7 +79,18 @@
             </el-table-column>
             <el-table-column label="聯盟" width="100">
               <template #default="{ row }">
-                <el-tag size="small" :type="row.sport_category === 'football' ? 'success' : ''">
+                <el-tag
+                  size="small"
+                  :type="
+                    row.sport_category === 'football'
+                      ? 'success'
+                      : row.sport_category === 'basketball'
+                        ? 'warning'
+                        : row.sport_category === 'tennis'
+                          ? 'danger'
+                          : ''
+                  "
+                >
                   {{ row.league_name || leagueLabel(row.league) }}
                 </el-tag>
               </template>
@@ -85,7 +98,7 @@
             <el-table-column label="對戰" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <div>{{ formatMatchup(row.away_team, row.home_team) }}</div>
-                <el-tag v-if="row.is_live" type="danger" size="small" effect="plain">滾球</el-tag>
+                <el-tag v-if="row.is_started" type="warning" size="small" effect="plain">進行中</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="序位" width="64">
@@ -150,7 +163,14 @@ const enabledLeagues = computed(() => {
   if (!slate.value?.enabledLeagues) return [];
   const b = (slate.value.enabledLeagues.baseball || []).join('/');
   const f = (slate.value.enabledLeagues.football || []).join('/');
-  return [`棒球 ${b}`, `足球 ${f}`].filter(Boolean);
+  const k = (slate.value.enabledLeagues.basketball || []).join('/');
+  const t = slate.value.enabledLeagues.tennis ? 'ATP/WTA' : '';
+  return [
+    b && `棒球 ${b}`,
+    f && `足球 ${f}`,
+    k && `籃球 ${k}`,
+    t && `網球 ${t}`,
+  ].filter(Boolean);
 });
 
 function formatTime(iso) {

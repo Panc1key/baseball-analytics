@@ -1,16 +1,22 @@
 /**
- * 跨聯盟按日 Slate — 棒球 + 足球推薦聚合（香港時區）
+ * 跨聯盟按日 Slate — 棒/足/籃/網 初盤推薦聚合（香港時區）
  */
 import db from '../db/database.js';
 import { config, BASEBALL_LEAGUE_SQL, LEAGUES } from '../config.js';
 import { FOOTBALL_LEAGUES, FOOTBALL_LEAGUE_CODES } from '../football/config.js';
-import { activeGameWhere, isGameLive } from '../utils/activeGames.js';
+import { BASKETBALL_LEAGUES, BASKETBALL_LEAGUE_CODES } from '../basketball/config.js';
+import { TENNIS_LEAGUE_SQL, isTennisLeagueCode } from '../tennis/config.js';
+import { activeGameWhere, isGameStarted } from '../utils/activeGames.js';
 import { classifyBetStrategy } from './BetStrategy.js';
 import { enrichWithSuggestedStake } from './StakeSizer.js';
 import { getBettingStrategyMeta } from './AnalysisEngine.js';
 import { getFootballBettingMeta } from '../football/FootballAnalysisEngine.js';
+import { getBasketballBettingMeta } from '../basketball/BasketballAnalysisEngine.js';
+import { getTennisBettingMeta } from '../tennis/TennisAnalysisEngine.js';
 import { fullRefresh } from './AnalysisEngine.js';
 import { footballFullRefresh } from '../football/FootballAnalysisEngine.js';
+import { basketballFullRefresh } from '../basketball/BasketballAnalysisEngine.js';
+import { tennisFullRefresh } from '../tennis/TennisAnalysisEngine.js';
 import {
   toLocalDateKey,
   formatLocalDateLabel,
@@ -22,26 +28,37 @@ import {
 } from '../utils/timezone.js';
 
 const FOOTBALL_LEAGUE_SQL = FOOTBALL_LEAGUE_CODES.map((c) => `'${c}'`).join(',');
-const ALL_SLATE_LEAGUE_SQL = `${BASEBALL_LEAGUE_SQL},${FOOTBALL_LEAGUE_SQL}`;
+const BASKETBALL_LEAGUE_SQL = BASKETBALL_LEAGUE_CODES.map((c) => `'${c}'`).join(',');
+/** 靜態聯盟碼 + 網球動態 ATP_/WTA_ */
+const ALL_SLATE_LEAGUE_PRED = `(
+  league IN (${BASEBALL_LEAGUE_SQL},${FOOTBALL_LEAGUE_SQL},${BASKETBALL_LEAGUE_SQL})
+  OR ${TENNIS_LEAGUE_SQL}
+)`;
 
 const BASEBALL_SET = new Set(Object.keys(LEAGUES));
 const FOOTBALL_SET = new Set(FOOTBALL_LEAGUE_CODES);
+const BASKETBALL_SET = new Set(BASKETBALL_LEAGUE_CODES);
 
 export const LEAGUE_DISPLAY_NAMES = {
   ...Object.fromEntries(Object.entries(LEAGUES).map(([k, v]) => [k, v.name])),
   ...Object.fromEntries(Object.entries(FOOTBALL_LEAGUES).map(([k, v]) => [k, v.name])),
+  ...Object.fromEntries(Object.entries(BASKETBALL_LEAGUES).map(([k, v]) => [k, v.name])),
 };
 
 function sportCategory(league) {
   if (BASEBALL_SET.has(league)) return 'baseball';
   if (FOOTBALL_SET.has(league)) return 'football';
+  if (BASKETBALL_SET.has(league)) return 'basketball';
+  if (isTennisLeagueCode(league)) return 'tennis';
   return 'other';
 }
 
 function enrichRow(r) {
   const base = {
     ...r,
-    is_live: isGameLive(r.commence_time, r.completed),
+    is_started: isGameStarted(r.commence_time, r.completed),
+    /** Slate 僅初盤；已開賽標「進行中」，真滾球見滾球 Tab */
+    is_live: false,
     pick_rank: r.pick_rank,
     rank_label:
       r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,
@@ -76,7 +93,7 @@ export function querySlatePicks(filters = {}) {
     SELECT r.*, g.home_team, g.away_team, g.commence_time, g.completed
     FROM recommendations r
     JOIN games g ON g.id = r.game_id
-    WHERE r.league IN (${ALL_SLATE_LEAGUE_SQL})
+    WHERE ${ALL_SLATE_LEAGUE_PRED.replace(/\bleague\b/g, 'r.league')}
       AND IFNULL(r.phase, 'prematch') = 'prematch'
       AND r.ev >= ?
       AND g.completed = 0
@@ -117,7 +134,7 @@ export function querySlatePicks(filters = {}) {
 
 function summarizeDay(picks) {
   const byLeague = {};
-  const bySport = { baseball: 0, football: 0, other: 0 };
+  const bySport = { baseball: 0, football: 0, basketball: 0, tennis: 0, other: 0 };
   let totalSuggestedStake = 0;
   let flatCount = 0;
   let anchorCount = 0;
@@ -188,10 +205,14 @@ export function getSlateByDate(filters = {}) {
     enabledLeagues: {
       baseball: Object.keys(LEAGUES),
       football: FOOTBALL_LEAGUE_CODES,
+      basketball: BASKETBALL_LEAGUE_CODES,
+      tennis: 'dynamic',
     },
     meta: {
       baseball: getBettingStrategyMeta(),
       football: getFootballBettingMeta(),
+      basketball: getBasketballBettingMeta(),
+      tennis: getTennisBettingMeta(),
       horizonHours: config.upcomingGameHorizonHours,
     },
   };
@@ -199,12 +220,22 @@ export function getSlateByDate(filters = {}) {
 
 /** 同步並分析所有已啟用聯盟 */
 export async function slateFullRefresh() {
-  const [baseball, football] = await Promise.all([fullRefresh(), footballFullRefresh()]);
+  const [baseball, football, basketball, tennis] = await Promise.all([
+    fullRefresh(),
+    footballFullRefresh(),
+    basketballFullRefresh(),
+    tennisFullRefresh(),
+  ]);
   return {
     baseball,
     football,
+    basketball,
+    tennis,
     totalRecommendations:
-      (baseball.recommendationCount ?? 0) + (football.analysis?.recommendations ?? 0),
+      (baseball.recommendationCount ?? 0) +
+      (football.analysis?.recommendations ?? 0) +
+      (basketball.analysis?.recommendations ?? 0) +
+      (tennis.analysis?.recommendations ?? 0),
   };
 }
 
@@ -212,7 +243,7 @@ export function getSlateStatus() {
   const gameCounts = db
     .prepare(
       `SELECT league, COUNT(1) as cnt FROM games
-       WHERE league IN (${ALL_SLATE_LEAGUE_SQL})
+       WHERE ${ALL_SLATE_LEAGUE_PRED}
          AND completed = 0
          AND ${activeGameWhere()}
        GROUP BY league`
@@ -222,7 +253,7 @@ export function getSlateStatus() {
   const recCounts = db
     .prepare(
       `SELECT league, COUNT(1) as cnt FROM recommendations
-       WHERE league IN (${ALL_SLATE_LEAGUE_SQL})
+       WHERE ${ALL_SLATE_LEAGUE_PRED}
          AND IFNULL(phase, 'prematch') = 'prematch'
        GROUP BY league`
     )
@@ -240,6 +271,11 @@ export function getSlateStatus() {
         code: c,
         name: FOOTBALL_LEAGUES[c].name,
       })),
+      basketball: BASKETBALL_LEAGUE_CODES.map((c) => ({
+        code: c,
+        name: BASKETBALL_LEAGUES[c].name,
+      })),
+      tennis: 'ATP/WTA active keys（動態）',
     },
   };
 }

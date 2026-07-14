@@ -134,15 +134,15 @@ export async function analyzeFootballMatchup(leagueCode, homeTeam, awayTeam, boo
     awayProfile,
     neutralVenue: leagueMeta?.neutralVenue ?? false,
     tacticalEdge: intel.tacticalEdge ?? 0,
+    league: leagueCode,
   });
 
   const totalsProjection = projectMatchGoals({
-    league: leagueCode,
-    homeProfile,
-    awayProfile,
+    homeLambda: h2h.homeLambda,
+    awayLambda: h2h.awayLambda,
+    scoreGrid: h2h.scoreGrid,
     bookmakers,
-    h2hDrawProb: h2h.drawProb,
-    marketH2h: h2h.market,
+    xgFactors: [],
   });
 
   return {
@@ -156,6 +156,9 @@ export async function analyzeFootballMatchup(leagueCode, homeTeam, awayTeam, boo
     marketHomeProb: h2h.market?.homeProb ?? null,
     marketDrawProb: h2h.market?.drawProb ?? null,
     marketAwayProb: h2h.market?.awayProb ?? null,
+    scoreGrid: h2h.scoreGrid,
+    homeLambda: h2h.homeLambda,
+    awayLambda: h2h.awayLambda,
     totalsProjection,
     projectedTotal: totalsProjection.finalTotal,
     homeProfile,

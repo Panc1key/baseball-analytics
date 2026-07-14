@@ -20,7 +20,7 @@ import {
 import { config, LEAGUES, BASEBALL_LEAGUE_CODES, BASEBALL_LEAGUE_SQL } from '../config.js';
 import { classifyBetStrategy } from './BetStrategy.js';
 import { enrichWithSuggestedStake, getStakeSizingMeta } from './StakeSizer.js';
-import { activeGameWhere, isGameLive } from '../utils/activeGames.js';
+import { activeGameWhere, isGameStarted } from '../utils/activeGames.js';
 import { runLiveAnalysis, getLiveRecommendations, getLiveStatus } from './LiveAnalysisEngine.js';
 
 let refreshPromise = null;
@@ -591,7 +591,9 @@ export function getRecommendations(filters = {}) {
   const enriched = rows.map((r) => {
     const base = {
       ...r,
-      is_live: isGameLive(r.commence_time),
+      is_started: isGameStarted(r.commence_time),
+      /** 真滾球推薦僅 phase=live；初盤已開賽用 is_started */
+      is_live: r.phase === 'live',
       pick_rank: r.pick_rank,
       rank_label:
         r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,

@@ -119,27 +119,36 @@ export async function syncFootballData() {
   }
 
   let propsQuota = null;
-  for (const [code, { games, league }] of Object.entries(oddsData.results)) {
-    if (!games?.length) continue;
-    try {
-      const { propsByGameId, quota } = await fetchFootballPlayerProps(
-        games,
-        league.key,
-        footballConfig.maxPropGames
-      );
-      propsQuota = quota;
-      for (const [gameId, bookmakers] of Object.entries(propsByGameId)) {
-        if (bookmakers?.length) {
-          db.prepare(`UPDATE games SET raw_props = ?, updated_at = datetime('now') WHERE id = ?`).run(
-            JSON.stringify(bookmakers),
-            gameId
-          );
+  if (footballConfig.enablePlayerProps) {
+    for (const [code, { games, league }] of Object.entries(oddsData.results)) {
+      if (!games?.length) continue;
+      try {
+        const { propsByGameId, quota, aborted } = await fetchFootballPlayerProps(
+          games,
+          league.key,
+          footballConfig.maxPropGames
+        );
+        propsQuota = quota;
+        for (const [gameId, bookmakers] of Object.entries(propsByGameId)) {
+          if (bookmakers?.length) {
+            db.prepare(`UPDATE games SET raw_props = ?, updated_at = datetime('now') WHERE id = ?`).run(
+              JSON.stringify(bookmakers),
+              gameId
+            );
+          }
         }
+        console.log(`[football/${code}] 球員盤 ${Object.keys(propsByGameId).length} 場`);
+        if (aborted) {
+          console.warn('[football] 額度不足，跳過其餘聯盟球員盤');
+          break;
+        }
+      } catch (err) {
+        console.warn(`[football/${code}] 球員盤失敗:`, err.message);
+        if (/OUT_OF_USAGE_CREDITS|quota has been reached/i.test(err.message || '')) break;
       }
-      console.log(`[football/${code}] 球員盤 ${Object.keys(propsByGameId).length} 場`);
-    } catch (err) {
-      console.warn(`[football/${code}] 球員盤失敗:`, err.message);
     }
+  } else {
+    console.log('[football] 球員盤已關閉（FOOTBALL_ENABLE_PROPS≠true），節省 Odds API 額度');
   }
 
   return {
@@ -337,9 +346,7 @@ export const FOOTBALL_MARKETS_INFO = Object.fromEntries(
       oddsKey: league.key,
       bulkMarkets: ['h2h (獨贏含和局)', 'spreads (亞洲讓球)', 'totals (大小球)'],
       eventMarkets: SOCCER_PROP_MARKETS.map((m) => m),
-      note: footballConfig.apiFootballKey
-        ? '已接入 API-Football：陣容、傷病、戰術、球員數據'
-        : '建議設定 API_FOOTBALL_KEY 以啟用陣容/傷病/戰術分析',
+      note: 'Dixon–Coles 比分矩陣定價 1X2/亞盤/大小 · 暫無滾球',
     },
   ])
 );

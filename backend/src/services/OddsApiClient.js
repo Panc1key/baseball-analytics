@@ -3,6 +3,28 @@ import { MLB_PROP_MARKETS } from './PlayerPropAnalyzer.js';
 
 const BASE_URL = 'https://api.the-odds-api.com/v4';
 
+export class OddsApiError extends Error {
+  constructor(status, body) {
+    super(`Odds API 錯誤 ${status}: ${body}`);
+    this.name = 'OddsApiError';
+    this.status = status;
+    this.body = body;
+    this.isQuotaExhausted =
+      status === 401 ||
+      status === 429 ||
+      /OUT_OF_USAGE_CREDITS|quota has been reached/i.test(body || '');
+  }
+}
+
+export function isOddsQuotaExhaustedError(err) {
+  return Boolean(err?.isQuotaExhausted || /OUT_OF_USAGE_CREDITS|quota has been reached/i.test(err?.message || ''));
+}
+
+export function remainingQuota(quota) {
+  const n = parseInt(quota?.remaining, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 export class OddsApiClient {
   constructor(apiKey = config.oddsApiKey) {
     this.apiKey = apiKey;
@@ -30,7 +52,7 @@ export class OddsApiClient {
 
     if (!res.ok) {
       const body = await res.text();
-      throw new Error(`Odds API 錯誤 ${res.status}: ${body}`);
+      throw new OddsApiError(res.status, body);
     }
 
     return res.json();
@@ -66,8 +88,8 @@ export class OddsApiClient {
     });
   }
 
-  async listSports() {
-    return this.request('/sports', { all: 'false' });
+  async listSports({ all = false } = {}) {
+    return this.request('/sports', { all: all ? 'true' : 'false' });
   }
 
   getQuota() {
@@ -87,6 +109,10 @@ export async function fetchAllLeagueOdds() {
       results[code] = { league, games, error: null };
     } catch (err) {
       results[code] = { league, games: [], error: err.message };
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[odds] 額度耗盡，停止後續聯盟主盤請求');
+        break;
+      }
     }
   }
 
@@ -95,7 +121,7 @@ export async function fetchAllLeagueOdds() {
 
 export async function fetchMlbPlayerProps(games, maxGames = 6) {
   if (!config.enablePlayerProps || !games?.length) {
-    return { propsByGameId: {}, quota: null };
+    return { propsByGameId: {}, quota: null, aborted: false };
   }
 
   const client = new OddsApiClient();
@@ -106,6 +132,7 @@ export async function fetchMlbPlayerProps(games, maxGames = 6) {
     .slice(0, maxGames);
 
   const markets = MLB_PROP_MARKETS.join(',');
+  let aborted = false;
 
   for (const game of sorted) {
     try {
@@ -113,13 +140,24 @@ export async function fetchMlbPlayerProps(games, maxGames = 6) {
         regions: 'us',
       });
       propsByGameId[game.id] = event.bookmakers || [];
+      const left = remainingQuota(client.getQuota());
+      if (left != null && left < 5) {
+        console.warn(`[props] 剩餘額度 ${left}，停止 MLB 球員盤`);
+        aborted = true;
+        break;
+      }
     } catch (err) {
       console.warn(`[props] ${game.id} 失敗:`, err.message);
       propsByGameId[game.id] = [];
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[props] 額度耗盡，停止 MLB 球員盤請求');
+        aborted = true;
+        break;
+      }
     }
   }
 
-  return { propsByGameId, quota: client.getQuota() };
+  return { propsByGameId, quota: client.getQuota(), aborted };
 }
 
 export async function fetchAllLeagueScores() {
@@ -132,6 +170,10 @@ export async function fetchAllLeagueScores() {
       results[code] = { league, scores, error: null };
     } catch (err) {
       results[code] = { league, scores: [], error: err.message };
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[scores] 額度耗盡，停止後續聯盟比分請求');
+        break;
+      }
     }
   }
 

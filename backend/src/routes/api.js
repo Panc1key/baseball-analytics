@@ -20,6 +20,7 @@ import {
   getLiveRecommendations,
   getLiveStatus,
   runLiveAnalysis,
+  liveFullRefresh,
 } from '../services/LiveAnalysisEngine.js';
 import { getSlateCoverage } from '../services/ParlayBuilder.js';
 import { config, LEAGUES } from '../config.js';
@@ -150,16 +151,9 @@ router.post('/live/analyze', async (_req, res) => {
 
 router.post('/live/refresh', async (_req, res) => {
   try {
-    // 先走完整同步（含比分/滾球賠率），再單獨回傳滾球結果
-    const full = await fullRefresh();
-    res.json({
-      success: true,
-      data: {
-        ...full,
-        live: full.liveAnalysis,
-        status: getLiveStatus(),
-      },
-    });
+    // 輕量：只同步比分+賠率 → 滾球分析（不重跑初盤）
+    const data = await liveFullRefresh();
+    res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

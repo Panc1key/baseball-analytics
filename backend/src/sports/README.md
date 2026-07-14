@@ -1,14 +1,9 @@
-# sports — 按運動拆分的分析模組
+# Sports modules
 
-每個子目錄包含該運動的模型、推薦規則與（可選）統計封裝。
-
-| 目錄 | 階段 | 說明 |
-|------|------|------|
-| `mlb/` | **P0 進行中** | 美職，當前程式仍在 `services/` |
-| `npb/` `kbo/` | 維護 | 亞洲棒球，數據較弱 |
-| `nba/` | P2 | 填補 MLB 休賽 |
-| `nfl/` | P2+ | 每週精選 |
-| `soccer/` | P3 | 足球，模型複雜度高 |
-| `esports/` | P4 | 需獨立賠率 API |
-
-共用邏輯見 `../core/`。賽季時間見 `../calendar/seasons.json`。
+| 目錄 | 狀態 |
+|------|------|
+| mlb / npb / kbo | 棒球主力（services 內） |
+| soccer + football/ | 足球初盤已接 |
+| nba + basketball/ | 籃球初盤已接（NBA/WNBA/夏季聯賽） |
+| tennis/ | 網球初盤已接（動態 ATP/WTA） |
+| nfl / esports | 僅規劃 |
