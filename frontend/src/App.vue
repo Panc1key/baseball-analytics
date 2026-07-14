@@ -2,8 +2,8 @@
   <div class="app">
     <header class="header">
       <div>
-        <h1>棒球初盤分析</h1>
-        <p class="subtitle">MLB / NPB / KBO · 動態建議投注 · 串關低水錨腿</p>
+        <h1>初盤分析系統</h1>
+        <p class="subtitle">MLB / NPB / KBO · 世界盃 / MLS / 墨超 / K聯 · 香港時間按日推薦</p>
         <div v-if="hasApiKey && lastSyncAt" class="status-line">
           <span>{{ syncStatusText }}</span>
           <span v-if="oddsQuota != null" class="quota">API 剩餘 {{ oddsQuota }} 次</span>
@@ -30,14 +30,27 @@
     <StatsCards :items="statItems" />
 
     <el-tabs v-model="activeTab">
+      <el-tab-pane label="按日推薦" name="slate">
+        <p class="hint">
+          跨聯盟按<strong>香港時間</strong>分組 · 棒球 + 足球統一 Slate · 支援未來 7 天初盤
+        </p>
+        <DailySlatePanel ref="slatePanelRef" :auto-load="false" />
+      </el-tab-pane>
+
+      <el-tab-pane label="滾球推薦" name="live">
+        <p class="hint">
+          棒球滾球 v1 · 初盤 prior + 即時比分條件更新 · 對滾球獨贏（與可選大小）算 EV
+        </p>
+        <LivePanel ref="livePanelRef" :auto-load="false" />
+      </el-tab-pane>
+
       <el-tab-pane label="均注精選" name="flat">
         <div v-if="bettingMeta?.flatBet" class="strategy-banner flat">
           <strong>{{ bettingMeta.flatBet.label }}</strong>
-          <span>基準均注 {{ bettingMeta.flatBet.baseUnit }}{{ bettingMeta.flatBet.currency || '元' }}</span>
-          <span>依 EV / 優勢動態建議額</span>
           <span>賠率 ≥ {{ bettingMeta.flatBet.minOdds }}</span>
           <span>勝率 ≥ {{ (bettingMeta.flatBet.minProb * 100).toFixed(0) }}%</span>
-          <span>同一場可主推+次推（不同盤口）</span>
+          <span>EV ≥ {{ (bettingMeta.flatBet.minEv * 100).toFixed(0) }}%</span>
+          <span>基準均注 {{ bettingMeta.flatBet.baseUnit }}{{ bettingMeta.flatBet.currency || '元' }}（動態建議）</span>
           <span class="desc">{{ bettingMeta.flatBet.description }}</span>
         </div>
         <div class="filter-bar">
@@ -52,8 +65,7 @@
           :recommendations="flatRecs"
           :loading="loading"
           :empty-text="flatEmptyText"
-          :currency="bettingMeta?.flatBet?.currency || '元'"
-          sort-hint="依開賽時間 · 同場主推→次推 · 建議投注額依 EV 動態調整"
+          sort-hint="依 EV 排序 · 高賠實現價值"
         />
       </el-tab-pane>
 
@@ -62,7 +74,7 @@
           <strong>{{ bettingMeta.parlayAnchor.label }}</strong>
           <span>賠率 {{ bettingMeta.parlayAnchor.minOdds }}～{{ bettingMeta.parlayAnchor.maxOdds }}</span>
           <span>勝率 ≥ {{ (bettingMeta.parlayAnchor.minProb * 100).toFixed(0) }}%</span>
-          <span>建議額約基準均注 × {{ ((bettingMeta.parlayAnchor.stakeRatio || 0.35) * 100).toFixed(0) }}%</span>
+          <span>基準 {{ bettingMeta.parlayAnchor.baseUnit }}{{ bettingMeta.parlayAnchor.currency || '元' }} × {{ ((bettingMeta.parlayAnchor.stakeRatio ?? 0.35) * 100).toFixed(0) }}%</span>
           <span class="desc">{{ bettingMeta.parlayAnchor.description }}</span>
         </div>
         <div class="filter-bar">
@@ -77,15 +89,14 @@
           :recommendations="anchorRecs"
           :loading="loading"
           :empty-text="anchorEmptyText"
-          :currency="bettingMeta?.parlayAnchor?.currency || '元'"
-          sort-hint="依模型勝率排序 · 低水穩腿 · 建議額為縮倉比例"
+          sort-hint="依模型勝率排序 · 低水穩腿"
           highlight-prob
         />
       </el-tab-pane>
 
       <el-tab-pane label="串關組合" name="parlays">
         <p class="hint parlay-hint">
-          $1 六合彩型大串：盡量涵蓋當日全部場次（錨腿優先）· 不要求全中 · 均注請用「均注精選」
+          全場大串：僅含<strong>主推</strong>獨贏/讓分（正 EV、禁大小球）· 缺主推的场次不硬补 · $1 六合彩
         </p>
         <ParlayList
           :parlays="parlays"
@@ -113,6 +124,10 @@
         </div>
         <el-empty v-else description="載入盤口說明中…" />
       </el-tab-pane>
+
+      <el-tab-pane label="世界盃" name="football">
+        <FootballPanel />
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -123,9 +138,14 @@ import { ElMessage } from 'element-plus';
 import StatsCards from './components/StatsCards.vue';
 import RecommendationsTable from './components/RecommendationsTable.vue';
 import ParlayList from './components/ParlayList.vue';
-import { refreshData, getRecommendations, getParlays, getStatus, getMarkets } from './api/index.js';
+import FootballPanel from './components/FootballPanel.vue';
+import DailySlatePanel from './components/DailySlatePanel.vue';
+import LivePanel from './components/LivePanel.vue';
+import { refreshSlate, getRecommendations, getParlays, getStatus, getMarkets } from './api/index.js';
 
-const activeTab = ref('flat');
+const activeTab = ref('slate');
+const slatePanelRef = ref(null);
+const livePanelRef = ref(null);
 const loading = ref(false);
 const refreshing = ref(false);
 const flatRecs = ref([]);
@@ -139,17 +159,16 @@ const leagueFilter = ref('');
 const lastSyncAt = ref(null);
 const oddsQuota = ref(null);
 
-const statItems = computed(() => [
-  { label: '均注精選', value: flatRecs.value.length, class: 'positive' },
-  { label: '串關錨腿', value: anchorRecs.value.length },
-  { label: '串關組合', value: parlays.value.length },
-  {
-    label: '錨腿均勝率',
-    value: anchorRecs.value.length
-      ? `${(anchorRecs.value.reduce((a, r) => a + r.model_prob, 0) / anchorRecs.value.length * 100).toFixed(1)}%`
-      : '—',
-  },
-]);
+const statItems = computed(() => {
+  const slateTotal = slatePanelRef.value?.slate?.totalPicks ?? 0;
+  const liveTotal = livePanelRef.value?.recs?.length ?? 0;
+  return [
+    { label: '按日推薦', value: slateTotal, class: 'positive' },
+    { label: '滾球推薦', value: liveTotal, class: liveTotal ? 'positive' : '' },
+    { label: '均注精選', value: flatRecs.value.length, class: 'positive' },
+    { label: '串關錨腿', value: anchorRecs.value.length },
+  ];
+});
 
 const syncStatusText = computed(() => {
   if (!lastSyncAt.value) return '';
@@ -192,7 +211,7 @@ function applyStatus(cfg) {
 }
 
 async function loadFlat() {
-  const res = await getRecommendations({ gamePicks: true, ...leagueParams() });
+  const res = await getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() });
   flatRecs.value = res.data || [];
   if (res.meta) bettingMeta.value = res.meta;
 }
@@ -207,7 +226,7 @@ async function loadAll() {
   loading.value = true;
   try {
     const [flatRes, anchorRes, parRes, statusRes, marketsRes] = await Promise.all([
-      getRecommendations({ gamePicks: true, ...leagueParams() }),
+      getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() }),
       getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() }),
       getParlays(40),
       getStatus(),
@@ -220,6 +239,8 @@ async function loadAll() {
     parlayMeta.value = parRes.meta || null;
     marketsInfo.value = marketsRes.data || null;
     applyStatus(statusRes.data);
+    await slatePanelRef.value?.loadSlate();
+    await livePanelRef.value?.loadLive();
   } catch (err) {
     const msg = err.response?.data?.error || err.message || '載入失敗';
     if (!err.response) {
@@ -236,8 +257,8 @@ async function handleRefresh() {
   if (!hasApiKey.value) return;
   refreshing.value = true;
   try {
-    await refreshData();
-    ElMessage.success('同步與分析完成');
+    await refreshSlate();
+    ElMessage.success('全聯盟同步與分析完成（棒球 + 足球）');
     await loadAll();
   } catch (err) {
     ElMessage.error(err.response?.data?.error || '同步失敗');

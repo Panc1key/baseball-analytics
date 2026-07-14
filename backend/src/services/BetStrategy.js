@@ -40,8 +40,18 @@ function passesBaseGates(rec) {
   return true;
 }
 
+function isUnderTotalPick(rec) {
+  const pick = rec.pick || '';
+  return rec.market === 'totals' && (pick.startsWith('小') || /^under/i.test(pick));
+}
+
+function isSpreadPlus15Pick(rec) {
+  return rec.market === 'spreads' && /\+1\.5\b/.test(rec.pick || '');
+}
+
 function totalsAllowed(rec) {
   if (rec.market !== 'totals') return true;
+  if (isUnderTotalPick(rec)) return false;
   const dq = pickNum(rec, 'data_quality', 'dataQuality') ?? 0;
   return rec.league === 'MLB' && dq >= (config.flatBetMinDataQuality ?? 0.65);
 }
@@ -52,9 +62,6 @@ function minEdgeForMarket(market) {
   return config.flatBetMinEdgePct ?? 2.5;
 }
 
-/**
- * 均注精選：依盤口類型差異化門檻；次推（pickRank≥2）允許 watch 級
- */
 export function qualifiesFlatBet(rec, options = {}) {
   if (!passesBaseGates(rec)) return false;
 
@@ -76,6 +83,10 @@ export function qualifiesFlatBet(rec, options = {}) {
   if (market === 'totals') return totalsAllowed(rec);
   if (isPropMarket(market)) return config.enablePlayerProps;
 
+  if (isSpreadPlus15Pick(rec) && modelProb < (config.parlaySlateSpreadPlus15MinProb ?? 0.58)) {
+    return false;
+  }
+
   return market === 'h2h' || market === 'spreads';
 }
 
@@ -89,6 +100,10 @@ export function qualifiesParlayAnchor(rec) {
   if (odds == null) return false;
   if (odds < config.parlayAnchorMinOdds || odds > config.parlayAnchorMaxOdds) return false;
   if (modelProb < config.parlayAnchorMinProb) return false;
+  if (isUnderTotalPick(rec)) return false;
+  if (isSpreadPlus15Pick(rec) && modelProb < (config.parlaySlateSpreadPlus15MinProb ?? 0.58)) {
+    return false;
+  }
 
   if (market === 'totals') {
     return totalsAllowed(rec) && modelProb >= (config.parlayAnchorMinProb + 0.02);

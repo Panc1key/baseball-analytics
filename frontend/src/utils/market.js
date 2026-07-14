@@ -7,7 +7,13 @@ export const MARKET_LABELS = {
   pitcher_hits_allowed: '投手被安打',
   batter_hits: '打者安打',
   batter_total_bases: '打者總壘打',
-  batter_home_runs: '打者全壘打',
+  player_to_receive_card: '吃牌',
+  // 足球
+  player_goal_scorer_anytime: '任意時間進球',
+  player_first_goal_scorer: '首個進球',
+  player_shots_on_target: '射正',
+  player_shots: '射門',
+  player_assists: '助攻',
 };
 
 export function marketLabel(market) {
@@ -15,14 +21,7 @@ export function marketLabel(market) {
 }
 
 export function tierLabel(tier) {
-  return { primary: '精選', watch: '觀察' }[tier] || tier;
-}
-
-export function rankLabel(rank) {
-  if (rank === 1) return '主推';
-  if (rank === 2) return '次推';
-  if (rank) return `第${rank}推`;
-  return '';
+  return { primary: '主推', watch: '觀察' }[tier] || tier;
 }
 
 export function formatGameTime(iso) {
@@ -36,9 +35,13 @@ export function formatGameTime(iso) {
 }
 
 export function leagueLabel(league) {
-  return { MLB: 'MLB 美職', NPB: 'NPB 日職', KBO: 'KBO 韓職' }[league] || league;
+  return { MLB: 'MLB 美職', NPB: 'NPB 日職', KBO: 'KBO 韓職', WC: '世界盃' }[league] || league;
 }
 
 export function isPropMarket(market) {
-  return market?.startsWith('pitcher_') || market?.startsWith('batter_');
+  return (
+    market?.startsWith('pitcher_') ||
+    market?.startsWith('batter_') ||
+    market?.startsWith('player_')
+  );
 }

@@ -9,11 +9,19 @@ import {
   getBettingStrategyMeta,
   getUpcomingGames,
   getBetStats,
+  getModelPerformance,
   logBet,
   settleBet,
   getBetLog,
   LEAGUE_MARKETS_INFO,
 } from '../services/AnalysisEngine.js';
+import { getSlateByDate, slateFullRefresh, getSlateStatus } from '../services/SlateService.js';
+import {
+  getLiveRecommendations,
+  getLiveStatus,
+  runLiveAnalysis,
+} from '../services/LiveAnalysisEngine.js';
+import { getSlateCoverage } from '../services/ParlayBuilder.js';
 import { config, LEAGUES } from '../config.js';
 
 const router = express.Router();
@@ -75,8 +83,8 @@ router.get('/recommendations', (req, res) => {
     marketGroup: req.query.marketGroup || undefined,
     tier: req.query.tier || undefined,
     betStrategy: req.query.betStrategy || undefined,
-    gamePicks: req.query.gamePicks === 'true' || req.query.gamePicks === '1',
-    limit: parseInt(req.query.limit || '120', 10),
+    gamePicks: req.query.gamePicks === 'true',
+    limit: parseInt(req.query.limit || '80', 10),
   });
   res.json({
     success: true,
@@ -85,21 +93,99 @@ router.get('/recommendations', (req, res) => {
   });
 });
 
+/** 跨聯盟按日 Slate（香港時區） */
+router.get('/slate', (req, res) => {
+  const slate = getSlateByDate({
+    from: req.query.from || undefined,
+    to: req.query.to || undefined,
+    days: parseInt(req.query.days || '7', 10),
+    betStrategy: req.query.betStrategy || undefined,
+    league: req.query.league || undefined,
+    minEv: parseFloat(req.query.minEv || '0'),
+    tier: req.query.tier || undefined,
+    marketGroup: req.query.marketGroup || undefined,
+  });
+  res.json({ success: true, data: slate });
+});
+
+router.get('/slate/status', (_req, res) => {
+  res.json({ success: true, data: getSlateStatus() });
+});
+
+router.post('/slate/refresh', async (_req, res) => {
+  try {
+    const data = await slateFullRefresh();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** 滾球推薦（棒球 v1：條件勝率 + 滾球獨贏/大小） */
+router.get('/live', (req, res) => {
+  const data = getLiveRecommendations({
+    league: req.query.league || undefined,
+    minEv: parseFloat(req.query.minEv || '0'),
+    limit: parseInt(req.query.limit || '60', 10),
+  });
+  res.json({
+    success: true,
+    data,
+    meta: getLiveStatus(),
+  });
+});
+
+router.get('/live/status', (_req, res) => {
+  res.json({ success: true, data: getLiveStatus() });
+});
+
+router.post('/live/analyze', async (_req, res) => {
+  try {
+    const data = await runLiveAnalysis();
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/live/refresh', async (_req, res) => {
+  try {
+    // 先走完整同步（含比分/滾球賠率），再單獨回傳滾球結果
+    const full = await fullRefresh();
+    res.json({
+      success: true,
+      data: {
+        ...full,
+        live: full.liveAnalysis,
+        status: getLiveStatus(),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/parlays', (req, res) => {
   const parlays = getParlayRecommendations(parseInt(req.query.limit || '40', 10));
+  const coverage = getSlateCoverage();
+  const fullSlate = parlays.find((p) => p.category === 'lottery_full_slate');
   res.json({
     success: true,
     data: parlays,
     meta: {
       ...getBettingStrategyMeta(),
       baseStake: config.parlayBetUsd,
-      minLegOdds: config.parlayAnchorMinOdds,
-      maxLegOdds: config.parlayAnchorMaxOdds,
+      minLegOdds: config.minParlayLegOdds,
+      maxLegOdds: config.parlaySlateMaxLegOdds ?? 3.0,
       maxLegs: config.maxParlayLegs,
-      minLegProb: config.parlayAnchorMinProb,
-      strategy: '當日全場大串 · 錨腿優先 · $1 六合彩型',
-      parlayMarkets: ['h2h', 'spreads'],
+      minLegProb: config.parlayLotteryMinProb,
+      strategy: '當日全場大串 · 每場一腿主推 · $1 六合彩型',
+      parlayMarkets: ['h2h', 'spreads', 'totals'],
       lotteryStyle: true,
+      slateGames: coverage.slateGames,
+      fullSlateLegs: fullSlate?.leg_count ?? fullSlate?.legs?.length ?? 0,
+      mlbExpectedGames: coverage.mlbExpectedGames,
+      gamesWithRecs: coverage.gamesWithRecs,
     },
   });
 });
@@ -117,6 +203,21 @@ router.get('/config', (_req, res) => {
       recommendPrimaryScore: config.recommendPrimaryScore,
       recommendWatchScore: config.recommendWatchScore,
       enablePlayerProps: config.enablePlayerProps,
+    },
+  });
+});
+
+router.get('/model/performance', (req, res) => {
+  const data = getModelPerformance({
+    modelVersion: req.query.modelVersion || undefined,
+    league: req.query.league || undefined,
+  });
+  res.json({
+    success: true,
+    data,
+    meta: {
+      modelVersion: config.modelVersion,
+      note: '僅統計不可變快照中已結算的 win/loss；push/void 不納入命中率與 Brier',
     },
   });
 });
@@ -156,8 +257,8 @@ router.post('/bets', (req, res) => {
 
 router.patch('/bets/:id/settle', (req, res) => {
   const { result, profit } = req.body;
-  if (!['win', 'loss', 'push'].includes(result)) {
-    return res.status(400).json({ success: false, error: 'result 須為 win/loss/push' });
+  if (!['win', 'loss', 'push', 'void'].includes(result)) {
+    return res.status(400).json({ success: false, error: 'result 須為 win/loss/push/void' });
   }
   settleBet(parseInt(req.params.id, 10), result, parseFloat(profit || 0));
   res.json({ success: true });

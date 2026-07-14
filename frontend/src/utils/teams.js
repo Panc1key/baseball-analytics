@@ -76,6 +76,10 @@ const LEAGUE_LABELS = {
   MLB: 'MLB 美職',
   NPB: 'NPB 日職',
   KBO: 'KBO 韓職',
+  WC: '世界盃',
+  MLS: 'MLS 美職足',
+  LIGAMX: '墨超',
+  KLEAGUE: 'K聯賽',
 };
 
 const TEAM_NAMES_SORTED = Object.keys(TEAM_ZH).sort((a, b) => b.length - a.length);

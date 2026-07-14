@@ -99,8 +99,8 @@ for (const [, picks] of byGame) {
 const bets = db
   .prepare(`
     SELECT result, market, COUNT(*) c,
-      SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) won,
-      SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) lost
+      SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) won,
+      SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) lost
     FROM bet_log WHERE league='MLB'
     GROUP BY result, market
   `)
@@ -109,11 +109,11 @@ const bets = db
 const settled = db
   .prepare(`
     SELECT market, bet_strategy,
-      SUM(CASE WHEN result='won' THEN 1 ELSE 0 END) won,
-      SUM(CASE WHEN result='lost' THEN 1 ELSE 0 END) lost,
+      SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) won,
+      SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) lost,
       SUM(profit) profit
     FROM bet_log
-    WHERE league='MLB' AND result IN ('won','lost')
+    WHERE league='MLB' AND result IN ('win','loss')
     GROUP BY market, bet_strategy
   `)
   .all();

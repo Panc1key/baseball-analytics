@@ -1,11 +1,13 @@
 import { config } from '../config.js';
 import {
   calcEV,
+  calcEVWithPush,
   decimalToImpliedProb,
   decimalToNetOdds,
-  estimateCoverProb,
+  estimateCoverProbDetails,
 } from '../utils/odds.js';
 import { enrichCandidate } from './PickScorer.js';
+import { poissonCoverProb } from '../models/GameScoreModel.js';
 import { pickPropCandidates } from './PlayerPropAnalyzer.js';
 import {
   computeTotalsProjection,
@@ -31,25 +33,55 @@ export function rankLabel(rank) {
   return `第${rank}推`;
 }
 
-/** 讓分方向：與情境一致，或市場熱門陷阱時允許受讓方 */
+/** 讓分方向：MatchupCore 熱門陷阱 + 本地 Poisson 結構門控 */
 export function isSpreadAlignedWithModel(spread, game, analysis) {
   const isHome = spread.name === game.home_team;
   const teamWinProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
   const oppWinProb = isHome ? analysis.awayWinProb : analysis.homeWinProb;
   const side = isHome ? 'home' : 'away';
   const matchup = analysis.matchupCore;
+  const pitcherEdge = analysis.pitcherEdge ?? 0;
+  const pickPitcherEdge = isHome ? pitcherEdge : -pitcherEdge;
+  const modelDeficit = oppWinProb - teamWinProb;
 
   if (spread.point > 0) {
     if (matchup?.edges?.favoriteTrap && matchup.edges.bestSide === side) return true;
-    if (teamWinProb >= 0.4) return true;
+
     const edge = matchup?.edges?.[side];
-    if (edge?.ev >= config.minEvThreshold && edge?.edgePct >= config.h2hMinEdgePct) return true;
-    return teamWinProb >= 0.38;
+    if (edge?.ev >= config.minEvThreshold && edge?.edgePct >= config.h2hMinEdgePct) {
+      if (teamWinProb >= config.spreadsMinDogWinProb) return true;
+    }
+
+    if (teamWinProb < config.spreadsMinDogWinProb) return false;
+    if (modelDeficit > config.spreadsMaxModelDeficit) return false;
+    if (pickPitcherEdge < -config.spreadsMaxPitcherDeficit) return false;
+
+    if (spread.point >= 1.5) {
+      if (modelDeficit > 0.015 && teamWinProb < 0.49) return false;
+      if (teamWinProb < oppWinProb - 0.01) return false;
+
+      const homeRuns = analysis.homeRuns;
+      const awayRuns = analysis.awayRuns;
+      if (homeRuns != null && awayRuns != null) {
+        const expectedMargin = isHome ? homeRuns - awayRuns : awayRuns - homeRuns;
+        if (expectedMargin < (config.spreadsMinExpectedMargin ?? -0.35)) return false;
+
+        const poissonCover = poissonCoverProb(homeRuns, awayRuns, spread.point, isHome);
+        if (poissonCover < config.spreadsMinCoverProb) return false;
+      }
+    }
+
+    return teamWinProb >= oppWinProb - config.spreadsMaxModelDeficit || teamWinProb >= 0.38;
   }
 
   if (spread.point < 0) {
-    return teamWinProb > oppWinProb && teamWinProb >= 0.51;
+    return (
+      teamWinProb > oppWinProb &&
+      teamWinProb >= 0.54 &&
+      pickPitcherEdge >= -0.015
+    );
   }
+
   return false;
 }
 
@@ -65,6 +97,12 @@ function pickH2hCandidate(game, markets, analysis) {
     if (!odds?.price) continue;
 
     const modelProb = side === 'home' ? analysis.homeWinProb : analysis.awayWinProb;
+    const rawModelProb =
+      side === 'home'
+        ? (analysis.rawModelHomeProb ?? modelProb)
+        : (analysis.rawModelAwayProb ?? modelProb);
+    const marketProb =
+      side === 'home' ? analysis.marketHomeProb : analysis.marketAwayProb;
     const impliedProb = decimalToImpliedProb(odds.price);
     const edgePct = (modelProb - impliedProb) * 100;
 
@@ -84,6 +122,9 @@ function pickH2hCandidate(game, markets, analysis) {
       odds,
       oddsDecimal: odds.price,
       modelProb,
+      rawModelProb,
+      marketProb,
+      probabilityCalibrated: marketProb != null,
       ev: calcEV(modelProb, decimalToNetOdds(odds.price)),
       confidence: analysis.confidence,
       structuralOk: true,
@@ -104,16 +145,38 @@ function pickH2hCandidate(game, markets, analysis) {
   return options[0];
 }
 
-function pickSpreadCandidate(game, markets, analysis) {
+function pickSpreadCandidate(game, markets, analysis, bookmakers = []) {
   const raw = [];
+  const pitcherEdge = analysis.pitcherEdge ?? 0;
 
   for (const [, spread] of Object.entries(markets.spreads)) {
     if (!isSpreadAlignedWithModel(spread, game, analysis)) continue;
 
     const isHome = spread.name === game.home_team;
     const teamWinProb = isHome ? analysis.homeWinProb : analysis.awayWinProb;
-    const coverProb = estimateCoverProb(teamWinProb, spread.point);
-    const ev = calcEV(coverProb, decimalToNetOdds(spread.price));
+    const oppWinProb = isHome ? analysis.awayWinProb : analysis.homeWinProb;
+    const cover = estimateCoverProbDetails(teamWinProb, spread.point, {
+      pitcherEdge,
+      pickIsHome: isHome,
+      oppWinProb,
+      homeRuns: analysis.homeRuns,
+      awayRuns: analysis.awayRuns,
+      bookmakers,
+      teamName: spread.name,
+    });
+    const coverProb = cover.coverProb;
+    const winProb = coverProb * (1 - cover.pushProb);
+    const ev = calcEVWithPush(
+      winProb,
+      cover.pushProb,
+      decimalToNetOdds(spread.price)
+    );
+    const impliedProb = decimalToImpliedProb(spread.price);
+    const edgePct = (coverProb - impliedProb) * 100;
+
+    if (coverProb < config.spreadsMinCoverProb) continue;
+    if (edgePct < config.spreadsMinEdgePct) continue;
+    if (ev < config.minEvThreshold) continue;
 
     raw.push({
       spread,
@@ -122,7 +185,12 @@ function pickSpreadCandidate(game, markets, analysis) {
       odds: spread,
       oddsDecimal: spread.price,
       modelProb: coverProb,
+      rawModelProb: cover.rawModelProb,
+      marketProb: cover.marketProb,
+      pushProb: cover.pushProb,
+      probabilityCalibrated: cover.probabilityCalibrated,
       ev,
+      edgePct,
       absLine: Math.abs(spread.point),
     });
   }
@@ -152,16 +220,24 @@ function pickSpreadCandidate(game, markets, analysis) {
             odds: g.odds,
             oddsDecimal: g.oddsDecimal,
             modelProb: g.modelProb,
+            rawModelProb: g.rawModelProb,
+            marketProb: g.marketProb,
+            pushProb: g.pushProb,
+            probabilityCalibrated: g.probabilityCalibrated,
             ev: g.ev,
             confidence: analysis.confidence,
             structuralOk: true,
+            dataQuality: analysis.dataQuality,
           },
           analysis,
           game.league,
           'spreads'
         )
       )
-      .filter((g) => g.tier);
+      .filter((g) => g.tier)
+      .filter((g) => g.modelProb >= config.spreadsMinCoverProb)
+      .filter((g) => g.ev >= config.minEvThreshold)
+      .filter((g) => g.edgeProb >= config.spreadsMinEdgePct);
 
     if (!scored.length) continue;
     scored.sort((a, b) => b.score - a.score || b.modelProb - a.modelProb);
@@ -187,19 +263,32 @@ function pickTotalCandidate(game, markets, analysis, bookmakers) {
 
   const raw = buildTotalCandidates(markets, projection, game.league)
     .filter((c) => c.structuralOk)
+    .filter((c) => c.side !== 'under' || projection.totalsContext?.underViable)
     .filter((c) => c.ev >= (config.totalsMinEv ?? config.minEvThreshold));
 
   if (!raw.length) return null;
 
   const scored = raw
-    .map((o) =>
-      enrichCandidate(
-        { ...o, confidence: analysis.confidence },
+    .map((o) => {
+      const enriched = enrichCandidate(
+        { ...o, confidence: analysis.confidence, dataQuality: projection.dataQuality },
         { ...analysis, factors: [...(analysis.factors || []), ...(projection.factors || [])] },
         game.league,
         'totals'
-      )
-    )
+      );
+      enriched.score = Math.max(0, enriched.score - (config.totalsPrimaryScorePenalty || 15));
+      if (o.side === 'under') {
+        enriched.score = Math.max(0, enriched.score - 12);
+        if (enriched.score < config.recommendWatchScore) enriched.tier = null;
+      }
+      if (o.side === 'over' && projection.totalsContext?.overTrigger) {
+        enriched.score += 4;
+      }
+      if (projection.dataQuality < 0.7 && enriched.score < config.recommendWatchScore) {
+        enriched.tier = null;
+      }
+      return enriched;
+    })
     .filter((o) => o.tier);
 
   if (!scored.length) return null;
@@ -237,13 +326,13 @@ export function pickPrimaryRecommendation(candidates, context = {}) {
 }
 
 /**
- * 每場多盤口排序推薦：跨獨贏/讓分/大小/球員盤比較優勢分，各盤口最多一條
+ * 每場多盤口排序推薦：跨獨贏/讓分/大小/球員盤比較優勢分
  */
 export function pickGameRecommendations(game, markets, analysis, baseReasoning, propsContext = {}) {
   const bookmakers = propsContext.bookmakers || [];
 
   const h2h = pickH2hCandidate(game, markets, analysis);
-  const spread = pickSpreadCandidate(game, markets, analysis);
+  const spread = pickSpreadCandidate(game, markets, analysis, bookmakers);
   const total = pickTotalCandidate(game, markets, analysis, bookmakers);
 
   let propCandidates = [];

@@ -1,4 +1,5 @@
 import db from '../db/database.js';
+import { randomUUID } from 'crypto';
 import { fetchAllLeagueOdds, fetchAllLeagueScores, fetchMlbPlayerProps } from './OddsApiClient.js';
 import {
   getMlbStandings,
@@ -9,12 +10,18 @@ import {
 } from './MlbStatsService.js';
 import { analyzeMatchup, updateTeamStatsFromScores } from './TeamAnalyzer.js';
 import { pickGameRecommendations } from './RecommendationRules.js';
-import { buildParlaysFromDb, LEAGUE_MARKETS_INFO } from './ParlayBuilder.js';
+import { buildParlaysFromDb, LEAGUE_MARKETS_INFO, getSlateCoverage } from './ParlayBuilder.js';
 import { extractPlayerProps } from './PlayerPropAnalyzer.js';
-import { extractMarkets } from '../utils/odds.js';
-import { config } from '../config.js';
+import {
+  decimalToImpliedProb,
+  extractMarkets,
+  removeVig,
+} from '../utils/odds.js';
+import { config, LEAGUES, BASEBALL_LEAGUE_CODES, BASEBALL_LEAGUE_SQL } from '../config.js';
 import { classifyBetStrategy } from './BetStrategy.js';
-import { getStakeSizingMeta, enrichWithSuggestedStake } from './StakeSizer.js';
+import { enrichWithSuggestedStake, getStakeSizingMeta } from './StakeSizer.js';
+import { activeGameWhere, isGameLive } from '../utils/activeGames.js';
+import { runLiveAnalysis, getLiveRecommendations, getLiveStatus } from './LiveAnalysisEngine.js';
 
 let refreshPromise = null;
 
@@ -60,7 +67,10 @@ function saveGameProps(gameId, bookmakers) {
 }
 
 function clearOldRecommendations() {
-  db.prepare('DELETE FROM recommendations').run();
+  // 只清初盤，保留滾球 phase='live'（由 LiveAnalysisEngine 自行刷新）
+  db.prepare(
+    `DELETE FROM recommendations WHERE league IN (${BASEBALL_LEAGUE_SQL}) AND IFNULL(phase, 'prematch') = 'prematch'`
+  ).run();
   db.prepare('DELETE FROM parlay_recommendations').run();
 }
 
@@ -83,6 +93,61 @@ function buildRecEntry(game, pick, id) {
   };
 }
 
+function startAnalysisRun(phase = 'prematch') {
+  const id = randomUUID();
+  db.prepare(`
+    INSERT INTO analysis_runs (id, model_version, phase, started_at)
+    VALUES (?, ?, ?, datetime('now'))
+  `).run(id, config.modelVersion, phase);
+  return id;
+}
+
+function finishAnalysisRun(id, recommendationCount, metadata = {}) {
+  db.prepare(`
+    UPDATE analysis_runs
+    SET completed_at = datetime('now'), recommendation_count = ?, metadata_json = ?
+    WHERE id = ?
+  `).run(recommendationCount, JSON.stringify(metadata), id);
+}
+
+function saveRecommendationSnapshot(rec, recommendationId) {
+  db.prepare(`
+    INSERT INTO recommendation_snapshots
+      (analysis_run_id, recommendation_id, game_id, league, phase, market, pick, line,
+       odds_decimal, bookmaker, raw_model_prob, market_prob, calibrated_prob,
+       implied_prob, push_prob, ev, confidence, tier, score, edge_prob, data_quality,
+       bet_strategy, pick_rank, suggested_stake, reasoning, model_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    rec.analysisRunId,
+    recommendationId,
+    rec.gameId,
+    rec.league,
+    rec.phase || 'prematch',
+    rec.market,
+    rec.pick,
+    rec.line,
+    rec.oddsDecimal,
+    rec.bookmaker,
+    rec.rawModelProb ?? rec.modelProb,
+    rec.marketProb ?? rec.impliedProb,
+    rec.calibratedProb ?? rec.modelProb,
+    rec.impliedProb,
+    rec.pushProb ?? 0,
+    rec.ev,
+    rec.confidence ?? 0.5,
+    rec.tier,
+    rec.score,
+    rec.edgeProb,
+    rec.dataQuality,
+    rec.betStrategy ?? null,
+    rec.pickRank ?? null,
+    rec.suggestedStake ?? rec.suggested_stake ?? null,
+    rec.reasoning,
+    rec.modelVersion || config.modelVersion
+  );
+}
+
 function saveRecommendation(rec) {
   const betStrategy =
     rec.betStrategy ??
@@ -101,11 +166,15 @@ function saveRecommendation(rec) {
       { pickRank: rec.pickRank }
     );
 
-  return db
+  const recommendationId = db
     .prepare(`
     INSERT INTO recommendations
-      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob, implied_prob, ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group, bet_strategy, pick_rank, actionable_score, suggested_stake, stake_multiplier)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (game_id, league, market, pick, line, odds_decimal, bookmaker, model_prob,
+       raw_model_prob, market_prob, calibrated_prob, implied_prob, push_prob,
+       ev, confidence, reasoning, tier, score, edge_prob, data_quality, market_group,
+       bet_strategy, pick_rank, actionable_score, suggested_stake, stake_multiplier,
+       phase, model_version, analysis_run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       rec.gameId,
@@ -116,7 +185,11 @@ function saveRecommendation(rec) {
       rec.oddsDecimal,
       rec.bookmaker,
       rec.modelProb,
+      rec.rawModelProb ?? rec.modelProb,
+      rec.marketProb ?? rec.impliedProb,
+      rec.calibratedProb ?? rec.modelProb,
       rec.impliedProb,
+      rec.pushProb ?? 0,
       rec.ev,
       rec.confidence ?? 0.5,
       rec.reasoning,
@@ -129,8 +202,17 @@ function saveRecommendation(rec) {
       rec.pickRank ?? null,
       rec.actionableScore ?? null,
       rec.suggestedStake ?? rec.suggested_stake ?? null,
-      rec.stakeMultiplier ?? rec.stake_multiplier ?? null
+      rec.stakeMultiplier ?? rec.stake_multiplier ?? null,
+      rec.phase || 'prematch',
+      rec.modelVersion || config.modelVersion,
+      rec.analysisRunId
     ).lastInsertRowid;
+
+  saveRecommendationSnapshot(
+    { ...rec, betStrategy, modelVersion: rec.modelVersion || config.modelVersion },
+    recommendationId
+  );
+  return recommendationId;
 }
 
 /** 同步賠率與比分，更新隊伍統計 */
@@ -155,14 +237,37 @@ export async function syncAllData() {
     updateTeamStatsFromScores(code, scores);
 
     for (const game of scores) {
-      if (!game.completed) continue;
-      const hs = game.scores?.find((s) => s.name === game.home_team)?.score;
-      const as = game.scores?.find((s) => s.name === game.away_team)?.score;
+      const hsRaw = game.scores?.find((s) => s.name === game.home_team)?.score;
+      const asRaw = game.scores?.find((s) => s.name === game.away_team)?.score;
+      const hs = hsRaw != null && hsRaw !== '' ? parseInt(hsRaw, 10) : null;
+      const as = asRaw != null && asRaw !== '' ? parseInt(asRaw, 10) : null;
+      const gameStatus =
+        game.status || (game.completed ? 'completed' : 'in_progress');
+
+      if (!game.completed) {
+        // 進行中場次也寫入當前比分，供滾球模型使用
+        db.prepare(`
+          INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, datetime('now'))
+          ON CONFLICT(id) DO UPDATE SET
+            completed = 0,
+            commence_time = excluded.commence_time,
+            home_score = COALESCE(excluded.home_score, games.home_score),
+            away_score = COALESCE(excluded.away_score, games.away_score),
+            status = excluded.status,
+            updated_at = datetime('now')
+        `).run(game.id, code, game.commence_time, game.home_team, game.away_team, hs, as, gameStatus);
+        continue;
+      }
       db.prepare(`
-        INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))
-        ON CONFLICT(id) DO UPDATE SET completed=1, home_score=?, away_score=?, updated_at=datetime('now')
-      `).run(game.id, code, game.commence_time, game.home_team, game.away_team, hs, as, hs, as);
+        INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          completed=1, home_score=?, away_score=?, status=?, updated_at=datetime('now')
+      `).run(
+        game.id, code, game.commence_time, game.home_team, game.away_team,
+        hs, as, gameStatus, hs, as, gameStatus
+      );
     }
   }
 
@@ -174,6 +279,18 @@ export async function syncAllData() {
     for (const game of games) {
       upsertGame(game, code);
     }
+  }
+
+  // 記錄 MLB 當日預期場次（用於串關覆蓋率顯示）
+  try {
+    const schedule = await getMlbScheduleRange(1);
+    const expected = schedule.filter((sg) => {
+      const t = sg.gameDate || sg.gameDateTime;
+      return t && new Date(t) > new Date();
+    }).length;
+    setMeta('mlb_slate_expected', expected);
+  } catch (err) {
+    console.warn('[sync] MLB 賽程統計失敗:', err.message);
   }
 
   let propsQuota = null;
@@ -206,6 +323,7 @@ export async function syncAllData() {
 /** 對所有初盤場次跑分析並產生推薦 */
 export async function runAnalysis() {
   clearOldRecommendations();
+  const analysisRunId = startAnalysisRun('prematch');
 
   let mlbStandings = [];
   let mlbSchedule = [];
@@ -221,7 +339,9 @@ export async function runAnalysis() {
   const upcoming = db
     .prepare(`
     SELECT * FROM games
-    WHERE completed = 0 AND datetime(commence_time) > datetime('now')
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND ${activeGameWhere()}
+      AND datetime(commence_time) > datetime('now')
     ORDER BY commence_time ASC
   `)
     .all();
@@ -306,7 +426,11 @@ export async function runAnalysis() {
         oddsDecimal: pick.oddsDecimal,
         bookmaker: pick.bookmaker || pick.odds?.bookmaker,
         modelProb: pick.modelProb,
+        rawModelProb: pick.rawModelProb ?? pick.modelProb,
+        marketProb: pick.marketProb ?? pick.impliedProb,
+        calibratedProb: pick.calibratedProb ?? pick.modelProb,
         impliedProb: pick.impliedProb,
+        pushProb: pick.pushProb ?? 0,
         ev: pick.ev,
         confidence: pick.confidence,
         reasoning: pick.reasoning,
@@ -319,6 +443,8 @@ export async function runAnalysis() {
         suggestedStake: pick.suggestedStake,
         stakeMultiplier: pick.stakeMultiplier,
         betStrategy: pick.bet_strategy,
+        analysisRunId,
+        modelVersion: config.modelVersion,
       });
       allRecs.push(buildRecEntry(game, pick, id));
     }
@@ -326,7 +452,16 @@ export async function runAnalysis() {
 
   const parlays = buildParlaysFromDb({ limit: 40 });
   persistParlays(parlays);
-  return { singles: allRecs.length, parlays: parlays.length };
+  finishAnalysisRun(analysisRunId, allRecs.length, {
+    parlays: parlays.length,
+    leagues: BASEBALL_LEAGUE_CODES,
+  });
+  return {
+    singles: allRecs.length,
+    parlays: parlays.length,
+    analysisRunId,
+    modelVersion: config.modelVersion,
+  };
 }
 
 function persistParlays(parlays) {
@@ -410,8 +545,10 @@ export function getRecommendations(filters = {}) {
     SELECT r.*, g.home_team, g.away_team, g.commence_time
     FROM recommendations r
     JOIN games g ON g.id = r.game_id
-    WHERE r.ev >= ?
-      AND datetime(g.commence_time) > datetime('now')
+    WHERE r.league IN (${BASEBALL_LEAGUE_SQL})
+      AND IFNULL(r.phase, 'prematch') = 'prematch'
+      AND r.ev >= ?
+      AND ${activeGameWhere('g')}
   `;
   const params = [minEv];
 
@@ -447,15 +584,17 @@ export function getRecommendations(filters = {}) {
       sql += ' ORDER BY r.model_prob DESC, r.ev DESC';
     }
   } else {
-    sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, r.score DESC, r.model_prob DESC";
+    sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, COALESCE(r.pick_rank, 99) ASC, r.actionable_score DESC, r.score DESC";
   }
 
   const rows = db.prepare(sql).all(...params);
   const enriched = rows.map((r) => {
     const base = {
       ...r,
+      is_live: isGameLive(r.commence_time),
       pick_rank: r.pick_rank,
-      rank_label: r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,
+      rank_label:
+        r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,
       bet_strategy: r.bet_strategy || classifyBetStrategy(r),
     };
     if (base.suggested_stake == null && base.pick_rank != null) {
@@ -503,7 +642,8 @@ export function getBettingStrategyMeta() {
 export function getUpcomingGames(league) {
   let sql = `
     SELECT * FROM games
-    WHERE completed = 0 AND datetime(commence_time) > datetime('now')
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND ${activeGameWhere()}
   `;
   const params = [];
   if (league) {
@@ -529,6 +669,75 @@ export function getBetStats() {
     .get();
 }
 
+/** 樣本外模型表現；只計不可變快照中已結算的 win/loss。 */
+export function getModelPerformance(filters = {}) {
+  let sql = `
+    SELECT model_version, league, market, calibrated_prob, result,
+           profit_units, odds_decimal, clv_prob, created_at
+    FROM recommendation_snapshots
+    WHERE result IN ('win', 'loss')
+  `;
+  const params = [];
+  if (filters.modelVersion) {
+    sql += ' AND model_version = ?';
+    params.push(filters.modelVersion);
+  }
+  if (filters.league) {
+    sql += ' AND league = ?';
+    params.push(filters.league);
+  }
+  const rows = db.prepare(sql).all(...params);
+  const groups = new Map();
+
+  for (const row of rows) {
+    const key = `${row.model_version}|${row.league}|${row.market}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        modelVersion: row.model_version,
+        league: row.league,
+        market: row.market,
+        samples: 0,
+        wins: 0,
+        profitUnits: 0,
+        probabilitySum: 0,
+        brierSum: 0,
+        logLossSum: 0,
+        clvSum: 0,
+        clvSamples: 0,
+      });
+    }
+    const group = groups.get(key);
+    const y = row.result === 'win' ? 1 : 0;
+    const p = Math.max(0.001, Math.min(0.999, row.calibrated_prob));
+    group.samples += 1;
+    group.wins += y;
+    group.profitUnits += row.profit_units ?? 0;
+    group.probabilitySum += p;
+    group.brierSum += (p - y) ** 2;
+    group.logLossSum += -(y * Math.log(p) + (1 - y) * Math.log(1 - p));
+    if (row.clv_prob != null) {
+      group.clvSum += row.clv_prob;
+      group.clvSamples += 1;
+    }
+  }
+
+  return [...groups.values()].map((g) => ({
+    modelVersion: g.modelVersion,
+    league: g.league,
+    market: g.market,
+    samples: g.samples,
+    wins: g.wins,
+    hitRate: g.samples ? g.wins / g.samples : null,
+    avgPredictedProb: g.samples ? g.probabilitySum / g.samples : null,
+    roi: g.samples ? g.profitUnits / g.samples : null,
+    profitUnits: g.profitUnits,
+    brierScore: g.samples ? g.brierSum / g.samples : null,
+    logLoss: g.samples ? g.logLossSum / g.samples : null,
+    avgClvProb: g.clvSamples ? g.clvSum / g.clvSamples : null,
+    clvSamples: g.clvSamples,
+  }));
+}
+
 export function logBet(bet) {
   if (bet.recId != null) {
     const existing = db
@@ -544,26 +753,45 @@ export function logBet(bet) {
     }
   }
 
+  const recommendation =
+    bet.recType !== 'parlay' && bet.recId != null
+      ? db.prepare('SELECT * FROM recommendations WHERE id = ?').get(bet.recId)
+      : null;
   const potentialReturn = bet.stake * bet.oddsDecimal;
   return db
     .prepare(`
-    INSERT INTO bet_log (rec_type, rec_id, game_id, league, market, pick, stake, odds_decimal, potential_return)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO bet_log
+      (rec_type, rec_id, game_id, league, market, pick, line, stake, odds_decimal,
+       potential_return, bet_strategy, phase, raw_model_prob, market_prob,
+       calibrated_prob, implied_prob, ev, model_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
-      bet.recType,
+      bet.recType || 'single',
       bet.recId,
-      bet.gameId,
-      bet.league,
-      bet.market,
-      bet.pick,
+      bet.gameId ?? recommendation?.game_id,
+      bet.league ?? recommendation?.league,
+      bet.market ?? recommendation?.market,
+      bet.pick ?? recommendation?.pick,
+      bet.line ?? recommendation?.line ?? null,
       bet.stake,
       bet.oddsDecimal,
-      potentialReturn
+      potentialReturn,
+      recommendation?.bet_strategy ?? null,
+      recommendation?.phase ?? 'prematch',
+      recommendation?.raw_model_prob ?? null,
+      recommendation?.market_prob ?? null,
+      recommendation?.calibrated_prob ?? recommendation?.model_prob ?? null,
+      recommendation?.implied_prob ?? null,
+      recommendation?.ev ?? null,
+      recommendation?.model_version ?? config.modelVersion
     ).lastInsertRowid;
 }
 
 export function settleBet(betId, result, profit) {
+  if (!['win', 'loss', 'push', 'void'].includes(result)) {
+    throw new Error('result 須為 win/loss/push/void');
+  }
   db.prepare(`
     UPDATE bet_log SET result = ?, profit = ?, settled_at = datetime('now') WHERE id = ?
   `).run(result, profit, betId);
@@ -579,6 +807,133 @@ function parseSpreadPick(pick) {
   return { team: match[1].trim(), line: parseFloat(match[2]) };
 }
 
+function parseTotalPick(pick, fallbackLine = null) {
+  const match = String(pick || '').match(/^(大|小|over|under)\s+(\d+(?:\.\d+)?)$/i);
+  if (!match && fallbackLine == null) return null;
+  const token = match?.[1]?.toLowerCase();
+  return {
+    side: token === '大' || token === 'over' ? 'over' : 'under',
+    line: match ? parseFloat(match[2]) : Number(fallbackLine),
+  };
+}
+
+/** 所有棒球主盤共用同一結算狀態機。 */
+export function evaluateBaseballMarketResult(entry, game) {
+  const status = String(game.status || '').toLowerCase();
+  if (['canceled', 'cancelled', 'postponed', 'abandoned', 'void'].includes(status)) {
+    return 'void';
+  }
+  if (game.home_score == null || game.away_score == null) {
+    const commenceMs = Date.parse(game.commence_time || '');
+    const staleWithoutScore =
+      Number.isFinite(commenceMs) &&
+      Date.now() - commenceMs >= config.settlementVoidAfterHours * 60 * 60 * 1000;
+    return game.completed === 1 || staleWithoutScore ? 'void' : null;
+  }
+  const hs = Number(game.home_score);
+  const as = Number(game.away_score);
+  if (!Number.isFinite(hs) || !Number.isFinite(as)) return null;
+
+  if (entry.market === 'h2h') {
+    if (entry.pick === game.home_team) {
+      return hs > as ? 'win' : hs < as ? 'loss' : 'push';
+    }
+    if (entry.pick === game.away_team) {
+      return as > hs ? 'win' : as < hs ? 'loss' : 'push';
+    }
+    return null;
+  }
+
+  if (entry.market === 'spreads') {
+    const parsed = parseSpreadPick(entry.pick);
+    if (!parsed) return null;
+    const isHome = parsed.team === game.home_team;
+    const isAway = parsed.team === game.away_team;
+    if (!isHome && !isAway) return null;
+    const line = Number.isFinite(Number(entry.line)) ? Number(entry.line) : parsed.line;
+    const margin = isHome ? hs - as + line : as - hs + line;
+    return margin > 0 ? 'win' : margin < 0 ? 'loss' : 'push';
+  }
+
+  if (entry.market === 'totals') {
+    const parsed = parseTotalPick(entry.pick, entry.line);
+    if (!parsed || !Number.isFinite(parsed.line)) return null;
+    const total = hs + as;
+    if (total === parsed.line) return 'push';
+    return parsed.side === 'over'
+      ? total > parsed.line
+        ? 'win'
+        : 'loss'
+      : total < parsed.line
+        ? 'win'
+        : 'loss';
+  }
+
+  return null;
+}
+
+function findClosingMarket(entry, game) {
+  if (!game.raw_odds) return null;
+  let bookmakers;
+  try {
+    bookmakers = JSON.parse(game.raw_odds);
+  } catch {
+    return null;
+  }
+  const markets = extractMarkets(bookmakers);
+  if (entry.market === 'h2h') {
+    const selected = markets.h2h?.[entry.pick]?.price;
+    const oppositeTeam =
+      entry.pick === game.home_team ? game.away_team : game.home_team;
+    const opposite = markets.h2h?.[oppositeTeam]?.price;
+    if (!selected) return null;
+    const implied = decimalToImpliedProb(selected);
+    return {
+      odds: selected,
+      fairProb: opposite
+        ? removeVig(implied, decimalToImpliedProb(opposite)).fairA
+        : implied,
+    };
+  }
+  if (entry.market === 'spreads') {
+    const parsed = parseSpreadPick(entry.pick);
+    const line = Number.isFinite(Number(entry.line)) ? Number(entry.line) : parsed?.line;
+    const outcome = Object.values(markets.spreads || {}).find(
+      (o) => o.name === parsed?.team && Math.abs(Number(o.point) - line) < 0.001
+    );
+    if (!outcome?.price) return null;
+    const opposite = Object.values(markets.spreads || {}).find(
+      (o) =>
+        o.name !== parsed?.team &&
+        Math.abs(Number(o.point) + line) < 0.001
+    );
+    const implied = decimalToImpliedProb(outcome.price);
+    return {
+      odds: outcome.price,
+      fairProb: opposite?.price
+        ? removeVig(implied, decimalToImpliedProb(opposite.price)).fairA
+        : implied,
+    };
+  }
+  if (entry.market === 'totals') {
+    const parsed = parseTotalPick(entry.pick, entry.line);
+    if (!parsed) return null;
+    const key = `${parsed.side === 'over' ? 'Over' : 'Under'}_${parsed.line}`;
+    const outcome = markets.totals?.[key];
+    if (!outcome?.price) return null;
+    const oppositeKey = `${parsed.side === 'over' ? 'Under' : 'Over'}_${parsed.line}`;
+    const opposite = markets.totals?.[oppositeKey];
+    const implied = decimalToImpliedProb(outcome.price);
+    return {
+      odds: outcome.price,
+      fairProb: opposite?.price
+        ? removeVig(implied, decimalToImpliedProb(opposite.price)).fairA
+        : implied,
+    };
+  }
+  return null;
+}
+
 function calcBetProfit(stake, oddsDecimal, result) {
   if (result === 'win') return stake * oddsDecimal - stake;
   if (result === 'loss') return -stake;
@@ -589,46 +944,91 @@ function calcBetProfit(stake, oddsDecimal, result) {
 export function autoSettlePendingBets() {
   const pending = db
     .prepare(`
-      SELECT b.*, g.home_team, g.away_team, g.home_score, g.away_score, g.completed
+      SELECT b.*, g.home_team, g.away_team, g.home_score, g.away_score,
+             g.completed, g.status, g.commence_time
       FROM bet_log b
       JOIN games g ON g.id = b.game_id
-      WHERE b.result = 'pending' AND g.completed = 1
+      WHERE b.result = 'pending'
+        AND (
+          g.completed = 1
+          OR lower(COALESCE(g.status, '')) IN
+             ('canceled', 'cancelled', 'postponed', 'abandoned', 'void')
+          OR (
+            (g.home_score IS NULL OR g.away_score IS NULL)
+            AND datetime(g.commence_time) <= datetime('now', '-${config.settlementVoidAfterHours} hours')
+          )
+        )
     `)
     .all();
 
   let settled = 0;
   for (const bet of pending) {
-    const { home_score: hs, away_score: as } = bet;
-    if (hs == null || as == null) continue;
-
-    let result = null;
-    if (bet.market === 'h2h') {
-      if (bet.pick === bet.home_team) {
-        if (hs > as) result = 'win';
-        else if (hs < as) result = 'loss';
-        else result = 'push';
-      } else if (bet.pick === bet.away_team) {
-        if (as > hs) result = 'win';
-        else if (as < hs) result = 'loss';
-        else result = 'push';
-      }
-    } else if (bet.market === 'spreads') {
-      const parsed = parseSpreadPick(bet.pick);
-      if (!parsed) continue;
-      const isHome = parsed.team === bet.home_team;
-      const isAway = parsed.team === bet.away_team;
-      if (!isHome && !isAway) continue;
-      const margin = isHome ? hs - as + parsed.line : as - hs + parsed.line;
-      if (margin > 0) result = 'win';
-      else if (margin < 0) result = 'loss';
-      else result = 'push';
-    }
+    const result = evaluateBaseballMarketResult(bet, bet);
 
     if (!result) continue;
     const profit = calcBetProfit(bet.stake, bet.odds_decimal, result);
     settleBet(bet.id, result, profit);
     settled++;
   }
+  return settled;
+}
+
+/** 自動結算不可變推薦快照，供校準/ROI/Brier 回測使用。 */
+export function autoSettleRecommendationSnapshots() {
+  const pending = db
+    .prepare(`
+      SELECT s.*, g.home_team, g.away_team, g.home_score, g.away_score,
+             g.raw_odds, g.completed, g.status, g.commence_time
+      FROM recommendation_snapshots s
+      JOIN games g ON g.id = s.game_id
+      WHERE s.result = 'pending'
+        AND (
+          g.completed = 1
+          OR lower(COALESCE(g.status, '')) IN
+             ('canceled', 'cancelled', 'postponed', 'abandoned', 'void')
+          OR (
+            (g.home_score IS NULL OR g.away_score IS NULL)
+            AND datetime(g.commence_time) <= datetime('now', '-${config.settlementVoidAfterHours} hours')
+          )
+        )
+        AND s.league IN (${BASEBALL_LEAGUE_SQL})
+    `)
+    .all();
+
+  const update = db.prepare(`
+    UPDATE recommendation_snapshots
+    SET result = ?, profit_units = ?, home_score = ?, away_score = ?,
+        closing_odds_decimal = ?, closing_implied_prob = ?, clv_prob = ?,
+        settled_at = datetime('now')
+    WHERE id = ?
+  `);
+
+  let settled = 0;
+  const tx = db.transaction(() => {
+    for (const rec of pending) {
+      const result = evaluateBaseballMarketResult(rec, rec);
+      if (!result) continue;
+      const profitUnits =
+        result === 'win' ? rec.odds_decimal - 1 : result === 'loss' ? -1 : 0;
+      const closing = findClosingMarket(rec, rec);
+      const closingOdds = closing?.odds ?? null;
+      const closingImplied = closing?.fairProb ?? null;
+      const clv =
+        closingImplied != null ? closingImplied - rec.implied_prob : null;
+      update.run(
+        result,
+        profitUnits,
+        rec.home_score,
+        rec.away_score,
+        closingOdds,
+        closingImplied,
+        clv,
+        rec.id
+      );
+      settled += 1;
+    }
+  });
+  tx();
   return settled;
 }
 
@@ -652,7 +1052,9 @@ export function getAppStatus() {
   const lastSyncAt = getMeta('last_sync_at');
   const lastAnalysisAt = getMeta('last_analysis_at');
   const quotaRaw = getMeta('odds_quota_remaining');
-  const recommendationCount = db.prepare('SELECT COUNT(*) as c FROM recommendations').get().c;
+  const recommendationCount = db
+    .prepare(`SELECT COUNT(*) as c FROM recommendations WHERE league IN (${BASEBALL_LEAGUE_SQL})`)
+    .get().c;
   const pendingBets = db.prepare(`SELECT COUNT(*) as c FROM bet_log WHERE result = 'pending'`).get().c;
 
   let needsRefresh = false;
@@ -690,11 +1092,38 @@ export async function fullRefresh() {
       setMeta('odds_quota_remaining', parseInt(sync.oddsQuota.remaining, 10) || 0);
     }
 
+    const settledBets = autoSettlePendingBets();
+    const settledSnapshots = autoSettleRecommendationSnapshots();
     const analysis = await runAnalysis();
     setMeta('last_analysis_at', new Date().toISOString());
 
-    const recommendationCount = db.prepare('SELECT COUNT(*) as c FROM recommendations').get().c;
-    return { sync, analysis, recommendationCount };
+    let liveAnalysis = null;
+    try {
+      liveAnalysis = await runLiveAnalysis();
+      setMeta('last_live_analysis_at', new Date().toISOString());
+    } catch (err) {
+      console.warn('[live] 滾球分析失敗:', err.message);
+    }
+
+    const recommendationCount = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM recommendations WHERE league IN (${BASEBALL_LEAGUE_SQL}) AND IFNULL(phase, 'prematch') = 'prematch'`
+      )
+      .get().c;
+    const liveRecommendationCount = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM recommendations WHERE league IN (${BASEBALL_LEAGUE_SQL}) AND phase = 'live'`
+      )
+      .get().c;
+    return {
+      sync,
+      analysis,
+      liveAnalysis,
+      recommendationCount,
+      liveRecommendationCount,
+      settledBets,
+      settledSnapshots,
+    };
   })();
 
   try {

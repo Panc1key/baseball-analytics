@@ -7,7 +7,7 @@ import {
   getVenueName,
 } from './MlbStatsService.js';
 import { computeH2hProbabilities } from './H2hModel.js';
-import { buildMatchupAnalysis } from './MatchupCore.js';
+import { buildMatchupAnalysis, applyCalibratedProbabilities } from './MatchupCore.js';
 import { computeTotalsProjection } from './TotalsModel.js';
 
 /**
@@ -74,7 +74,7 @@ export function getTeamStats(league, teamName) {
 }
 
 /**
- * 綜合分析：MLB 走 MatchupCore 場次核心，其他聯盟沿用簡化模型
+ * 綜合分析：MLB 用 MatchupCore（情境/EV）+ H2hModel/Poisson（校準勝率）
  */
 export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, options = {}) {
   const { mlbStandings = [], mlbScheduleGame = null } = options;
@@ -130,11 +130,21 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     }
   }
 
+  const totalsProjection = computeTotalsProjection({
+    league,
+    homeMlb,
+    awayMlb,
+    homePitcherStats,
+    awayPitcherStats,
+    venueName,
+    bookmakers,
+  });
+
   let matchupCore = null;
   let h2h;
 
   if (league === 'MLB') {
-    matchupCore = buildMatchupAnalysis({
+    const situationCore = buildMatchupAnalysis({
       league,
       homeTeam,
       awayTeam,
@@ -149,21 +159,33 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       awayFallbackRating,
       venueName,
     });
-    h2h = {
-      homeWinProb: matchupCore.homeWinProb,
-      awayWinProb: matchupCore.awayWinProb,
-      confidence: matchupCore.confidence,
-      factors: matchupCore.factors,
-      marketHomeProb: matchupCore.marketHomeProb,
-      marketAwayProb: matchupCore.marketAwayProb,
-      components: {
-        homeStrength: matchupCore.homeSituation?.score,
-        awayStrength: matchupCore.awaySituation?.score,
-        marketWeight: matchupCore.marketWeight,
-        hasMlbCore: matchupCore.hasMlbCore,
-        hasPitchers: matchupCore.hasPitchers,
-      },
-    };
+
+    h2h = computeH2hProbabilities({
+      league,
+      homeTeam,
+      awayTeam,
+      bookmakers,
+      homeMlb,
+      awayMlb,
+      homePitcherStats,
+      awayPitcherStats,
+      homeInjuryCount: homeInjurySummary.count,
+      awayInjuryCount: awayInjurySummary.count,
+      homeFallbackRating,
+      awayFallbackRating,
+      venueName,
+      homeRuns: totalsProjection.homeRuns,
+      awayRuns: totalsProjection.awayRuns,
+    });
+
+    matchupCore = applyCalibratedProbabilities(
+      situationCore,
+      h2h.homeWinProb,
+      h2h.awayWinProb,
+      bookmakers,
+      homeTeam,
+      awayTeam
+    );
   } else {
     h2h = computeH2hProbabilities({
       league,
@@ -182,26 +204,18 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     });
   }
 
-  const totalsProjection = computeTotalsProjection({
-    league,
-    homeMlb,
-    awayMlb,
-    homePitcherStats,
-    awayPitcherStats,
-    venueName,
-    bookmakers,
-  });
-
   const coreFactors = h2h.factors || [];
-  const totalsFactors = totalsProjection.factors.filter(
-    (f) => !coreFactors.some((c) => c === f)
-  );
+  const totalsFactors = totalsProjection.factors.filter((f) => !coreFactors.some((c) => c === f));
 
   return {
     homeTeam,
     awayTeam,
     homeWinProb: h2h.homeWinProb,
     awayWinProb: h2h.awayWinProb,
+    rawModelHomeProb: h2h.rawModelHomeProb ?? h2h.homeWinProb,
+    rawModelAwayProb: h2h.rawModelAwayProb ?? h2h.awayWinProb,
+    calibratedHomeProb: h2h.calibratedHomeProb ?? h2h.homeWinProb,
+    calibratedAwayProb: h2h.calibratedAwayProb ?? h2h.awayWinProb,
     confidence: h2h.confidence,
     homeL10,
     awayL10,
@@ -210,6 +224,9 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     marketAwayProb: h2h.marketAwayProb,
     homePitcherEra,
     awayPitcherEra,
+    pitcherEdge: h2h.pitcherEdge ?? h2h.components?.pitcherEdge ?? 0,
+    homeRuns: totalsProjection.homeRuns,
+    awayRuns: totalsProjection.awayRuns,
     h2hComponents: h2h.components,
     homeMlb,
     awayMlb,
@@ -221,6 +238,6 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     totalsProjection,
     projectedTotal: totalsProjection.finalTotal,
     matchupCore,
-    dataQuality: matchupCore?.dataQuality,
+    dataQuality: matchupCore?.dataQuality ?? totalsProjection.dataQuality,
   };
 }

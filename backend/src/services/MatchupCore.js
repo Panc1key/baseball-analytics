@@ -1,5 +1,6 @@
 /**
  * MLB 場次分析核心 — 先算「這場誰佔優、優勢多大」，再映射到各盤口
+ * 最終勝率由 H2hModel + Poisson 得分模型校準（applyCalibratedProbabilities）
  */
 
 import { config } from '../config.js';
@@ -143,6 +144,49 @@ export function computeH2hEdges(homeWinProb, awayWinProb, homeOdds, awayOdds) {
   };
 }
 
+function extractH2hOdds(bookmakers, homeTeam, awayTeam) {
+  let homeOdds = null;
+  let awayOdds = null;
+  for (const book of bookmakers || []) {
+    const m = book.markets?.find((x) => x.key === 'h2h');
+    if (!m) continue;
+    const ho = m.outcomes?.find((o) => o.name === homeTeam);
+    const ao = m.outcomes?.find((o) => o.name === awayTeam);
+    if (ho?.price && (homeOdds == null || ho.price > homeOdds)) homeOdds = ho.price;
+    if (ao?.price && (awayOdds == null || ao.price > awayOdds)) awayOdds = ao.price;
+  }
+  return { homeOdds, awayOdds };
+}
+
+/**
+ * 以 Poisson/Log5 校準後的勝率覆寫 MatchupCore，並重算雙邊 EV
+ */
+export function applyCalibratedProbabilities(matchupCore, homeWinProb, awayWinProb, bookmakers, homeTeam, awayTeam) {
+  if (!matchupCore) return null;
+
+  const { homeOdds, awayOdds } = extractH2hOdds(bookmakers, homeTeam, awayTeam);
+  const edges = computeH2hEdges(homeWinProb, awayWinProb, homeOdds, awayOdds);
+  const factors = [...(matchupCore.factors || [])];
+
+  if (edges.favoriteTrap && !factors.some((f) => f.includes('熱門陷阱') || f.includes('過度追捧'))) {
+    factors.push('市場過度追捧熱門，EV 更佳在另一側');
+  }
+  if (edges.bestSide) {
+    const sideLabel = edges.bestSide === 'home' ? homeTeam : awayTeam;
+    const evLine = `EV 最佳: ${sideLabel} (${(edges.bestEv * 100).toFixed(1)}%)`;
+    if (!factors.some((f) => f.startsWith('EV 最佳'))) factors.push(evLine);
+  }
+
+  return {
+    ...matchupCore,
+    homeWinProb,
+    awayWinProb,
+    confidence: Math.abs(homeWinProb - 0.5) * 2,
+    edges,
+    factors,
+  };
+}
+
 export function buildMatchupAnalysis({
   league,
   homeTeam,
@@ -204,24 +248,11 @@ export function buildMatchupAnalysis({
 
   if (marketHomeProb != null) {
     factors.push(
-      `模型主勝 ${(rawHomeProb * 100).toFixed(1)}% → 校準 ${(homeWinProb * 100).toFixed(1)}% · 市場 ${(marketHomeProb * 100).toFixed(1)}%`
+      `情境主勝 ${(rawHomeProb * 100).toFixed(1)}% → 校準 ${(homeWinProb * 100).toFixed(1)}% · 市場 ${(marketHomeProb * 100).toFixed(1)}%`
     );
   }
 
-  let homeOdds = null;
-  let awayOdds = null;
-  for (const book of bookmakers || []) {
-    const m = book.markets?.find((x) => x.key === 'h2h');
-    if (!m) continue;
-    const ho = m.outcomes?.find((o) => o.name === homeTeam);
-    const ao = m.outcomes?.find((o) => o.name === awayTeam);
-    if (ho?.price && ao?.price) {
-      homeOdds = ho.price;
-      awayOdds = ao.price;
-      break;
-    }
-  }
-
+  const { homeOdds, awayOdds } = extractH2hOdds(bookmakers, homeTeam, awayTeam);
   const edges = computeH2hEdges(homeWinProb, awayWinProb, homeOdds, awayOdds);
 
   if (edges.favoriteTrap) {
@@ -229,9 +260,7 @@ export function buildMatchupAnalysis({
   }
   if (edges.bestSide) {
     const sideLabel = edges.bestSide === 'home' ? homeTeam : awayTeam;
-    factors.push(
-      `EV 最佳: ${sideLabel} (${(edges.bestEv * 100).toFixed(1)}%)`
-    );
+    factors.push(`EV 最佳: ${sideLabel} (${(edges.bestEv * 100).toFixed(1)}%)`);
   }
 
   const dataQuality =

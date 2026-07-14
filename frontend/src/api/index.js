@@ -7,6 +7,37 @@ export async function refreshData() {
   return data;
 }
 
+/** 跨聯盟同步（棒球 + 足球） */
+export async function refreshSlate() {
+  const { data } = await api.post('/slate/refresh');
+  return data;
+}
+
+export async function getSlate(params = {}) {
+  const { data } = await api.get('/slate', { params });
+  return data;
+}
+
+export async function getSlateStatus() {
+  const { data } = await api.get('/slate/status');
+  return data;
+}
+
+export async function getLiveRecommendations(params = {}) {
+  const { data } = await api.get('/live', { params });
+  return data;
+}
+
+export async function getLiveStatus() {
+  const { data } = await api.get('/live/status');
+  return data;
+}
+
+export async function refreshLive() {
+  const { data } = await api.post('/live/refresh');
+  return data;
+}
+
 export async function getStatus() {
   const { data } = await api.get('/status');
   return data;

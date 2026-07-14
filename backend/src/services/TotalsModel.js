@@ -6,16 +6,108 @@
 
 import { config } from '../config.js';
 import {
-  calcEV,
   decimalToImpliedProb,
   decimalToNetOdds,
   removeVig,
   calibrateModelProb,
+  calcEVWithPush,
 } from '../utils/odds.js';
 import { getParkFactor } from '../data/parkFactors.js';
+import {
+  poissonTotalDistribution,
+  poissonTotalOverProb,
+} from '../models/GameScoreModel.js';
 
 const MLB_LEAGUE_RUNS_PER_GAME = 8.8;
 const MLB_TEAM_RUNS_AVG = MLB_LEAGUE_RUNS_PER_GAME / 2;
+
+/**
+ * 先發投手質量指數（越高越差，類似足球後防漏洞）
+ * 棒球不對稱：一側投手差 → 大分機率顯著上升；小球需兩側都穩
+ */
+export function pitcherQualityIndex(pitcherStats) {
+  if (!pitcherStats) {
+    return { index: 0, tier: 'unknown', weak: false, solid: false, elite: false, era: null, whip: null };
+  }
+  const era = pitcherStats.era ?? 4.5;
+  const whip = pitcherStats.whip ?? 1.3;
+  const index = (era - 4.5) * 0.55 + (whip - 1.3) * 2.2;
+
+  let tier = 'avg';
+  if (index > 0.85 || era >= 5.2 || whip >= 1.48) tier = 'weak';
+  else if (index > 0.35 || era >= 4.8) tier = 'below_avg';
+  else if (index < -0.35 && era <= 3.6 && whip <= 1.12) tier = 'elite';
+  else if (index < 0.15 && era <= 4.0) tier = 'solid';
+
+  return {
+    index,
+    tier,
+    weak: tier === 'weak' || tier === 'below_avg',
+    solid: tier === 'solid' || tier === 'elite',
+    elite: tier === 'elite',
+    era,
+    whip,
+  };
+}
+
+/** 大小球場景：大分觸發 vs 小球可行（不對稱） */
+export function analyzePitchingTotalsContext({
+  homePitcherStats,
+  awayPitcherStats,
+  homeMlb,
+  awayMlb,
+  parkFactor = 1,
+}) {
+  const homeP = pitcherQualityIndex(homePitcherStats);
+  const awayP = pitcherQualityIndex(awayPitcherStats);
+  const homeOff = homeMlb ? runsPerGame(homeMlb) : MLB_TEAM_RUNS_AVG;
+  const awayOff = awayMlb ? runsPerGame(awayMlb) : MLB_TEAM_RUNS_AVG;
+  const avgOffense = (homeOff + awayOff) / 2;
+  const combinedPitcherBad = homeP.index + awayP.index;
+
+  // 大分：任一侧投手偏弱即可拉高（不必三振，上垒就有机会）
+  const overTrigger =
+    homeP.weak ||
+    awayP.weak ||
+    combinedPitcherBad > 0.55;
+
+  const weakPitcherCount = (homeP.tier === 'weak' ? 1 : 0) + (awayP.tier === 'weak' ? 1 : 0);
+
+  // 小球：両投手都稳 + 进攻不猛 + 球场不偏打
+  const underViable =
+    !homeP.weak &&
+    !awayP.weak &&
+    homeP.index < 0.3 &&
+    awayP.index < 0.3 &&
+    parkFactor <= (config.totalsMaxUnderParkFactor ?? 1.03) &&
+    avgOffense <= MLB_TEAM_RUNS_AVG + (config.totalsMaxUnderOffenseRpg ?? 0.3);
+
+  const factors = [];
+  if (homeP.tier !== 'unknown') {
+    factors.push(
+      `主先發 ${homeP.tier}（ERA ${homeP.era?.toFixed(2) ?? '?'} WHIP ${homeP.whip?.toFixed(2) ?? '?'}）`
+    );
+  }
+  if (awayP.tier !== 'unknown') {
+    factors.push(
+      `客先發 ${awayP.tier}（ERA ${awayP.era?.toFixed(2) ?? '?'} WHIP ${awayP.whip?.toFixed(2) ?? '?'}）`
+    );
+  }
+  if (overTrigger) factors.push('投手漏洞 → 大分風險↑（單側差投即可）');
+  if (underViable) factors.push('雙先發穩定 + 進攻一般 → 小球可行');
+  else if (homeP.tier !== 'unknown') factors.push('小球條件不足（需雙投手穩 + 低進攻）');
+
+  return {
+    homePitcher: homeP,
+    awayPitcher: awayP,
+    overTrigger,
+    weakPitcherCount,
+    underViable,
+    avgOffense,
+    combinedPitcherBad,
+    factors,
+  };
+}
 
 /** 從戰績計算場均得分/失分 */
 export function runsPerGame(mlbTeam) {
@@ -32,12 +124,20 @@ export function runsAllowedPerGame(mlbTeam) {
   return (mlbTeam.runsAllowed || 0) / gp;
 }
 
-/** 先發投手質量（越低越強） */
+/** 先發投手對對手得分的影響（弱投非線性放大） */
 function pitcherRunSuppression(pitcherStats) {
   if (!pitcherStats) return 0;
-  const era = pitcherStats.era ?? 4.5;
-  const whip = pitcherStats.whip ?? 1.3;
-  return (era - 4.5) * 0.12 + (whip - 1.3) * 0.35;
+  const q = pitcherQualityIndex(pitcherStats);
+  if (q.tier === 'weak') {
+    return 0.45 + Math.max(0, q.index) * 0.5;
+  }
+  if (q.tier === 'below_avg') {
+    return 0.22 + Math.max(0, q.index) * 0.35;
+  }
+  if (q.elite) {
+    return -0.35 + q.index * 0.25;
+  }
+  return q.index * 0.35;
 }
 
 /**
@@ -105,7 +205,17 @@ export function extractMarketTotals(bookmakers) {
   return best;
 }
 
-/** 大於盤口線機率（總分變異較大，斜率較平） */
+/** 大球機率由已含投手影響的 lambda 直接決定，避免再次加權同一先發資訊。 */
+export function probTotalOverWithContext(homeRuns, awayRuns, line, totalsContext) {
+  return poissonTotalOverProb(homeRuns, awayRuns, line);
+}
+
+/** 小球概率與大球使用同一分布；投手/進攻條件只作推薦門控，不再修改概率。 */
+export function probTotalUnderWithContext(homeRuns, awayRuns, line, totalsContext, modelTotal, marketLine) {
+  return poissonTotalDistribution(homeRuns, awayRuns, line).underProb;
+}
+
+/** 大於盤口線機率（logistic 備用，非 MLB Poisson 時） */
 export function probOverAtLine(projectedTotal, line, steepness = 2.0) {
   const diff = projectedTotal - (line + 0.5);
   return 1 / (1 + Math.exp(-diff / steepness));
@@ -139,6 +249,8 @@ export function computeTotalsProjection({
   const marketOverProb = market?.fairOverProb ?? null;
 
   let modelTotal = MLB_LEAGUE_RUNS_PER_GAME;
+  let homeRuns = null;
+  let awayRuns = null;
   const factors = [];
   const hasMlbCore = Boolean(homeMlb && awayMlb);
   const hasPitchers = Boolean(homePitcherStats && awayPitcherStats);
@@ -149,14 +261,14 @@ export function computeTotalsProjection({
     const homeRa = runsAllowedPerGame(homeMlb);
     const awayRa = runsAllowedPerGame(awayMlb);
 
-    const homeRuns = projectTeamRuns({
+    homeRuns = projectTeamRuns({
       offenseRpg: homeOff,
       oppRunsAllowedRpg: awayRa,
       oppPitcherStats: awayPitcherStats,
       parkFactor,
       isHome: true,
     });
-    const awayRuns = projectTeamRuns({
+    awayRuns = projectTeamRuns({
       offenseRpg: awayOff,
       oppRunsAllowedRpg: homeRa,
       oppPitcherStats: homePitcherStats,
@@ -191,12 +303,39 @@ export function computeTotalsProjection({
     factors.push(`最終預估總分 ${finalTotal.toFixed(1)}（模型${modelTotal.toFixed(1)}）`);
   }
 
+  // 大小盤概率與畫面顯示的 finalTotal 必須使用同一組 lambda。
+  // 只調整總量，保留主客原始得分比例。
+  let probabilityHomeRuns = homeRuns;
+  let probabilityAwayRuns = awayRuns;
+  if (homeRuns != null && awayRuns != null) {
+    const pureTotal = homeRuns + awayRuns;
+    const scale = pureTotal > 0 ? finalTotal / pureTotal : 1;
+    probabilityHomeRuns = homeRuns * scale;
+    probabilityAwayRuns = awayRuns * scale;
+  }
+
   const modelMarketGap = marketLine != null ? Math.abs(modelTotal - marketLine) : 0;
   const marketFavorsOver = marketOverProb != null ? marketOverProb >= 0.5 : finalTotal > (marketLine ?? finalTotal);
+
+  let totalsContext = null;
+  if (league === 'MLB' && hasPitchers) {
+    totalsContext = analyzePitchingTotalsContext({
+      homePitcherStats,
+      awayPitcherStats,
+      homeMlb,
+      awayMlb,
+      parkFactor,
+    });
+    factors.push(...totalsContext.factors);
+  }
 
   return {
     modelTotal,
     finalTotal,
+    homeRuns,
+    awayRuns,
+    probabilityHomeRuns,
+    probabilityAwayRuns,
     marketLine,
     marketOverProb,
     marketUnderProb: marketOverProb != null ? 1 - marketOverProb : null,
@@ -204,6 +343,7 @@ export function computeTotalsProjection({
     modelMarketGap,
     marketFavorsOver,
     parkFactor,
+    totalsContext,
     factors,
     hasMlbCore,
     hasPitchers,
@@ -228,14 +368,30 @@ export function shouldSkipTotalLine({ projection, line, isOver, modelProb, impli
     return { skip: true, reason: `模型${modelTotal.toFixed(1)}≈市場${marketLine}，無優勢` };
   }
 
-  const modelFavorsOver = modelTotal > marketLine + 0.15;
-  const modelFavorsUnder = modelTotal < marketLine - 0.15;
+  const modelFavorsOver = projection.totalsContext?.overTrigger
+    ? modelTotal > marketLine - 0.05
+    : modelTotal > marketLine + 0.15;
+  const modelFavorsUnder = modelTotal < marketLine - (config.totalsMinUnderGap ?? 0.5);
 
   if (isOver && !modelFavorsOver) {
     return { skip: true, reason: '模型未看好大分' };
   }
-  if (!isOver && !modelFavorsUnder) {
-    return { skip: true, reason: '模型未看好小分' };
+  if (!isOver) {
+    if (!projection.totalsContext?.underViable) {
+      return { skip: true, reason: '小球需雙先發穩定且進攻/球場配合，條件不足' };
+    }
+    if (projection.totalsContext?.overTrigger) {
+      return { skip: true, reason: '存在投手漏洞，禁止推小（弱投易出大分）' };
+    }
+    if (modelTotal >= marketLine) {
+      return { skip: true, reason: '模型總分不低於盤口，禁止推小' };
+    }
+    if (!modelFavorsUnder) {
+      return { skip: true, reason: `推小需模型低於市場至少 ${config.totalsMinUnderGap ?? 0.5} 分` };
+    }
+    if (edgePct < (config.totalsMinUnderEdgePct ?? 6)) {
+      return { skip: true, reason: '小球需更高優勢門檻' };
+    }
   }
 
   // 市場定低盤（強投手戰）但模型偏高 → 不輕易博大
@@ -245,6 +401,10 @@ export function shouldSkipTotalLine({ projection, line, isOver, modelProb, impli
   // 市場定高盤但模型偏低 → 不輕易博小
   if (!isOver && marketLine >= modelTotal + 1.2 && edgePct < minContrarian) {
     return { skip: true, reason: '市場高盤線，模型不應博小' };
+  }
+
+  if (isOver && projection.totalsContext?.overTrigger && edgePct < (config.totalsMinEdgePct ?? 2)) {
+    return { skip: true, reason: '大分觸發但優勢仍不足' };
   }
 
   if (edgePct < minEdge) {
@@ -270,16 +430,45 @@ export function shouldSkipTotalLine({ projection, line, isOver, modelProb, impli
  */
 export function buildTotalCandidates(markets, projection, league) {
   const candidates = [];
+  const usePoisson =
+    projection.probabilityHomeRuns != null &&
+    projection.probabilityAwayRuns != null &&
+    league === 'MLB';
 
   for (const [, total] of Object.entries(markets.totals || {})) {
     const isOver = total.name === 'Over';
     const line = total.point;
-    const rawProb = isOver
-      ? probOverAtLine(projection.modelTotal, line)
-      : 1 - probOverAtLine(projection.modelTotal, line);
+    const distribution = usePoisson
+      ? poissonTotalDistribution(
+          projection.probabilityHomeRuns,
+          projection.probabilityAwayRuns,
+          line
+        )
+      : null;
+    const pushProb = distribution?.pushProb ?? 0;
+    const decisiveMass = Math.max(1e-9, 1 - pushProb);
+    const rawProb = usePoisson
+      ? isOver
+        ? distribution.overProb / decisiveMass
+        : distribution.underProb / decisiveMass
+      : isOver
+        ? probOverAtLine(projection.finalTotal, line)
+        : 1 - probOverAtLine(projection.finalTotal, line);
+    const maxEdge = isOver
+      ? config.maxModelEdgePct
+      : (config.totalsUnderMaxModelEdgePct ?? 0.05);
     const impliedProb = decimalToImpliedProb(total.price);
-    const modelProb = calibrateModelProb(rawProb, impliedProb, config.maxModelEdgePct);
-    const ev = calcEV(modelProb, decimalToNetOdds(total.price));
+    const oppositeKey = `${isOver ? 'Under' : 'Over'}_${line}`;
+    const opposite = markets.totals?.[oppositeKey];
+    const marketProb = opposite?.price
+      ? removeVig(
+          impliedProb,
+          decimalToImpliedProb(opposite.price)
+        ).fairA
+      : impliedProb;
+    const modelProb = calibrateModelProb(rawProb, marketProb, maxEdge);
+    const winProb = modelProb * (1 - pushProb);
+    const ev = calcEVWithPush(winProb, pushProb, decimalToNetOdds(total.price));
     const edgePct = (modelProb - impliedProb) * 100;
 
     const gate = shouldSkipTotalLine({
@@ -300,7 +489,9 @@ export function buildTotalCandidates(markets, projection, league) {
       oddsDecimal: total.price,
       modelProb,
       rawModelProb: rawProb,
+      marketProb,
       impliedProb,
+      pushProb,
       ev,
       edgePct,
       projectedTotal: projection.finalTotal,
@@ -308,6 +499,7 @@ export function buildTotalCandidates(markets, projection, league) {
       marketLine: projection.marketLine,
       structuralOk: !gate.skip,
       skipReason: gate.reason,
+      probabilityCalibrated: true,
     });
   }
 

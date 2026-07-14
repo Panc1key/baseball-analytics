@@ -1,5 +1,11 @@
 import { config } from '../config.js';
-import { decimalToImpliedProb, calibrateModelProb, calcEV, decimalToNetOdds } from '../utils/odds.js';
+import {
+  decimalToImpliedProb,
+  calibrateModelProb,
+  calcEV,
+  calcEVWithPush,
+  decimalToNetOdds,
+} from '../utils/odds.js';
 
 /** 各盤口水位帶 */
 export const MARKET_BANDS = {
@@ -19,18 +25,24 @@ export function oddsBandFit(odds, band) {
 }
 
 export function calcDataQuality(analysis, league) {
-  if (analysis?.dataQuality != null) return analysis.dataQuality;
   let q = 0.25;
   if (league === 'MLB') {
     if (analysis.homePitcherEra != null && analysis.awayPitcherEra != null) q += 0.25;
     if (analysis.marketHomeProb != null) q += 0.2;
     if (analysis.factors?.some((f) => f.includes('戰績'))) q += 0.15;
-    if (analysis.factors?.some((f) => f.includes('傷兵'))) q += 0.1;
+    if (analysis.homeRuns != null && analysis.awayRuns != null) q += 0.1;
     if (analysis.factors?.some((f) => f.includes('主場球場'))) q += 0.05;
   } else if (analysis.factors?.length >= 2) {
     q += 0.35;
   }
   return Math.min(1, q);
+}
+
+function hitRateBonus(modelProb) {
+  if (modelProb >= 0.6) return 10;
+  if (modelProb >= 0.58) return 7;
+  if (modelProb >= 0.55) return 4;
+  return 0;
 }
 
 export function scorePick({
@@ -47,7 +59,8 @@ export function scorePick({
   const band = MARKET_BANDS[marketType] || MARKET_BANDS.props;
   const oddsScore = oddsBandFit(oddsDecimal, band) * 20;
   const structScore = structuralOk ? 15 : 0;
-  const score = edgeScore + dataScore + oddsScore + structScore;
+  const hitScore = hitRateBonus(modelProb);
+  const score = edgeScore + dataScore + oddsScore + structScore + hitScore;
 
   let tier = null;
   if (score >= config.recommendPrimaryScore) tier = 'primary';
@@ -64,9 +77,26 @@ export function scorePick({
 export function enrichCandidate(candidate, analysis, league, marketType) {
   const impliedProb = decimalToImpliedProb(candidate.oddsDecimal ?? candidate.odds?.price);
   const oddsDecimal = candidate.oddsDecimal ?? candidate.odds?.price;
-  const rawModelProb = candidate.modelProb;
-  const modelProb = calibrateModelProb(rawModelProb, impliedProb, config.maxModelEdgePct);
-  const ev = calcEV(modelProb, decimalToNetOdds(oddsDecimal));
+  const rawModelProb = candidate.rawModelProb ?? candidate.modelProb;
+  const maxEdge =
+    marketType === 'spreads'
+      ? (config.spreadsMaxModelEdgePct ?? config.maxModelEdgePct)
+      : config.maxModelEdgePct;
+  // 每個候選只允許一次概率校準。H2H/讓分/大小若上游已完成市場
+  // shrinkage，這裡直接信任；球員盤等純模型候選才在此校準一次。
+  const probabilityCalibrated = candidate.probabilityCalibrated === true;
+  const modelProb = probabilityCalibrated
+    ? candidate.modelProb
+    : calibrateModelProb(rawModelProb, impliedProb, maxEdge);
+  const pushProb = candidate.pushProb ?? 0;
+  const ev =
+    pushProb > 0
+      ? calcEVWithPush(
+          modelProb * (1 - pushProb),
+          pushProb,
+          decimalToNetOdds(oddsDecimal)
+        )
+      : calcEV(modelProb, decimalToNetOdds(oddsDecimal));
   const dataQuality = calcDataQuality(analysis, league);
   const scored = scorePick({
     modelProb,
@@ -80,6 +110,10 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
   return {
     ...candidate,
     rawModelProb,
+    marketProb: candidate.marketProb ?? impliedProb,
+    calibratedProb: modelProb,
+    probabilityCalibrated: true,
+    calibrationCount: (candidate.calibrationCount ?? 0) + (probabilityCalibrated ? 0 : 1),
     modelProb,
     ev,
     impliedProb,

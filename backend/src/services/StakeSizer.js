@@ -26,19 +26,11 @@ export function computeStakeMultiplier(rec) {
   const minEvPct = (config.minEvThreshold ?? 0.03) * 100;
   const evPct = ev * 100;
 
-  // EV：3%→0.85x，6%→1.1x，10%→1.5x，15%→1.85x
   const evFactor = 0.85 + Math.min(1.0, Math.max(0, (evPct - minEvPct) * 0.12));
-
-  // 模型優勢 edge%
   const edgeFactor = 0.9 + Math.min(0.3, Math.max(0, edge * 0.028));
-
-  // 序位：主推滿額，次推縮倉
   const rankFactor = pickRank === 1 ? 1 : pickRank === 2 ? 0.7 : pickRank === 3 ? 0.5 : 0.4;
-
-  // 數據完整度
   const dqFactor = 0.82 + Math.min(0.18, dataQuality * 0.2);
 
-  // 高賠波動略降倉；低水（錨腿）另計
   let oddsFactor = 1;
   if (odds >= 2.6) oddsFactor = 0.88;
   else if (odds >= 2.1) oddsFactor = 0.95;
@@ -55,9 +47,7 @@ export function computeStakeMultiplier(rec) {
   return Math.max(minM, Math.min(maxM, mult));
 }
 
-/**
- * 建議投注額（元）
- */
+/** 建議投注額（元） */
 export function computeSuggestedStake(rec) {
   const base = config.baseStakeUnit ?? 10;
   const mult = computeStakeMultiplier(rec);

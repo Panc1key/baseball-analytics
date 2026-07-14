@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { config } from './config.js';
 import apiRouter from './routes/api.js';
+import footballRouter from './routes/football.js';
 
 const app = express();
 
@@ -13,13 +14,20 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api', apiRouter);
+app.use('/api/football', footballRouter);
 
 app.listen(config.port, () => {
   console.log(`Baseball Analytics API: http://localhost:${config.port}`);
+  console.log(`Football Analytics API: http://localhost:${config.port}/api/football`);
   if (!config.oddsApiKey) {
     console.warn('警告: 未設定 ODDS_API_KEY，請複製 .env.example 為 .env 並填入 key');
   } else {
     console.log('ODDS_API_KEY 已載入');
+  }
+  if (!process.env.API_FOOTBALL_KEY) {
+    console.warn('提示: 未設定 API_FOOTBALL_KEY，足球分析將僅用賠率與比分（建議接入以啟用陣容/戰術）');
+  } else {
+    console.log('API_FOOTBALL_KEY 已載入（陣容/傷病/戰術）');
   }
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

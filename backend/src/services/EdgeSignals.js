@@ -15,7 +15,6 @@ export function teamMomentum(mlbTeam) {
 
 /**
  * 冷門高水訊號：市場低估近況火熱的一方
- * @returns {{ homeBoost, awayBoost, factors }}
  */
 export function computeMomentumShifts(homeMlb, awayMlb, threshold = 0.06) {
   const factors = [];
@@ -65,7 +64,6 @@ function marketTypeKey(market) {
 
 /**
  * 跨盤口「可執行優勢分」— 數值越高越適合均注主推
- * 整合：評分、EV、盤口類型、冷門動量、球員盤趨勢
  */
 export function computeActionableScore(candidate, context = {}) {
   const market = candidate.market;
@@ -107,18 +105,20 @@ export function computeActionableScore(candidate, context = {}) {
     signals.push('球員近期趨勢');
   }
 
-  // 大小盤需更強訊號才搶主推（不排除，但提高門檻）
+  if (mtype === 'h2h') bonus += 5;
+  if (mtype === 'spreads' && candidate.line != null && candidate.line < 0) bonus += 2;
+
   if (mtype === 'totals') {
-    if (edge < (config.flatBetMinEdgePctTotals ?? 4)) return -1;
-    bonus -= 3;
+    if (edge < (config.flatBetMinEdgePctTotals ?? 4)) return { score: -1, signals: [], bonus: 0 };
+    bonus -= config.totalsPrimaryScorePenalty ?? 15;
+    if (candidate.side === 'under') return { score: -1, signals: [], bonus: 0 };
   }
 
   if (mtype === 'props') {
-    if (edge < (config.flatBetMinEdgePctProps ?? 4)) return -1;
+    if (edge < (config.flatBetMinEdgePctProps ?? 4)) return { score: -1, signals: [], bonus: 0 };
     bonus += 5;
   }
 
-  // 高賠率區間加分（符合均注策略）
   if (odds >= 1.9) bonus += 4;
   else if (odds >= 1.8) bonus += 2;
 

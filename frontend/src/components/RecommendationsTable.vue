@@ -4,8 +4,8 @@
     <el-table :data="recommendations" stripe v-loading="loading" :empty-text="emptyText">
     <el-table-column label="序位" width="72" fixed="left">
       <template #default="{ row }">
-        <el-tag v-if="row.pick_rank" :type="row.pick_rank === 1 ? 'success' : 'warning'" size="small">
-          {{ row.rank_label || rankLabel(row.pick_rank) }}
+        <el-tag v-if="row.rank_label" :type="row.pick_rank === 1 ? 'success' : 'info'" size="small">
+          {{ row.rank_label }}
         </el-tag>
         <el-tag v-else :type="row.tier === 'primary' ? 'success' : 'warning'" size="small">
           {{ tierLabel(row.tier) }}
@@ -18,15 +18,10 @@
     <el-table-column label="對戰" min-width="280">
       <template #default="{ row }">
         <div>{{ formatMatchup(row.away_team, row.home_team) }}</div>
-        <div class="sub">{{ formatTime(row.commence_time) }}</div>
-      </template>
-    </el-table-column>
-    <el-table-column label="建議投注" width="96">
-      <template #default="{ row }">
-        <strong v-if="row.suggested_stake != null" class="stake-em">
-          {{ formatStake(row.suggested_stake) }}
-        </strong>
-        <span v-else class="sub">—</span>
+        <div class="sub">
+          <el-tag v-if="row.is_live" type="danger" size="small" effect="plain" class="live-tag">滾球</el-tag>
+          {{ formatTime(row.commence_time) }}
+        </div>
       </template>
     </el-table-column>
     <el-table-column label="盤口" width="88">
@@ -53,6 +48,18 @@
     <el-table-column label="評分" width="64">
       <template #default="{ row }">{{ row.score?.toFixed(0) }}</template>
     </el-table-column>
+    <el-table-column label="建議注" width="76">
+      <template #default="{ row }">
+        <span v-if="row.suggested_stake != null">{{ row.suggested_stake }}元</span>
+        <span v-else class="sub">—</span>
+      </template>
+    </el-table-column>
+    <el-table-column label="策略" width="88">
+      <template #default="{ row }">
+        <el-tag v-if="row.bet_strategy === 'flat_bet'" type="success" size="small" effect="plain">均注</el-tag>
+        <el-tag v-else-if="row.bet_strategy === 'parlay_anchor'" type="info" size="small" effect="plain">錨腿</el-tag>
+      </template>
+    </el-table-column>
     <el-table-column label="EV" width="76">
       <template #default="{ row }">
         <el-tag :type="evTag(row.ev)" size="small">+{{ (row.ev * 100).toFixed(1) }}%</el-tag>
@@ -69,22 +76,15 @@
 </template>
 
 <script setup>
-import { marketLabel, tierLabel, rankLabel } from '../utils/market.js';
+import { marketLabel, tierLabel } from '../utils/market.js';
 import { formatMatchup, leagueLabel, translatePick, translateReasoning, bookmakerLabel } from '../utils/teams.js';
 
-function formatStake(amount) {
-  const n = Number(amount);
-  if (Number.isNaN(n)) return '—';
-  return `${n % 1 === 0 ? n.toFixed(0) : n.toFixed(1)}${props.currency || '元'}`;
-}
-
-const props = defineProps({
+defineProps({
   recommendations: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   emptyText: { type: String, default: '尚無推薦' },
   sortHint: { type: String, default: '' },
   highlightProb: { type: Boolean, default: false },
-  currency: { type: String, default: '元' },
 });
 
 function formatTime(iso) {
@@ -102,7 +102,7 @@ function evTag(ev) {
 <style scoped>
 .sort-hint { font-size: 12px; color: #909399; margin: 0 0 8px; }
 .sub { font-size: 12px; color: #909399; }
+.live-tag { margin-right: 4px; vertical-align: middle; }
 .pos { color: #67c23a; font-weight: 600; }
 .prob-em { color: #67c23a; }
-.stake-em { color: #409eff; }
 </style>

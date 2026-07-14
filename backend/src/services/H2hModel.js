@@ -6,9 +6,10 @@
 
 import { decimalToImpliedProb, removeVig } from '../utils/odds.js';
 import { config } from '../config.js';
+import { blendScoreWithLog5 } from '../models/GameScoreModel.js';
 
 const PYTH_EXPONENT = 1.83;
-const MLB_HOME_FIELD = 0.028;
+const MLB_HOME_FIELD = 0.035;
 
 export function parseL10Rate(last10) {
   if (!last10 || last10 === 'N/A') return null;
@@ -140,12 +141,15 @@ export function computeH2hProbabilities({
   homeFallbackRating = 0.5,
   awayFallbackRating = 0.5,
   venueName = null,
+  homeRuns = null,
+  awayRuns = null,
 }) {
   const factors = [];
   let homeStrength = homeFallbackRating;
   let awayStrength = awayFallbackRating;
   let hasMlbCore = false;
   let hasPitchers = false;
+  let pitcherEdge = 0;
 
   if (league === 'MLB' && (homeMlb || awayMlb)) {
     hasMlbCore = Boolean(homeMlb && awayMlb);
@@ -172,8 +176,11 @@ export function computeH2hProbabilities({
 
     if (homePitcherStats && awayPitcherStats) {
       hasPitchers = true;
-      const pitcherEdge = estimatePitcherEdge(homePitcherStats, awayPitcherStats);
-      homeStrength += pitcherEdge;
+      pitcherEdge = estimatePitcherEdge(homePitcherStats, awayPitcherStats);
+      const scoreModelActive = homeRuns != null && awayRuns != null && hasMlbCore;
+      if (!scoreModelActive) {
+        homeStrength += pitcherEdge;
+      }
       factors.push(
         `先發質量差 ${(pitcherEdge * 100).toFixed(1)}%（主 ERA ${(homePitcherStats.era || 0).toFixed(2)} WHIP ${(homePitcherStats.whip || 0).toFixed(2)}` +
           ` vs 客 ERA ${(awayPitcherStats.era || 0).toFixed(2)} WHIP ${(awayPitcherStats.whip || 0).toFixed(2)}）`
@@ -189,28 +196,27 @@ export function computeH2hProbabilities({
   homeStrength = Math.max(0.05, Math.min(0.95, homeStrength));
   awayStrength = Math.max(0.05, Math.min(0.95, awayStrength));
 
-  // 近況動量：近 10 場明顯優於季賽時，向該隊傾斜（捕捉黑馬/頹勢）
-  if (league === 'MLB' && homeMlb && awayMlb) {
-    const homeSeason = homeMlb.winPct ?? 0.5;
-    const awaySeason = awayMlb.winPct ?? 0.5;
-    const homeL10 = parseL10Rate(homeMlb.last10) ?? homeSeason;
-    const awayL10 = parseL10Rate(awayMlb.last10) ?? awaySeason;
-    const homeMom = homeL10 - homeSeason;
-    const awayMom = awayL10 - awaySeason;
-    if (homeMom >= 0.06) {
-      homeStrength += Math.min(0.045, homeMom * 0.4);
-      factors.push(`主隊近況熱 L10 高於季賽 ${(homeMom * 100).toFixed(0)}%`);
-    }
-    if (awayMom >= 0.06) {
-      awayStrength += Math.min(0.045, awayMom * 0.4);
-      factors.push(`客隊近況熱 L10 高於季賽 ${(awayMom * 100).toFixed(0)}%`);
-    }
-  }
-
   // 主場優勢：提升主隊實力後再 Log5
   const homeWithField = Math.min(0.95, homeStrength + MLB_HOME_FIELD);
   let modelHomeProb = log5WinProb(homeWithField, awayStrength);
   modelHomeProb = clampProb(modelHomeProb);
+
+  const scoreBlend = blendScoreWithLog5({
+    log5HomeProb: modelHomeProb,
+    homeRuns,
+    awayRuns,
+    hasMlbCore,
+    hasPitchers,
+  });
+  if (scoreBlend.scoreBlend > 0) {
+    modelHomeProb = scoreBlend.homeWinProb;
+    factors.push(
+      `得分模型 主勝${((scoreBlend.scoreHomeProb ?? 0) * 100).toFixed(1)}% · 混合${(scoreBlend.scoreBlend * 100).toFixed(0)}%`
+    );
+  }
+
+  // 純模型概率：只包含基本面/Log5/Poisson，不含市場。
+  const rawModelHomeProb = modelHomeProb;
 
   const fairMarket = extractFairH2hProb(bookmakers, homeTeam, awayTeam);
   const marketHomeProb = fairMarket?.homeProb ?? null;
@@ -227,13 +233,23 @@ export function computeH2hProbabilities({
   const modelAwayProb = 1 - modelHomeProb;
   const confidence = Math.abs(modelHomeProb - 0.5) * 2;
 
+  const pitcherEdgeFinal =
+    hasPitchers && homePitcherStats && awayPitcherStats
+      ? estimatePitcherEdge(homePitcherStats, awayPitcherStats)
+      : pitcherEdge;
+
   return {
     homeWinProb: modelHomeProb,
     awayWinProb: modelAwayProb,
+    rawModelHomeProb,
+    rawModelAwayProb: 1 - rawModelHomeProb,
+    calibratedHomeProb: modelHomeProb,
+    calibratedAwayProb: modelAwayProb,
     confidence,
     factors,
     marketHomeProb,
     marketAwayProb: marketHomeProb != null ? 1 - marketHomeProb : null,
+    pitcherEdge: pitcherEdgeFinal,
     components: {
       homeStrength,
       awayStrength,
@@ -241,6 +257,10 @@ export function computeH2hProbabilities({
       marketWeight,
       hasMlbCore,
       hasPitchers,
+      pitcherEdge: pitcherEdgeFinal,
+      rawModelHomeProb,
+      marketHomeProb,
+      calibratedHomeProb: modelHomeProb,
     },
   };
 }

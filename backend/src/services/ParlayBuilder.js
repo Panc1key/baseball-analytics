@@ -1,17 +1,37 @@
 import db from '../db/database.js';
-import { config } from '../config.js';
+import { config, BASEBALL_LEAGUE_SQL } from '../config.js';
 import {
   calcEV,
+  calcEVWithPush,
   decimalToImpliedProb,
   calibrateModelProb,
   decimalToNetOdds,
   extractMarkets,
 } from '../utils/odds.js';
 import { classifyBetStrategy, qualifiesParlayAnchor } from './BetStrategy.js';
+import { activeGameWhere } from '../utils/activeGames.js';
 
 const PARLAY_MARKETS = ['h2h', 'spreads', 'totals'];
 const PARLAY_MARKET_SET = new Set(PARLAY_MARKETS);
 const LOTTERY_FILL_MARKETS = ['h2h', 'spreads'];
+/** 全場大串只允許獨贏/讓分，禁止大小球混入 */
+const SLATE_MARKETS = ['h2h', 'spreads'];
+
+function isSpreadPlus15Pick(pick) {
+  return /\+1\.5\b/.test(pick || '');
+}
+
+/** 全場大串腿質量門檻（命中率優先） */
+function passesSlateLegGate(leg) {
+  if (!SLATE_MARKETS.includes(leg.market)) return false;
+  if (config.parlaySlatePrimaryOnly !== false && leg.tier !== 'primary') return false;
+  if (leg.ev < (config.parlaySlateMinEv ?? 0)) return false;
+  if (leg.modelProb < (config.parlaySlateMinProb ?? 0.52)) return false;
+  if (leg.market === 'spreads' && isSpreadPlus15Pick(leg.pick)) {
+    if (leg.modelProb < (config.parlaySlateSpreadPlus15MinProb ?? 0.58)) return false;
+  }
+  return true;
+}
 
 function lotteryMaxLegOdds() {
   return config.parlayLotteryMaxLegOdds ?? 2.25;
@@ -22,12 +42,36 @@ function getUpcomingSlateGames() {
     .prepare(`
       SELECT g.*
       FROM games g
-      WHERE g.completed = 0
-        AND datetime(g.commence_time) > datetime('now')
-        AND datetime(g.commence_time) < datetime('now', '+2 day')
+      WHERE g.league IN (${BASEBALL_LEAGUE_SQL})
+        AND ${activeGameWhere('g')}
       ORDER BY g.commence_time ASC
     `)
     .all();
+}
+
+/** 當日 slate 統計（供 API / 前端顯示覆蓋率） */
+export function getSlateCoverage() {
+  const games = getUpcomingSlateGames();
+  const withOdds = games.filter((g) => {
+    try {
+      return JSON.parse(g.raw_odds || '[]').length > 0;
+    } catch {
+      return false;
+    }
+  });
+  const withRecs = games.filter((g) => {
+    const row = db.prepare('SELECT 1 FROM recommendations WHERE game_id = ? LIMIT 1').get(g.id);
+    return Boolean(row);
+  });
+  const expectedRow = db.prepare("SELECT value FROM app_meta WHERE key = 'mlb_slate_expected'").get();
+  const mlbExpected = expectedRow?.value ? parseInt(expectedRow.value, 10) : null;
+
+  return {
+    slateGames: games.length,
+    gamesWithOdds: withOdds.length,
+    gamesWithRecs: withRecs.length,
+    mlbExpectedGames: Number.isFinite(mlbExpected) ? mlbExpected : null,
+  };
 }
 
 function getGameMainMarketRecs(gameId) {
@@ -41,7 +85,10 @@ function getGameMainMarketRecs(gameId) {
         AND r.market IN (${placeholders})
         AND r.odds_decimal >= ?
       ORDER BY
+        CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END,
+        CASE r.market WHEN 'h2h' THEN 0 WHEN 'spreads' THEN 1 WHEN 'totals' THEN 2 ELSE 3 END,
         CASE WHEN r.bet_strategy = 'parlay_anchor' THEN 0 ELSE 1 END,
+        r.score DESC,
         r.model_prob DESC,
         r.ev DESC
     `)
@@ -55,8 +102,16 @@ function legOdds(rec) {
 function toLeg(rec) {
   const odds = legOdds(rec);
   const impliedProb = rec.implied_prob ?? decimalToImpliedProb(odds);
-  const modelProb = calibrateModelProb(rec.model_prob, impliedProb, config.maxModelEdgePct);
-  const ev = calcEV(modelProb, decimalToNetOdds(odds));
+  const modelProb = rec.calibrated_prob ?? rec.model_prob;
+  const pushProb = rec.push_prob ?? 0;
+  const ev =
+    pushProb > 0
+      ? calcEVWithPush(
+          modelProb * (1 - pushProb),
+          pushProb,
+          decimalToNetOdds(odds)
+        )
+      : calcEV(modelProb, decimalToNetOdds(odds));
   return {
     gameId: rec.game_id,
     league: rec.league,
@@ -70,6 +125,7 @@ function toLeg(rec) {
     ev,
     modelProb,
     impliedProb,
+    pushProb,
     edgeProb: (modelProb - impliedProb) * 100,
     score: rec.score,
     tier: rec.tier,
@@ -85,8 +141,16 @@ function isQualifiedLeg(rec, minLegOdds, mode = 'anchor') {
   if (odds < minLegOdds) return false;
 
   const impliedProb = rec.implied_prob ?? decimalToImpliedProb(odds);
-  const modelProb = calibrateModelProb(rec.model_prob, impliedProb, config.maxModelEdgePct);
-  const ev = calcEV(modelProb, decimalToNetOdds(odds));
+  const modelProb = rec.calibrated_prob ?? rec.model_prob;
+  const pushProb = rec.push_prob ?? 0;
+  const ev =
+    pushProb > 0
+      ? calcEVWithPush(
+          modelProb * (1 - pushProb),
+          pushProb,
+          decimalToNetOdds(odds)
+        )
+      : calcEV(modelProb, decimalToNetOdds(odds));
 
   if (ev < config.parlayMinLegEv || modelProb <= impliedProb) return false;
   if (!rec.tier || !['primary', 'watch'].includes(rec.tier)) return false;
@@ -118,15 +182,20 @@ function isLotterySlateLeg(rec, leg) {
   return leg.modelProb >= config.parlayLotteryMinProb;
 }
 
+function slateMaxLegOdds() {
+  return config.parlaySlateMaxLegOdds ?? 3.0;
+}
+
 function buildFallbackLegFromGame(game) {
   const bookmakers = JSON.parse(game.raw_odds || '[]');
   if (!bookmakers.length) return null;
 
   const markets = extractMarkets(bookmakers);
+  const maxOdds = slateMaxLegOdds();
   const candidates = [];
 
   for (const o of Object.values(markets.spreads || {})) {
-    if (!o?.price || o.price < config.minParlayLegOdds || o.price > lotteryMaxLegOdds()) continue;
+    if (!o?.price || o.price < config.minParlayLegOdds || o.price > maxOdds) continue;
     const pick = o.point != null ? `${o.name} ${o.point > 0 ? '+' : ''}${o.point}` : o.name;
     candidates.push({
       market: 'spreads',
@@ -135,12 +204,12 @@ function buildFallbackLegFromGame(game) {
       odds: o.price,
       bookmaker: o.bookmaker,
       impliedProb: decimalToImpliedProb(o.price),
-      spreadPriority: Math.abs(o.point ?? 0) <= 1.5 ? 0 : 1,
+      spreadPriority: o.point != null && o.point < 0 ? 0 : o.point != null && o.point > 0 ? 2 : 1,
     });
   }
 
   for (const o of Object.values(markets.h2h || {})) {
-    if (!o?.price || o.price < config.minParlayLegOdds || o.price > lotteryMaxLegOdds()) continue;
+    if (!o?.price || o.price < config.minParlayLegOdds || o.price > maxOdds) continue;
     candidates.push({
       market: 'h2h',
       pick: o.name,
@@ -187,37 +256,77 @@ function buildFallbackLegFromGame(game) {
   };
 }
 
-function pickLotteryLegForGame(game) {
+/** 當日全場：僅用主推獨贏/讓分，排除負 EV 與大小球 */
+function pickBestSlateLegFromGame(game) {
   const rows = getGameMainMarketRecs(game.id);
-  const legs = [];
+  const qualified = [];
 
   for (const row of rows) {
     const leg = toLeg(row);
+    if (leg.odds > slateMaxLegOdds()) continue;
+    if (!passesSlateLegGate(leg)) continue;
+
     leg.isAnchor = qualifiesParlayAnchor({
       ...row,
       odds_decimal: leg.odds,
       model_prob: leg.modelProb,
     });
-    if (isLotterySlateLeg(row, leg)) legs.push(leg);
+    leg.slateSource = 'primary';
+    qualified.push(leg);
   }
 
-  const selected = selectLegFromGame(legs);
-  if (selected) return selected;
+  if (qualified.length) {
+    qualified.sort((a, b) => {
+      if (a.isAnchor !== b.isAnchor) return a.isAnchor ? -1 : 1;
+      const marketRank = { h2h: 0, spreads: 1 };
+      const ma = marketRank[a.market] ?? 2;
+      const mb = marketRank[b.market] ?? 2;
+      if (ma !== mb) return ma - mb;
+      return b.modelProb - a.modelProb || b.score - a.score;
+    });
+    return qualified[0];
+  }
 
-  return buildFallbackLegFromGame(game);
+  // 無合格主推 → 不硬補劣質 +1.5 / 小球，寧可缺腿
+  if (config.parlaySlateAllowMarketFill === true) {
+    const fallback = buildFallbackLegFromGame(game);
+    if (fallback) fallback.slateSource = 'market_fill';
+    return fallback;
+  }
+
+  return null;
+}
+
+function pickLotteryLegForGame(game) {
+  return pickBestSlateLegFromGame(game);
 }
 
 /** 當日全場六合彩：每場一腿，含無推薦場次的賠率補腿 */
 function buildFullSlateLotteryLegs() {
   const games = getUpcomingSlateGames();
   const legs = [];
+  const missing = [];
 
   for (const game of games) {
     const leg = pickLotteryLegForGame(game);
-    if (leg) legs.push(leg);
+    if (leg) {
+      legs.push(leg);
+    } else {
+      missing.push({
+        gameId: game.id,
+        homeTeam: game.home_team,
+        awayTeam: game.away_team,
+        commenceTime: game.commence_time,
+        reason: JSON.parse(game.raw_odds || '[]').length ? 'no_leg' : 'no_odds',
+      });
+    }
   }
 
-  return legs.sort((a, b) => String(a.commenceTime).localeCompare(String(b.commenceTime)));
+  return {
+    legs: legs.sort((a, b) => String(a.commenceTime).localeCompare(String(b.commenceTime))),
+    games,
+    missing,
+  };
 }
 
 function getQualifiedLegsByGame(minLegOdds, mode = 'anchor') {
@@ -227,9 +336,9 @@ function getQualifiedLegsByGame(minLegOdds, mode = 'anchor') {
       SELECT r.*, g.home_team, g.away_team, g.commence_time
       FROM recommendations r
       JOIN games g ON g.id = r.game_id
-      WHERE g.completed = 0
-        AND datetime(g.commence_time) > datetime('now')
-        AND datetime(g.commence_time) < datetime('now', '+2 day')
+      WHERE g.league IN (${BASEBALL_LEAGUE_SQL})
+        AND ${activeGameWhere('g')}
+        AND datetime(g.commence_time) < datetime('now', '+36 hours')
         AND r.market IN (${placeholders})
         AND r.odds_decimal >= ?
       ORDER BY r.game_id,
@@ -293,9 +402,22 @@ function parlayKey(legs) {
 
 function buildParlayObject(legs, meta = {}) {
   const combinedOdds = legs.reduce((acc, r) => acc * r.odds, 1);
-  const combinedModelProb = legs.reduce((acc, r) => acc * (r.modelProb || 0.5), 1);
+  const noLossProb = legs.reduce((acc, r) => {
+    const push = r.pushProb ?? 0;
+    const win = (r.modelProb || 0.5) * (1 - push);
+    return acc * (win + push);
+  }, 1);
+  const allPushProb = legs.reduce((acc, r) => acc * (r.pushProb ?? 0), 1);
+  const combinedModelProb = noLossProb - allPushProb;
   const combinedImpliedProb = legs.reduce((acc, r) => acc * (r.impliedProb || decimalToImpliedProb(r.odds)), 1);
-  const combinedEv = calcEV(combinedModelProb, combinedOdds - 1);
+  // 任一腿輸則整串輸；push 腿移除並按剩餘腿賠率派彩。
+  // E[返還] 可分解為 ∏(P(win)×odds + P(push))。
+  const expectedReturn = legs.reduce((acc, r) => {
+    const push = r.pushProb ?? 0;
+    const win = (r.modelProb || 0.5) * (1 - push);
+    return acc * (win * r.odds + push);
+  }, 1);
+  const combinedEv = expectedReturn - 1;
   const combinedScore = legs.reduce((acc, r) => acc + (r.score || 0), 0);
   const stake = config.parlayBetUsd;
   const n = legs.length;
@@ -327,6 +449,8 @@ function buildParlayObject(legs, meta = {}) {
     parlay_label: meta.label || `${n}串1`,
     category: meta.category || 'lottery_full_slate',
     games_covered: legs.length,
+    slate_games: meta.slateMeta?.slateGames ?? legs.length,
+    missing_games: meta.slateMeta?.missingGames ?? [],
     _key: parlayKey(legs),
   };
 }
@@ -349,8 +473,9 @@ export function buildParlaysFromDb(options = {}) {
   const anchorByGame = getQualifiedLegsByGame(config.parlayAnchorMinOdds, 'anchor');
   const fullAnchor = buildLegSet(anchorByGame);
 
+  const slateResult = buildFullSlateLotteryLegs();
   const slateLegs = capLegs(
-    buildFullSlateLotteryLegs(),
+    slateResult.legs,
     config.parlayLotteryMaxLegs > 0 ? config.parlayLotteryMaxLegs : Number.MAX_SAFE_INTEGER
   );
   const anchorSlateLegs = capLegs(
@@ -360,30 +485,40 @@ export function buildParlaysFromDb(options = {}) {
 
   const pool = [];
   const seen = new Set();
+  const slateMeta = {
+    slateGames: slateResult.games.length,
+    gamesCovered: slateLegs.length,
+    missingGames: slateResult.missing,
+  };
 
-  // 1. 當日全場大串（主推，六合彩 $1）
+  // 1. 當日全場大串（主推，涵蓋全部有數據場次）
   if (slateLegs.length >= 2) {
-    const fillCount = slateLegs.filter((l) => l.isLotteryFill || l.tier === 'fill').length;
+    const fillCount = slateLegs.filter((l) => l.isLotteryFill || l.tier === 'fill' || l.slateSource === 'market_fill').length;
     addParlay(pool, seen, slateLegs, {
       category: 'lottery_full_slate',
-      label: `${slateLegs.length}串1 · 當日全場彩券`,
+      label: `${slateLegs.length}串1 · 當日全場（${slateLegs.length}/${slateResult.games.length}場）`,
       isLottery: true,
       fillLegCount: fillCount,
+      slateMeta,
     });
   }
 
-  // 2. 純錨腿全場（更穩版本）
+  // 2. 純錨腿全場（穩健版，場次較少屬正常）
   if (anchorSlateLegs.length >= 2 && parlayKey(anchorSlateLegs) !== parlayKey(slateLegs)) {
     addParlay(pool, seen, anchorSlateLegs, {
       category: 'anchor_full_slate',
-      label: `${anchorSlateLegs.length}串1 · 錨腿全場`,
+      label: `${anchorSlateLegs.length}串1 · 錨腿精選（${anchorSlateLegs.length}場）`,
       isLottery: true,
+      slateMeta: { ...slateMeta, gamesCovered: anchorSlateLegs.length },
     });
   }
 
-  // 3. 精選短串（3～8 腿，按勝率取前 N）
-  const byProb = [...slateLegs].sort((a, b) => b.modelProb - a.modelProb);
-  for (const n of [3, 4, 5, 6, 7, 8]) {
+  // 3. 精選短串：僅高勝率主推腿
+  const byProb = [...slateLegs]
+    .filter((l) => l.modelProb >= (config.parlaySlateSpreadPlus15MinProb ?? 0.58) || !isSpreadPlus15Pick(l.pick))
+    .sort((a, b) => b.modelProb - a.modelProb);
+  const shortMax = Math.min(8, Math.max(3, slateLegs.length - 1));
+  for (let n = 3; n <= shortMax; n++) {
     if (byProb.length >= n && n <= maxLegs) {
       addParlay(pool, seen, byProb.slice(0, n), {
         category: 'anchor_short',

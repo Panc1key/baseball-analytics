@@ -3,9 +3,12 @@
     <div v-if="meta" class="parlay-meta">
       <span>策略：{{ meta.strategy }}</span>
       <span>每注 ${{ meta.baseStake ?? 1 }}</span>
-      <span>每腿賠率 ≥ {{ meta.minLegOdds ?? 1.4 }}</span>
-      <span>最多 {{ meta.maxLegs ?? 12 }} 腿</span>
-      <span v-if="meta.minLegEv != null">每腿 EV ≥ {{ (meta.minLegEv * 100).toFixed(0) }}%</span>
+      <span v-if="meta.fullSlateLegs">全場大串 <strong>{{ meta.fullSlateLegs }}</strong> 腿</span>
+      <span v-if="meta.slateGames">待賽 {{ meta.slateGames }} 場</span>
+      <span v-if="meta.mlbExpectedGames && meta.mlbExpectedGames > meta.slateGames" class="warn">
+        MLB 今日尚有 {{ meta.mlbExpectedGames - meta.slateGames }} 場待開盤，請同步數據
+      </span>
+      <span>每腿賠率 {{ meta.minLegOdds ?? 1.4 }}～{{ meta.maxLegOdds ?? 3 }}</span>
       <span v-if="parlays.length">共 {{ parlays.length }} 組</span>
     </div>
 
@@ -186,11 +189,21 @@ const groupedParlays = computed(() => {
 
 watch(
   () => props.parlays,
-  () => {
+  (list) => {
+    if (!list?.length) return;
+    const full = list.find((p) => p.category === 'lottery_full_slate');
+    if (full) {
+      const n = getLegCount(full);
+      if (n && (!legFilter.value || !availableLegCounts.value.includes(parseInt(legFilter.value, 10)))) {
+        legFilter.value = String(n);
+      }
+      return;
+    }
     if (legFilter.value && !availableLegCounts.value.includes(parseInt(legFilter.value, 10))) {
       legFilter.value = '';
     }
-  }
+  },
+  { immediate: true }
 );
 
 function buildSummary(legs) {
@@ -228,6 +241,7 @@ function formatMoney(n) {
   border-radius: 6px;
   border: 1px solid #faecd8;
 }
+.parlay-meta .warn { color: #e6a23c; font-weight: 500; }
 .filter-bar {
   display: flex;
   flex-wrap: wrap;
