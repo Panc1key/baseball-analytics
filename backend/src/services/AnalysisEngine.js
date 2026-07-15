@@ -1,5 +1,5 @@
 import db from '../db/database.js';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { fetchAllLeagueOdds, fetchAllLeagueScores, fetchMlbPlayerProps } from './OddsApiClient.js';
 import {
   getMlbStandings,
@@ -8,7 +8,7 @@ import {
   getProbablePitchers,
   getPitcherSeasonStats,
 } from './MlbStatsService.js';
-import { analyzeMatchup, updateTeamStatsFromScores } from './TeamAnalyzer.js';
+import { analyzeMatchup, updateTeamStatsFromScores, syncNpbStandingsFromYahoo } from './TeamAnalyzer.js';
 import { pickGameRecommendations } from './RecommendationRules.js';
 import { buildParlaysFromDb, LEAGUE_MARKETS_INFO, getSlateCoverage } from './ParlayBuilder.js';
 import { extractPlayerProps } from './PlayerPropAnalyzer.js';
@@ -42,6 +42,7 @@ export function isRefreshInProgress() {
 }
 
 function upsertGame(game, league, rawProps = null) {
+  const bookmakersJson = JSON.stringify(game.bookmakers);
   db.prepare(`
     INSERT INTO games (id, league, commence_time, home_team, away_team, raw_odds, raw_props, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -55,9 +56,14 @@ function upsertGame(game, league, rawProps = null) {
     game.commence_time,
     game.home_team,
     game.away_team,
-    JSON.stringify(game.bookmakers),
+    bookmakersJson,
     rawProps ? JSON.stringify(rawProps) : null
   );
+  db.prepare(`
+    INSERT OR IGNORE INTO odds_snapshots
+      (game_id, league, captured_at, bookmakers_json, source)
+    VALUES (?, ?, datetime('now'), ?, 'odds_api')
+  `).run(game.id, league, bookmakersJson);
 }
 
 function saveGameProps(gameId, bookmakers) {
@@ -99,7 +105,98 @@ function startAnalysisRun(phase = 'prematch') {
     INSERT INTO analysis_runs (id, model_version, phase, started_at)
     VALUES (?, ?, ?, datetime('now'))
   `).run(id, config.modelVersion, phase);
+  const safeConfig = Object.fromEntries(
+    Object.entries(config)
+      .filter(([key, value]) => key !== 'oddsApiKey' && ['string', 'number', 'boolean'].includes(typeof value))
+      .sort(([a], [b]) => a.localeCompare(b))
+  );
+  const weightsJson = JSON.stringify(safeConfig);
+  const configHash = createHash('sha256').update(weightsJson).digest('hex');
+  db.prepare(`
+    INSERT INTO model_run_configs
+      (analysis_run_id, model_version, config_hash, weights_json)
+    VALUES (?, ?, ?, ?)
+  `).run(id, config.modelVersion, configHash, weightsJson);
   return id;
+}
+
+function saveFeatureSnapshot(analysisRunId, game, analysis) {
+  const features = {
+    homeTeam: game.home_team,
+    awayTeam: game.away_team,
+    commenceTime: game.commence_time,
+    homeMlb: analysis.homeMlb,
+    awayMlb: analysis.awayMlb,
+    homePitcherStats: analysis.homePitcherStats,
+    awayPitcherStats: analysis.awayPitcherStats,
+    homeInjurySummary: analysis.homeInjurySummary,
+    awayInjurySummary: analysis.awayInjurySummary,
+    h2hComponents: analysis.h2hComponents,
+    totalsProjection: analysis.totalsProjection,
+    scoringHomeRuns: analysis.scoringHomeRuns,
+    scoringAwayRuns: analysis.scoringAwayRuns,
+    dataQuality: analysis.dataQuality,
+    hasTeamStrength: analysis.hasTeamStrength,
+  };
+  return db.prepare(`
+    INSERT INTO feature_snapshots
+      (analysis_run_id, game_id, league, features_json)
+    VALUES (?, ?, ?, ?)
+  `).run(analysisRunId, game.id, game.league, JSON.stringify(features)).lastInsertRowid;
+}
+
+function saveAnalysisDecisions(
+  analysisRunId,
+  featureSnapshotId,
+  game,
+  candidates,
+  selected
+) {
+  const selectedKeys = new Set(
+    (selected || []).map((pick) =>
+      [pick.market, pick.pick, pick.line ?? ''].join('|')
+    )
+  );
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO analysis_decisions
+      (analysis_run_id, feature_snapshot_id, game_id, league, market, pick, line,
+       odds_decimal, raw_model_prob, market_prob, model_prob, implied_prob, ev,
+       edge_prob, data_quality, actionable_score, eligible, selected, bet_strategy,
+       reject_reason, model_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const tx = db.transaction(() => {
+    for (const candidate of candidates || []) {
+      const key = [candidate.market, candidate.pick, candidate.line ?? ''].join('|');
+      const selectedPick = (selected || []).find(
+        (pick) => [pick.market, pick.pick, pick.line ?? ''].join('|') === key
+      );
+      insert.run(
+        analysisRunId,
+        featureSnapshotId,
+        game.id,
+        game.league,
+        candidate.market,
+        candidate.pick,
+        candidate.line ?? null,
+        candidate.oddsDecimal,
+        candidate.rawModelProb ?? candidate.modelProb,
+        candidate.marketProb ?? null,
+        candidate.modelProb,
+        candidate.impliedProb,
+        candidate.ev,
+        candidate.edgeProb ?? null,
+        candidate.dataQuality ?? null,
+        candidate.actionableScore ?? null,
+        candidate.eligible === false ? 0 : 1,
+        selectedKeys.has(key) ? 1 : 0,
+        selectedPick?.bet_strategy ?? null,
+        candidate.rejectReason ?? null,
+        config.modelVersion
+      );
+    }
+  });
+  tx();
 }
 
 function finishAnalysisRun(id, recommendationCount, metadata = {}) {
@@ -241,20 +338,28 @@ export async function syncAllData() {
       const asRaw = game.scores?.find((s) => s.name === game.away_team)?.score;
       const hs = hsRaw != null && hsRaw !== '' ? parseInt(hsRaw, 10) : null;
       const as = asRaw != null && asRaw !== '' ? parseInt(asRaw, 10) : null;
-      const gameStatus =
-        game.status || (game.completed ? 'completed' : 'in_progress');
+      const isDone =
+        Boolean(game.completed) ||
+        game.status === 'completed' ||
+        /終了|final/i.test(String(game.status || ''));
+      const gameStatus = isDone
+        ? 'completed'
+        : game.status || 'in_progress';
 
-      if (!game.completed) {
-        // 進行中場次也寫入當前比分，供滾球模型使用
+      if (!isDone) {
+        // 進行中場次也寫入當前比分，供滾球模型使用；勿把已完賽改回 completed=0
         db.prepare(`
           INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, datetime('now'))
           ON CONFLICT(id) DO UPDATE SET
-            completed = 0,
+            completed = CASE WHEN games.completed = 1 OR games.status = 'completed' THEN 1 ELSE 0 END,
             commence_time = excluded.commence_time,
             home_score = COALESCE(excluded.home_score, games.home_score),
             away_score = COALESCE(excluded.away_score, games.away_score),
-            status = excluded.status,
+            status = CASE
+              WHEN games.completed = 1 OR games.status = 'completed' THEN 'completed'
+              ELSE excluded.status
+            END,
             updated_at = datetime('now')
         `).run(game.id, code, game.commence_time, game.home_team, game.away_team, hs, as, gameStatus);
         continue;
@@ -279,6 +384,14 @@ export async function syncAllData() {
     for (const game of games) {
       upsertGame(game, code);
     }
+  }
+
+  // NPB：Odds API scores 常為 null → Yahoo 順位表補隊力（免費、不耗 Odds 額度）
+  try {
+    const npbSync = await syncNpbStandingsFromYahoo();
+    console.log(`[sync] Yahoo NPB 順位 ${npbSync.count} 隊`);
+  } catch (err) {
+    console.warn('[sync] Yahoo NPB 順位失敗:', err.message);
   }
 
   // 記錄 MLB 當日預期場次（用於串關覆蓋率顯示）
@@ -372,11 +485,18 @@ export async function runAnalysis() {
       bookmakers,
       { mlbStandings, mlbScheduleGame }
     );
+    const featureSnapshotId = saveFeatureSnapshot(analysisRunId, game, analysis);
 
     const markets = extractMarkets(bookmakers);
     const reasoning = analysis.factors.join(' | ');
 
-    let propsContext = { bookmakers };
+    let decisionCapture = null;
+    let propsContext = {
+      bookmakers,
+      onDecisionCandidates: (payload) => {
+        decisionCapture = payload;
+      },
+    };
 
     if (game.league === 'MLB' && config.enablePlayerProps) {
       const rawProps = JSON.parse(game.raw_props || '[]');
@@ -414,6 +534,15 @@ export async function runAnalysis() {
     }
 
     const picks = pickGameRecommendations(game, markets, analysis, reasoning, propsContext);
+    if (decisionCapture) {
+      saveAnalysisDecisions(
+        analysisRunId,
+        featureSnapshotId,
+        game,
+        decisionCapture.candidates,
+        decisionCapture.selected
+      );
+    }
 
     for (const pick of picks) {
       const id = saveRecommendation({
@@ -674,10 +803,23 @@ export function getBetStats() {
 /** 樣本外模型表現；只計不可變快照中已結算的 win/loss。 */
 export function getModelPerformance(filters = {}) {
   let sql = `
+    WITH canonical AS (
+      SELECT s.model_version, s.league, s.market, s.calibrated_prob, s.result,
+             s.profit_units, s.odds_decimal, s.clv_prob, s.created_at,
+             ROW_NUMBER() OVER (
+               PARTITION BY s.model_version, s.game_id, s.market, s.pick, COALESCE(s.line, -999)
+               ORDER BY datetime(s.created_at) ASC
+             ) AS rn
+      FROM recommendation_snapshots s
+      JOIN games g ON g.id = s.game_id
+      WHERE s.phase = 'prematch'
+        AND s.result IN ('win', 'loss')
+        AND datetime(s.created_at) < datetime(g.commence_time)
+    )
     SELECT model_version, league, market, calibrated_prob, result,
            profit_units, odds_decimal, clv_prob, created_at
-    FROM recommendation_snapshots
-    WHERE result IN ('win', 'loss')
+    FROM canonical
+    WHERE rn = 1
   `;
   const params = [];
   if (filters.modelVersion) {
@@ -875,10 +1017,19 @@ export function evaluateBaseballMarketResult(entry, game) {
 }
 
 function findClosingMarket(entry, game) {
-  if (!game.raw_odds) return null;
+  const closingSnapshot = db.prepare(`
+    SELECT bookmakers_json
+    FROM odds_snapshots
+    WHERE game_id = ?
+      AND datetime(captured_at) <= datetime(?)
+    ORDER BY datetime(captured_at) DESC
+    LIMIT 1
+  `).get(entry.game_id, game.commence_time);
+  const oddsJson = closingSnapshot?.bookmakers_json ?? game.raw_odds;
+  if (!oddsJson) return null;
   let bookmakers;
   try {
-    bookmakers = JSON.parse(game.raw_odds);
+    bookmakers = JSON.parse(oddsJson);
   } catch {
     return null;
   }
@@ -1016,7 +1167,9 @@ export function autoSettleRecommendationSnapshots() {
       const closingOdds = closing?.odds ?? null;
       const closingImplied = closing?.fairProb ?? null;
       const clv =
-        closingImplied != null ? closingImplied - rec.implied_prob : null;
+        closingImplied != null
+          ? closingImplied - (rec.market_prob ?? rec.implied_prob)
+          : null;
       update.run(
         result,
         profitUnits,

@@ -61,6 +61,17 @@ export function remainingLambdas(
   inningsRemaining,
   { homeScore = 0, awayScore = 0, inningsPlayed = 0 } = {}
 ) {
+  if (!(Number(inningsRemaining) > 0)) {
+    const absMargin0 = Math.abs((Number(homeScore) || 0) - (Number(awayScore) || 0));
+    return {
+      homeLambdaRem: 0,
+      awayLambdaRem: 0,
+      remainingFrac: 0,
+      slowdownFactor: 1,
+      absMargin: absMargin0,
+    };
+  }
+
   const frac = clamp(inningsRemaining / REGULATION_INNINGS, 0.05, 1);
   const absMargin = Math.abs((Number(homeScore) || 0) - (Number(awayScore) || 0));
   const slow = blowoutSlowdownFactor(absMargin, inningsPlayed);
@@ -184,13 +195,20 @@ export function projectLiveState({
 }) {
   const hasLinescore =
     linescore?.inningsPlayed != null && linescore?.inningsRemaining != null;
+  const gameCompleted =
+    Boolean(linescore?.completed) ||
+    /終了|中止|キャンセル|延期/.test(String(linescore?.label || ''));
 
-  const inningsPlayed = hasLinescore
-    ? clamp(Number(linescore.inningsPlayed), 0.2, 12)
-    : estimateInningsPlayed(commenceTime, now);
-  const inningsRemaining = hasLinescore
-    ? clamp(Number(linescore.inningsRemaining), 0.25, 8.8)
-    : estimateInningsRemaining(commenceTime, now);
+  const inningsPlayed = gameCompleted
+    ? Math.max(9, Number(linescore?.inningsPlayed) || 9)
+    : hasLinescore
+      ? clamp(Number(linescore.inningsPlayed), 0.2, 12)
+      : estimateInningsPlayed(commenceTime, now);
+  const inningsRemaining = gameCompleted
+    ? 0
+    : hasLinescore
+      ? clamp(Number(linescore.inningsRemaining), 0.05, 8.8)
+      : estimateInningsRemaining(commenceTime, now);
 
   // linescore 比分優先（與 odds 比分不一致時以官方局況為準）
   const hs =
@@ -220,6 +238,7 @@ export function projectLiveState({
   return {
     homeScore: hs,
     awayScore: as,
+    completed: gameCompleted,
     inningsPlayed: Math.round(inningsPlayed * 10) / 10,
     inningsRemaining: Math.round(inningsRemaining * 10) / 10,
     remainingFrac: Math.round(remainingFrac * 100) / 100,

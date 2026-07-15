@@ -71,26 +71,33 @@ export function probGoalsOver(projectedGoals, line) {
 }
 
 export function extractSoccerMarkets(bookmakers) {
-  const result = { h2h: {}, spreads: {}, totals: {} };
+  const result = { h2h: {}, spreads: {}, totals: {}, corners_totals: {}, team_totals: {} };
 
   for (const book of bookmakers || []) {
     for (const market of book.markets || []) {
       const key = market.key;
-      if (!['h2h', 'spreads', 'totals'].includes(key)) continue;
+      let bucket = null;
+      if (key === 'h2h') bucket = 'h2h';
+      else if (key === 'spreads') bucket = 'spreads';
+      else if (key === 'totals') bucket = 'totals';
+      else if (key === 'alternate_totals_corners' || key === 'totals_corners') bucket = 'corners_totals';
+      else if (key === 'team_totals') bucket = 'team_totals';
+      else continue;
 
       for (const outcome of market.outcomes || []) {
         const id =
-          key === 'totals'
-            ? `${outcome.name}_${outcome.point}`
-            : key === 'spreads'
+          bucket === 'totals' || bucket === 'corners_totals' || bucket === 'team_totals'
+            ? `${outcome.name}_${outcome.point}${outcome.description ? `_${outcome.description}` : ''}`
+            : bucket === 'spreads'
               ? `${outcome.name}_${outcome.point}`
               : outcome.name;
 
-        const existing = result[key][id];
+        const existing = result[bucket][id];
         if (!existing || outcome.price > existing.price) {
-          result[key][id] = {
+          result[bucket][id] = {
             name: outcome.name,
             point: outcome.point ?? null,
+            description: outcome.description ?? null,
             price: outcome.price,
             bookmaker: book.title,
           };

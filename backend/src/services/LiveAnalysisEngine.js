@@ -41,6 +41,9 @@ import {
   matchYahooScoreToGame,
 } from './NpbYahooScores.js';
 import {
+  assessMarketPreference,
+} from './MarketPreference.js';
+import {
   fetchAllLeagueOdds,
   fetchAllLeagueScores,
 } from './OddsApiClient.js';
@@ -214,7 +217,7 @@ function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
       ? removeVig(implied, decimalToImpliedProb(oppositeOdds)).fairA
       : implied;
     const calibrated = calibrateModelProb(rawProb, marketProb, maxEdge);
-    if ((calibrated - implied) * 100 < minEdge) continue;
+    if ((calibrated - marketProb) * 100 < minEdge) continue;
 
     const enriched = enrichCandidate(
       {
@@ -249,7 +252,10 @@ function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
       ...enriched,
       modelProb,
       ev: calcEV(modelProb, decimalToNetOdds(enriched.oddsDecimal)),
-      edgeProb: Math.round((modelProb - enriched.impliedProb) * 1000) / 10,
+      edgeProb:
+        Math.round((modelProb - (enriched.marketProb ?? enriched.impliedProb)) * 1000) / 10,
+      offeredEdgeProb:
+        Math.round((modelProb - enriched.impliedProb) * 1000) / 10,
       reasoning: buildLiveReasoning(game, live, hasScore, 'h2h', enriched),
     };
 
@@ -297,7 +303,7 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
       ? removeVig(implied, decimalToImpliedProb(opposite.price)).fairA
       : implied;
     const calibrated = calibrateModelProb(rawProb, marketProb, maxEdge);
-    if ((calibrated - implied) * 100 < minEdge) continue;
+    if ((calibrated - marketProb) * 100 < minEdge) continue;
 
     const pickLabel = isOver ? `大 ${tot.point}` : `小 ${tot.point}`;
     const enriched = enrichCandidate(
@@ -344,7 +350,10 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
         pushProb,
         decimalToNetOdds(enriched.oddsDecimal)
       ),
-      edgeProb: Math.round((modelProb - enriched.impliedProb) * 1000) / 10,
+      edgeProb:
+        Math.round((modelProb - (enriched.marketProb ?? enriched.impliedProb)) * 1000) / 10,
+      offeredEdgeProb:
+        Math.round((modelProb - enriched.impliedProb) * 1000) / 10,
       reasoning: buildLiveReasoning(game, live, hasScore, 'totals', enriched),
     };
 
@@ -389,12 +398,41 @@ export function getLiveGames() {
     SELECT * FROM games
     WHERE league IN (${BASEBALL_LEAGUE_SQL})
       AND completed = 0
+      AND IFNULL(status, '') NOT IN ('completed', 'cancelled', 'postponed')
       AND datetime(commence_time) <= datetime('now')
       AND datetime(commence_time) > datetime('now', '-${grace} hours')
       AND raw_odds IS NOT NULL
     ORDER BY commence_time ASC
   `)
     .all();
+}
+
+/** 將 Yahoo 比分寫入 DB；完賽則標 completed=1 */
+function persistYahooNpbScore(gameId, yahooHit) {
+  if (!yahooHit || yahooHit.homeScore == null || yahooHit.awayScore == null) return false;
+  const done =
+    yahooHit.status === 'completed' ||
+    yahooHit.linescore?.completed === true ||
+    /終了/.test(yahooHit.inningLabel || '');
+  if (done) {
+    db.prepare(`
+      UPDATE games
+      SET home_score = ?, away_score = ?, status = 'completed', completed = 1, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(yahooHit.homeScore, yahooHit.awayScore, gameId);
+  } else {
+    db.prepare(`
+      UPDATE games
+      SET home_score = ?, away_score = ?, status = ?, completed = 0, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      yahooHit.homeScore,
+      yahooHit.awayScore,
+      yahooHit.status || 'in_progress',
+      gameId
+    );
+  }
+  return done;
 }
 
 export async function runLiveAnalysis() {
@@ -470,17 +508,28 @@ export async function runLiveAnalysis() {
       }
       if (yahooHit?.homeScore != null && yahooHit?.awayScore != null) {
         yahooScoreHits += 1;
-        // 寫回 DB 供前端顯示
-        db.prepare(`
-          UPDATE games SET home_score = ?, away_score = ?, status = ?, updated_at = datetime('now')
-          WHERE id = ?
-        `).run(
-          yahooHit.homeScore,
-          yahooHit.awayScore,
-          yahooHit.status || 'in_progress',
-          game.id
-        );
+        const finished = persistYahooNpbScore(game.id, yahooHit);
+        if (finished) {
+          analyzed += 1;
+          continue;
+        }
       }
+    }
+
+    // 已完賽（DB 狀態）不推滾球
+    if (
+      game.completed ||
+      game.status === 'completed' ||
+      linescore?.completed ||
+      /終了/.test(linescore?.label || '')
+    ) {
+      if (!game.completed && (linescore?.completed || /終了/.test(linescore?.label || ''))) {
+        db.prepare(`
+          UPDATE games SET completed = 1, status = 'completed', updated_at = datetime('now') WHERE id = ?
+        `).run(game.id);
+      }
+      analyzed += 1;
+      continue;
     }
 
     const analysis = await analyzeMatchup(
@@ -508,17 +557,18 @@ export async function runLiveAnalysis() {
       (homeScore != null && awayScore != null && !Number.isNaN(Number(homeScore))) ||
       parsed.hasScore;
 
+    const leagueAvgRuns = game.league === 'NPB' || game.league === 'KBO' ? 4.0 : 4.5;
     const priorHome =
-      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.homeRuns : 4.5;
+      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.homeRuns : leagueAvgRuns;
     const priorAway =
-      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.awayRuns : 4.5;
+      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.awayRuns : leagueAvgRuns;
 
     const live = projectLiveState({
       commenceTime: game.commence_time,
       homeScore: Number(homeScore) || 0,
       awayScore: Number(awayScore) || 0,
-      homeRunsPrior: priorHome,
-      awayRunsPrior: priorAway,
+      homeRunsPrior: analysis.scoringHomeRuns ?? priorHome,
+      awayRunsPrior: analysis.scoringAwayRuns ?? priorAway,
       priorHomeWin: analysis.homeWinProb ?? 0.5,
       linescore,
     });
@@ -530,9 +580,16 @@ export async function runLiveAnalysis() {
       continue;
     }
 
+    const preference = assessMarketPreference(analysis, game, live);
     const h2h = buildH2hLiveCandidates(game, markets, analysis, live, hasScore);
     const totals = buildTotalsLiveCandidates(game, markets, analysis, live, hasScore);
-    const picks = [...h2h, ...totals];
+    // 滾球不再因「膠著」硬刪獨贏；候選按風險調整後 EV 排序。
+    const picks = [...h2h, ...totals].sort(
+      (a, b) =>
+        (b.ev ?? 0) * (b.dataQuality ?? 0.5) -
+          (a.ev ?? 0) * (a.dataQuality ?? 0.5) ||
+        (b.modelProb ?? 0) - (a.modelProb ?? 0)
+    );
     analyzed += 1;
 
     let rank = 0;
@@ -548,7 +605,14 @@ export async function runLiveAnalysis() {
       withStake = applyLiveStakeCap({
         ...withStake,
         tier: pick.tier,
-        reasoning: pick.reasoning,
+        reasoning: [
+          pick.reasoning,
+          preference.preferTotals && preference.reason
+            ? `選盤: ${preference.reason}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' | '),
         confidenceLabel: pick.confidenceLabel,
         worstCaseLoseProb: pick.worstCaseLoseProb,
       });
@@ -637,6 +701,8 @@ export function getLiveRecommendations(filters = {}) {
     JOIN games g ON g.id = r.game_id
     WHERE r.phase = 'live'
       AND r.league IN (${BASEBALL_LEAGUE_SQL})
+      AND g.completed = 0
+      AND IFNULL(g.status, '') NOT IN ('completed', 'cancelled', 'postponed')
       AND r.ev >= ?
   `;
   const params = [minEv];
@@ -674,7 +740,13 @@ export function getLiveStatus() {
   const games = getLiveGames();
   const recCount = db
     .prepare(
-      `SELECT COUNT(*) AS c FROM recommendations WHERE phase = 'live' AND league IN (${BASEBALL_LEAGUE_SQL})`
+      `SELECT COUNT(*) AS c
+       FROM recommendations r
+       JOIN games g ON g.id = r.game_id
+       WHERE r.phase = 'live'
+         AND r.league IN (${BASEBALL_LEAGUE_SQL})
+         AND g.completed = 0
+         AND IFNULL(g.status, '') NOT IN ('completed', 'cancelled', 'postponed')`
     )
     .get()?.c;
   return {
@@ -732,10 +804,16 @@ export async function syncLiveDataLite() {
       const asRaw = game.scores?.find((s) => s.name === game.away_team)?.score;
       const hs = hsRaw != null && hsRaw !== '' ? parseInt(hsRaw, 10) : null;
       const as = asRaw != null && asRaw !== '' ? parseInt(asRaw, 10) : null;
-      const gameStatus =
-        game.status || (game.completed ? 'completed' : 'in_progress');
+      // Odds API 偶發：status=completed 但 completed 旗標為 false；勿覆寫成 completed=0
+      const isDone =
+        Boolean(game.completed) ||
+        game.status === 'completed' ||
+        /終了|final/i.test(String(game.status || ''));
+      const gameStatus = isDone
+        ? 'completed'
+        : game.status || 'in_progress';
 
-      if (game.completed) {
+      if (isDone) {
         db.prepare(`
           INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, datetime('now'))
@@ -750,11 +828,14 @@ export async function syncLiveDataLite() {
           INSERT INTO games (id, league, commence_time, home_team, away_team, completed, home_score, away_score, status, updated_at)
           VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, datetime('now'))
           ON CONFLICT(id) DO UPDATE SET
-            completed = 0,
+            completed = CASE WHEN games.completed = 1 OR games.status = 'completed' THEN 1 ELSE 0 END,
             commence_time = excluded.commence_time,
             home_score = COALESCE(excluded.home_score, games.home_score),
             away_score = COALESCE(excluded.away_score, games.away_score),
-            status = excluded.status,
+            status = CASE
+              WHEN games.completed = 1 OR games.status = 'completed' THEN 'completed'
+              ELSE excluded.status
+            END,
             updated_at = datetime('now')
         `).run(
           game.id, code, game.commence_time, game.home_team, game.away_team,
@@ -802,11 +883,7 @@ export async function syncLiveDataLite() {
     for (const g of npbGames) {
       const hit = matchYahooScoreToGame(g, yahooScores);
       if (!hit || hit.homeScore == null || hit.awayScore == null) continue;
-      db.prepare(`
-        UPDATE games
-        SET home_score = ?, away_score = ?, status = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(hit.homeScore, hit.awayScore, hit.status || 'in_progress', g.id);
+      persistYahooNpbScore(g.id, hit);
       yahooNpbMatched += 1;
       scoreUpdates += 1;
     }

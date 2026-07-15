@@ -29,7 +29,10 @@
       <template #default="{ row }">{{ marketLabel(row.market) }}</template>
     </el-table-column>
     <el-table-column label="推薦" min-width="220" show-overflow-tooltip>
-      <template #default="{ row }">{{ translatePick(row.pick) }}</template>
+      <template #default="{ row }">
+        <div>{{ translatePick(row.pick) }}</div>
+        <div v-if="threeWayHint(row)" class="sub direction-hint">{{ threeWayHint(row) }}</div>
+      </template>
     </el-table-column>
     <el-table-column label="賠率" width="68">
       <template #default="{ row }">{{ row.odds_decimal?.toFixed(2) }}</template>
@@ -93,6 +96,17 @@ function formatTime(iso) {
   return new Date(iso).toLocaleString('zh-TW', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+/** 從分析文案抽出三向/雙選提示，讓使用者不只看到「法國勝」 */
+function threeWayHint(row) {
+  const text = row?.reasoning || '';
+  const dir = text.match(/方向：[^.|]+/);
+  if (dir) return translatePick(dir[0].trim());
+  const m = text.match(/三向[^|]+/);
+  if (m) return m[0].trim();
+  const m2 = text.match(/雙選[^|]+/);
+  return m2 ? m2[0].trim() : '';
+}
+
 function evTag(ev) {
   if (ev >= 0.08) return 'success';
   if (ev >= 0.05) return 'warning';
@@ -103,6 +117,7 @@ function evTag(ev) {
 <style scoped>
 .sort-hint { font-size: 12px; color: #909399; margin: 0 0 8px; }
 .sub { font-size: 12px; color: #909399; }
+.direction-hint { color: #e6a23c; margin-top: 2px; }
 .live-tag { margin-right: 4px; vertical-align: middle; }
 .pos { color: #67c23a; font-weight: 600; }
 .prob-em { color: #67c23a; }

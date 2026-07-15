@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "sync": "node src/jobs/syncData.js",
-    "analyze": "node src/jobs/runAnalysis.js"
+    "analyze": "node src/jobs/runAnalysis.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

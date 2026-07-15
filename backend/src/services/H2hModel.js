@@ -103,12 +103,16 @@ export function extractFairH2hProb(bookmakers, homeTeam, awayTeam) {
 }
 
 /** 依數據完整度決定市場權重（數據越弱，越依賴市場） */
-export function resolveMarketBlend(league, hasMlbCore, hasPitchers, hasMarket) {
+export function resolveMarketBlend(league, hasMlbCore, hasPitchers, hasMarket, hasNpbStrength = false) {
   if (!hasMarket) return 0;
   if (league === 'MLB') {
     if (hasMlbCore && hasPitchers) return config.h2hMarketBlendMlbFull ?? 0.4;
     if (hasMlbCore) return config.h2hMarketBlendMlb ?? 0.45;
     return config.h2hMarketBlendMlbLite ?? 0.5;
+  }
+  // NPB：有隊力時仍偏貼市場（無先發資訊）
+  if (league === 'NPB' && hasNpbStrength) {
+    return config.h2hMarketBlendNpbFull ?? 0.52;
   }
   return config.h2hMarketBlendOther ?? 0.55;
 }
@@ -143,6 +147,7 @@ export function computeH2hProbabilities({
   venueName = null,
   homeRuns = null,
   awayRuns = null,
+  hasNpbStrength = false,
 }) {
   const factors = [];
   let homeStrength = homeFallbackRating;
@@ -189,6 +194,11 @@ export function computeH2hProbabilities({
   } else {
     factors.push(`${homeTeam} 近期實力 ${(homeStrength * 100).toFixed(1)}%`);
     factors.push(`${awayTeam} 近期實力 ${(awayStrength * 100).toFixed(1)}%`);
+    if (league === 'NPB' && hasNpbStrength) {
+      factors.push('NPB 隊力來源：Yahoo 順位表');
+    } else if (league === 'NPB') {
+      factors.push('NPB 隊力不足（無順位樣本）· 高度貼市');
+    }
   }
 
   if (venueName) factors.push(`主場 ${venueName}`);
@@ -207,6 +217,7 @@ export function computeH2hProbabilities({
     awayRuns,
     hasMlbCore,
     hasPitchers,
+    hasNpbStrength,
   });
   if (scoreBlend.scoreBlend > 0) {
     modelHomeProb = scoreBlend.homeWinProb;
@@ -220,7 +231,13 @@ export function computeH2hProbabilities({
 
   const fairMarket = extractFairH2hProb(bookmakers, homeTeam, awayTeam);
   const marketHomeProb = fairMarket?.homeProb ?? null;
-  const marketWeight = resolveMarketBlend(league, hasMlbCore, hasPitchers, marketHomeProb != null);
+  const marketWeight = resolveMarketBlend(
+    league,
+    hasMlbCore,
+    hasPitchers,
+    marketHomeProb != null,
+    hasNpbStrength
+  );
 
   if (marketHomeProb != null) {
     modelHomeProb = blendWithMarket(modelHomeProb, marketHomeProb, marketWeight);

@@ -6,7 +6,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
 export const config = {
-  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.0.0',
+  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.4.0',
+  /** 獨贏膠著：勝率差距低於此視為難分（0.10 = 55/45） */
+  h2hAmbiguousMaxGap: parseFloat(process.env.H2H_AMBIGUOUS_MAX_GAP || '0.10'),
+  /** 獨贏膠著：熱門勝率低於此改走大小優先 */
+  h2hAmbiguousMaxFav: parseFloat(process.env.H2H_AMBIGUOUS_MAX_FAV || '0.58'),
+  /** 膠著時仍允許獨贏的清晰度門檻 */
+  h2hClearFavoriteProb: parseFloat(process.env.H2H_CLEAR_FAV_PROB || '0.62'),
+  h2hClearMinEdgePct: parseFloat(process.env.H2H_CLEAR_MIN_EDGE_PCT || '6'),
+  /** 膠著時大小盤 actionable 加分（對沖 totals 主推罰分） */
+  totalsAmbiguousBoost: parseFloat(process.env.TOTALS_AMBIGUOUS_BOOST || '6'),
   settlementVoidAfterHours: Math.max(
     48,
     parseInt(process.env.SETTLEMENT_VOID_AFTER_HOURS || '72', 10)
@@ -48,7 +57,7 @@ export const config = {
   recommendWatchScore: parseFloat(process.env.RECOMMEND_WATCH_SCORE || '50'),
   maxPicksPerGame: parseInt(process.env.MAX_PICKS_PER_GAME || '3', 10),
   /** 同一場次最多均注腿數（不同盤口各一） */
-  maxFlatBetsPerGame: parseInt(process.env.MAX_FLAT_BETS_PER_GAME || '2', 10),
+  maxFlatBetsPerGame: parseInt(process.env.MAX_FLAT_BETS_PER_GAME || '1', 10),
   enablePlayerProps: process.env.ENABLE_PLAYER_PROPS === 'true',
   maxPropGames: parseInt(process.env.MAX_PROP_GAMES || '6', 10),
   minParlayLegOdds: parseFloat(process.env.MIN_PARLAY_LEG_ODDS || '1.4'),
@@ -64,6 +73,28 @@ export const config = {
   h2hMarketBlendMlb: parseFloat(process.env.H2H_MARKET_BLEND_MLB || '0.45'),
   h2hMarketBlendMlbLite: parseFloat(process.env.H2H_MARKET_BLEND_MLB_LITE || '0.5'),
   h2hMarketBlendOther: parseFloat(process.env.H2H_MARKET_BLEND_OTHER || '0.55'),
+  /** NPB 有 Yahoo 順位時仍須偏貼市場（無先發，賽季隊力資訊量遠低於盤口） */
+  h2hMarketBlendNpbFull: parseFloat(process.env.H2H_MARKET_BLEND_NPB_FULL || '0.52'),
+  /** 得分模型與 Log5 混合（NPB 無先發，權重低于 MLB） */
+  scoreModelBlendNpb: parseFloat(process.env.SCORE_MODEL_BLEND_NPB || '0.28'),
+  /** NPB/KBO 獨贏：最低領先第二方差距 */
+  h2hMinProbGapNpb: parseFloat(process.env.H2H_MIN_PROB_GAP_NPB || '0.06'),
+  /** NPB/KBO 獨贏：最低熱門勝率 */
+  h2hMinFavoriteProbNpb: parseFloat(process.env.H2H_MIN_FAV_NPB || '0.56'),
+  /** NPB/KBO 獨贏最小優勢%（比 MLB 嚴） */
+  h2hMinEdgePctNpb: parseFloat(process.env.H2H_MIN_EDGE_PCT_NPB || '3.0'),
+  /** NPB 均注最低勝率 / 優勢（勝率優先） */
+  flatBetMinProbNpb: parseFloat(process.env.FLAT_BET_MIN_PROB_NPB || '0.60'),
+  flatBetMinEdgePctNpb: parseFloat(process.env.FLAT_BET_MIN_EDGE_PCT_NPB || '3.5'),
+  flatBetMinDataQualityNpb: parseFloat(process.env.FLAT_BET_MIN_DQ_NPB || '0.70'),
+  /** +1.5 進均注的最低蓋盤率 */
+  flatBetPlus15MinCover: parseFloat(process.env.FLAT_BET_PLUS15_MIN_COVER || '0.62'),
+  /** 初盤推薦最低賠率（避免 1.51 短水受讓當「有用推薦」） */
+  prematchMinOdds: parseFloat(process.env.PREMATCH_MIN_ODDS || '1.70'),
+  /** 初盤主推最低賠率 */
+  prematchPrimaryMinOdds: parseFloat(process.env.PREMATCH_PRIMARY_MIN_ODDS || '1.75'),
+  /** 無得分模型時禁止用 +1.5（NPB/KBO） */
+  spreadsBlockPlus15WithoutScoreModel: process.env.SPREADS_BLOCK_PLUS15_NO_SCORE !== 'false',
   /** 獨贏推薦：模型與市場最小優勢（%） */
   h2hMinEdgePct: parseFloat(process.env.H2H_MIN_EDGE_PCT || '1.5'),
   /** 獨贏：避免 50/50 場次 */
@@ -117,6 +148,7 @@ export const config = {
   totalsMarketBlendMlb: parseFloat(process.env.TOTALS_MARKET_BLEND_MLB || '0.65'),
   totalsMarketBlendMlbLite: parseFloat(process.env.TOTALS_MARKET_BLEND_MLB_LITE || '0.7'),
   totalsMarketBlendOther: parseFloat(process.env.TOTALS_MARKET_BLEND_OTHER || '0.75'),
+  totalsMarketBlendNpbFull: parseFloat(process.env.TOTALS_MARKET_BLEND_NPB_FULL || '0.5'),
   /** 大小盤推薦門檻 */
   totalsMinEdgePct: parseFloat(process.env.TOTALS_MIN_EDGE_PCT || '2'),
   totalsMinContrarianEdgePct: parseFloat(process.env.TOTALS_MIN_CONTRARIAN_EDGE_PCT || '5'),

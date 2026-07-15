@@ -5,6 +5,7 @@
  */
 
 import { config } from '../config.js';
+import { resolveNpbTeamStrength } from './NpbStrength.js';
 import {
   decimalToImpliedProb,
   decimalToNetOdds,
@@ -221,12 +222,15 @@ export function probOverAtLine(projectedTotal, line, steepness = 2.0) {
   return 1 / (1 + Math.exp(-diff / steepness));
 }
 
-export function resolveTotalsMarketBlend(league, hasMlbCore, hasPitchers, hasMarket) {
+export function resolveTotalsMarketBlend(league, hasMlbCore, hasPitchers, hasMarket, hasNpbStrength = false) {
   if (!hasMarket) return 0;
   if (league === 'MLB') {
     if (hasMlbCore && hasPitchers) return config.totalsMarketBlendMlbFull ?? 0.6;
     if (hasMlbCore) return config.totalsMarketBlendMlb ?? 0.65;
     return config.totalsMarketBlendMlbLite ?? 0.7;
+  }
+  if ((league === 'NPB' || league === 'KBO') && hasNpbStrength) {
+    return config.totalsMarketBlendNpbFull ?? 0.5;
   }
   return config.totalsMarketBlendOther ?? 0.75;
 }
@@ -242,6 +246,8 @@ export function computeTotalsProjection({
   awayPitcherStats = null,
   venueName = null,
   bookmakers = [],
+  homeTeamStats = null,
+  awayTeamStats = null,
 }) {
   const parkFactor = league === 'MLB' ? getParkFactor(venueName) : 1.0;
   const market = extractMarketTotals(bookmakers);
@@ -254,6 +260,13 @@ export function computeTotalsProjection({
   const factors = [];
   const hasMlbCore = Boolean(homeMlb && awayMlb);
   const hasPitchers = Boolean(homePitcherStats && awayPitcherStats);
+  const homeGames = (homeTeamStats?.wins || 0) + (homeTeamStats?.losses || 0);
+  const awayGames = (awayTeamStats?.wins || 0) + (awayTeamStats?.losses || 0);
+  const { hasStrength: hasNpbStrength } = resolveNpbTeamStrength(
+    homeTeamStats,
+    awayTeamStats,
+    league
+  );
 
   if (league === 'MLB' && hasMlbCore) {
     const homeOff = runsPerGame(homeMlb);
@@ -287,12 +300,30 @@ export function computeTotalsProjection({
     const awayEra = awayPitcherStats?.era ?? 4.5;
     modelTotal = MLB_LEAGUE_RUNS_PER_GAME + (4.5 - (homeEra + awayEra) / 2) * 0.35;
     factors.push(`僅先發 ERA 估算總分 ${modelTotal.toFixed(1)}`);
+  } else if (hasNpbStrength) {
+    const homeOff = homeTeamStats.runs_scored / homeGames;
+    const awayOff = awayTeamStats.runs_scored / awayGames;
+    const homeDef = (homeTeamStats.runs_allowed || 0) / homeGames;
+    const awayDef = (awayTeamStats.runs_allowed || 0) / awayGames;
+    homeRuns = (homeOff + awayDef) / 2 + 0.12;
+    awayRuns = (awayOff + homeDef) / 2;
+    modelTotal = homeRuns + awayRuns;
+    factors.push(
+      `NPB/KBO 得失分模型 主${homeRuns.toFixed(1)}+客${awayRuns.toFixed(1)}=${modelTotal.toFixed(1)}` +
+        `（主進${homeOff.toFixed(2)} 客進${awayOff.toFixed(2)}）`
+    );
   } else {
     modelTotal = { MLB: 8.8, NPB: 8.0, KBO: 9.0 }[league] ?? 8.5;
     factors.push(`聯盟均值總分 ${modelTotal.toFixed(1)}`);
   }
 
-  const marketWeight = resolveTotalsMarketBlend(league, hasMlbCore, hasPitchers, marketLine != null);
+  const marketWeight = resolveTotalsMarketBlend(
+    league,
+    hasMlbCore,
+    hasPitchers,
+    marketLine != null,
+    hasNpbStrength
+  );
   let finalTotal = modelTotal;
 
   if (marketLine != null) {
@@ -347,13 +378,21 @@ export function computeTotalsProjection({
     factors,
     hasMlbCore,
     hasPitchers,
-    dataQuality: hasMlbCore && hasPitchers ? 0.85 : hasMlbCore ? 0.65 : 0.35,
+    hasNpbStrength,
+    dataQuality: hasMlbCore && hasPitchers ? 0.85 : hasMlbCore ? 0.65 : hasNpbStrength ? 0.7 : 0.35,
   };
 }
 
 /** 是否應跳過該盤口線 */
-export function shouldSkipTotalLine({ projection, line, isOver, modelProb, impliedProb }) {
-  const edgePct = (modelProb - impliedProb) * 100;
+export function shouldSkipTotalLine({
+  projection,
+  line,
+  isOver,
+  modelProb,
+  impliedProb,
+  marketProb = null,
+}) {
+  const edgePct = (modelProb - (marketProb ?? impliedProb)) * 100;
   const minEdge = config.totalsMinEdgePct ?? 2;
   const minContrarian = config.totalsMinContrarianEdgePct ?? 5;
   const minSignal = config.totalsMinModelMarketGap ?? 0.35;
@@ -377,7 +416,8 @@ export function shouldSkipTotalLine({ projection, line, isOver, modelProb, impli
     return { skip: true, reason: '模型未看好大分' };
   }
   if (!isOver) {
-    if (!projection.totalsContext?.underViable) {
+    // MLB：小球需投手穩定條件；NPB/KBO 有得失分模型即可
+    if (!projection.totalsContext?.underViable && !projection.hasNpbStrength) {
       return { skip: true, reason: '小球需雙先發穩定且進攻/球場配合，條件不足' };
     }
     if (projection.totalsContext?.overTrigger) {
@@ -433,7 +473,7 @@ export function buildTotalCandidates(markets, projection, league) {
   const usePoisson =
     projection.probabilityHomeRuns != null &&
     projection.probabilityAwayRuns != null &&
-    league === 'MLB';
+    (league === 'MLB' || projection.hasNpbStrength);
 
   for (const [, total] of Object.entries(markets.totals || {})) {
     const isOver = total.name === 'Over';
@@ -469,7 +509,8 @@ export function buildTotalCandidates(markets, projection, league) {
     const modelProb = calibrateModelProb(rawProb, marketProb, maxEdge);
     const winProb = modelProb * (1 - pushProb);
     const ev = calcEVWithPush(winProb, pushProb, decimalToNetOdds(total.price));
-    const edgePct = (modelProb - impliedProb) * 100;
+    // 模型優勢以去水市場為基準；投注 EV 仍使用實際可下注賠率。
+    const edgePct = (modelProb - marketProb) * 100;
 
     const gate = shouldSkipTotalLine({
       projection,
@@ -477,6 +518,8 @@ export function buildTotalCandidates(markets, projection, league) {
       isOver,
       modelProb,
       impliedProb,
+      marketProb,
+      offeredEdgePct: (modelProb - impliedProb) * 100,
     });
 
     candidates.push({

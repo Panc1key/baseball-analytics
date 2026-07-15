@@ -141,8 +141,16 @@ export function blendScoreWithLog5({
   awayRuns,
   hasMlbCore,
   hasPitchers,
+  hasNpbStrength = false,
 }) {
-  if (!hasMlbCore || homeRuns == null || awayRuns == null) {
+  if (homeRuns == null || awayRuns == null) {
+    return {
+      homeWinProb: log5HomeProb,
+      scoreHomeProb: null,
+      scoreBlend: 0,
+    };
+  }
+  if (!hasMlbCore && !hasNpbStrength) {
     return {
       homeWinProb: log5HomeProb,
       scoreHomeProb: null,
@@ -160,9 +168,15 @@ export function blendScoreWithLog5({
     MAX_RUNS,
     extrasHomeProb
   );
-  const blend = hasPitchers
-    ? (config.scoreModelBlendMlbFull ?? 0.55)
-    : (config.scoreModelBlendMlb ?? 0.45);
+
+  let blend;
+  if (hasMlbCore) {
+    blend = hasPitchers
+      ? (config.scoreModelBlendMlbFull ?? 0.55)
+      : (config.scoreModelBlendMlb ?? 0.45);
+  } else {
+    blend = config.scoreModelBlendNpb ?? 0.28;
+  }
 
   const homeWinProb = clampGameProb(scoreHomeProb * blend + log5HomeProb * (1 - blend));
   return { homeWinProb, scoreHomeProb, scoreBlend: blend };

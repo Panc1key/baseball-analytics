@@ -5,6 +5,7 @@
  */
 
 import { config } from '../config.js';
+import { resolveNpbTeamStrength } from './NpbStrength.js';
 
 const MAIN_MARKETS = new Set(['h2h', 'spreads', 'totals']);
 const PROP_MARKET_PREFIX = /^(batter_|pitcher_)/;
@@ -67,24 +68,42 @@ export function qualifiesFlatBet(rec, options = {}) {
 
   const market = rec.market;
   const tier = rec.tier;
+  const league = rec.league;
   const pickRank = options.pickRank ?? pickNum(rec, 'pick_rank', 'pickRank') ?? 1;
   const odds = pickNum(rec, 'odds_decimal', 'oddsDecimal');
   const modelProb = pickNum(rec, 'model_prob', 'modelProb');
   const edge = pickNum(rec, 'edge_prob', 'edgeProb');
+  const dq = pickNum(rec, 'data_quality', 'dataQuality') ?? 0;
+  const isNpbFamily = league === 'NPB' || league === 'KBO';
+
+  // NPB/KBO 均注：勝率優先硬閘 — 無隊力 / 數據弱就不進「建議投注」
+  if (isNpbFamily) {
+    const hasStrength =
+      rec.hasTeamStrength === true ||
+      options.hasTeamStrength === true ||
+      options.analysis?.hasTeamStrength === true;
+    if (!hasStrength) return false;
+    if (dq < (config.flatBetMinDataQualityNpb ?? 0.7)) return false;
+    if (modelProb < (config.flatBetMinProbNpb ?? 0.6)) return false;
+    if (edge < (config.flatBetMinEdgePctNpb ?? 3.5)) return false;
+    // NPB 大小暫不進均注（無先發總分不穩）
+    if (market === 'totals') return false;
+  }
 
   if (config.flatBetPrimaryOnly) {
     if (pickRank === 1 && tier !== 'primary') return false;
     if (pickRank > 1 && tier === 'watch' && edge < minEdgeForMarket(market)) return false;
   }
   if (odds == null || odds < config.flatBetMinOdds) return false;
-  if (modelProb < config.flatBetMinProb) return false;
-  if (edge < minEdgeForMarket(market)) return false;
+  if (!isNpbFamily && modelProb < config.flatBetMinProb) return false;
+  if (!isNpbFamily && edge < minEdgeForMarket(market)) return false;
 
   if (market === 'totals') return totalsAllowed(rec);
   if (isPropMarket(market)) return config.enablePlayerProps;
 
-  if (isSpreadPlus15Pick(rec) && modelProb < (config.parlaySlateSpreadPlus15MinProb ?? 0.58)) {
-    return false;
+  if (isSpreadPlus15Pick(rec)) {
+    const minCover = config.flatBetPlus15MinCover ?? 0.62;
+    if (modelProb < minCover) return false;
   }
 
   return market === 'h2h' || market === 'spreads';
@@ -116,7 +135,17 @@ export function assignBetStrategies(picks, context = {}) {
   const pool = (picks || []).filter((p) => p.tier);
   return pool.map((p) => ({
     ...p,
-    bet_strategy: classifyBetStrategy(p, context),
+    hasTeamStrength: p.hasTeamStrength ?? context.analysis?.hasTeamStrength,
+    dataQuality: p.dataQuality ?? context.analysis?.dataQuality ?? p.data_quality,
+    bet_strategy: classifyBetStrategy(
+      {
+        ...p,
+        hasTeamStrength: p.hasTeamStrength ?? context.analysis?.hasTeamStrength,
+        dataQuality: p.dataQuality ?? context.analysis?.dataQuality,
+        league: p.league ?? context.analysis?.league,
+      },
+      { ...context, hasTeamStrength: context.analysis?.hasTeamStrength }
+    ),
   }));
 }
 
@@ -124,7 +153,14 @@ export function classifyBetStrategy(rec, context = {}) {
   const pickRank = pickNum(rec, 'pick_rank', 'pickRank') ?? 99;
   const maxFlat = config.maxFlatBetsPerGame ?? 2;
 
-  if (pickRank <= maxFlat && qualifiesFlatBet(rec, { pickRank })) {
+  if (
+    pickRank <= maxFlat &&
+    qualifiesFlatBet(rec, {
+      pickRank,
+      hasTeamStrength: context.hasTeamStrength ?? rec.hasTeamStrength,
+      analysis: context.analysis,
+    })
+  ) {
     return 'flat_bet';
   }
   if (qualifiesParlayAnchor(rec)) return 'parlay_anchor';

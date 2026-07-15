@@ -53,7 +53,7 @@ export function projectExpectedGoals({
   const homeAdv = neutralVenue
     ? footballConfig.homeAdvantageNeutral
     : footballConfig.homeAdvantageNormal;
-  // 主場優勢落在進球期望（約 +0.15~0.25 球量級，由機率門檻換算近似）
+  // 聯賽：主場映到進球加成；世界盃等中立場預設 homeAdv=0（API 的 home 只是隊名順序）
   const homeGoalBoost = homeAdv * 3.2;
   homeLambda += homeGoalBoost;
   homeLambda += tacticalEdge * 1.5;
@@ -76,7 +76,15 @@ export function projectExpectedGoals({
   factors.push(
     `xG 主${homeLambda.toFixed(2)} 客${awayLambda.toFixed(2)}（聯盟均 ${leagueAvg.toFixed(2)}）`
   );
-  if (homeGoalBoost > 0.01) factors.push(`主場進球加成 +${homeGoalBoost.toFixed(2)}`);
+  if (neutralVenue) {
+    factors.push(
+      homeGoalBoost > 0.005
+        ? `中立場仍殘留主場加成 +${homeGoalBoost.toFixed(2)}（建議保持 0）`
+        : '中立場（世界盃等）：無主場優勢'
+    );
+  } else if (homeGoalBoost > 0.01) {
+    factors.push(`主場進球加成 +${homeGoalBoost.toFixed(2)}`);
+  }
 
   return {
     homeLambda,

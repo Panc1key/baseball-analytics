@@ -5,6 +5,7 @@ const MARKET_BANDS = {
   h2h: { min: 1.35, max: 8.0, sweetMin: 1.55, sweetMax: 3.2 },
   spreads: { min: 1.4, max: 2.4, sweetMin: 1.65, sweetMax: 2.2 },
   totals: { min: 1.55, max: 2.35, sweetMin: 1.7, sweetMax: 2.1 },
+  corners_totals: { min: 1.55, max: 2.4, sweetMin: 1.7, sweetMax: 2.15 },
   props: { min: 1.5, max: 12.0, sweetMin: 1.7, sweetMax: 4.5 },
 };
 

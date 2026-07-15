@@ -32,9 +32,15 @@ export function calcDataQuality(analysis, league) {
     if (analysis.factors?.some((f) => f.includes('戰績'))) q += 0.15;
     if (analysis.homeRuns != null && analysis.awayRuns != null) q += 0.1;
     if (analysis.factors?.some((f) => f.includes('主場球場'))) q += 0.05;
+  } else if (league === 'NPB') {
+    if (analysis.hasTeamStrength || analysis.factors?.some((f) => f.includes('Yahoo 順位'))) q += 0.4;
+    else q = Math.min(q, 0.3);
+    if (analysis.marketHomeProb != null) q += 0.15;
+    if (analysis.factors?.some((f) => f.includes('近期實力') && !f.includes('50.0%'))) q += 0.1;
   } else if (analysis.factors?.length >= 2) {
     q += 0.35;
   }
+  if (analysis.dataQuality != null) q = Math.max(q, analysis.dataQuality);
   return Math.min(1, q);
 }
 
@@ -48,12 +54,15 @@ function hitRateBonus(modelProb) {
 export function scorePick({
   modelProb,
   impliedProb,
+  marketProb = null,
   oddsDecimal,
   marketType,
   dataQuality,
   structuralOk = true,
 }) {
-  const edgeProb = (modelProb - impliedProb) * 100;
+  const fairReference = marketProb ?? impliedProb;
+  const edgeProb = (modelProb - fairReference) * 100;
+  const offeredEdgeProb = (modelProb - impliedProb) * 100;
   const edgeScore = Math.min(40, Math.max(0, edgeProb * 3.5));
   const dataScore = (dataQuality ?? 0.5) * 25;
   const band = MARKET_BANDS[marketType] || MARKET_BANDS.props;
@@ -70,6 +79,7 @@ export function scorePick({
     score: Math.round(score * 10) / 10,
     tier,
     edgeProb: Math.round(edgeProb * 10) / 10,
+    offeredEdgeProb: Math.round(offeredEdgeProb * 10) / 10,
     dataQuality: Math.round((dataQuality ?? 0) * 100) / 100,
   };
 }
@@ -101,6 +111,7 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
   const scored = scorePick({
     modelProb,
     impliedProb,
+    marketProb: candidate.marketProb,
     oddsDecimal,
     marketType,
     dataQuality,

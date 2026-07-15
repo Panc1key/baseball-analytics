@@ -36,6 +36,14 @@ export function enforceLiveDiscipline(candidate, context = {}) {
     rejectReasons.push('無比分：數據不足，禁止推薦');
   }
 
+  const live = context.live;
+  if (live?.completed || (live?.inningsRemaining != null && live.inningsRemaining <= 0)) {
+    rejectReasons.push('比賽已結束：禁止滾球推薦');
+  }
+  if (live?.inningLabel && /終了|中止|キャンセル|延期/.test(live.inningLabel)) {
+    rejectReasons.push('比賽已結束／中止：禁止滾球推薦');
+  }
+
   const dataQ = candidate.dataQuality ?? context.dataQuality ?? 0;
   if (dataQ < MIN_DATA_Q()) {
     rejectReasons.push(`數據品質 ${(dataQ * 100).toFixed(0)}% < ${(MIN_DATA_Q() * 100).toFixed(0)}%`);

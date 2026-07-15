@@ -183,3 +183,98 @@ export function matchYahooScoreToGame(game, yahooScores) {
     );
   });
 }
+
+const YAHOO_NPB_STANDINGS = 'https://baseball.yahoo.co.jp/npb/standings/';
+
+/**
+ * Yahoo 順位表（中央＋太平洋）：勝敗、得失分、勝率
+ * 這是 NPB 初盤隊力的主數據源（Odds API scores 常為 null）
+ */
+export async function fetchYahooNpbStandings() {
+  const res = await fetch(YAHOO_NPB_STANDINGS, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml',
+      'Accept-Language': 'ja,en;q=0.8',
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo NPB standings HTTP ${res.status}`);
+  const html = await res.text();
+  return parseYahooNpbStandingsHtml(html);
+}
+
+export function parseYahooNpbStandingsHtml(html) {
+  // 只取正式球季表頭（避開導航列的「セ・リーグ」文字）
+  const findSection = (label) => {
+    const needle = `bb-rankHead__title">${label}`;
+    return html.indexOf(needle);
+  };
+  const centralStart = findSection('セ・リーグ');
+  const pacificStart = findSection('パ・リーグ');
+  const interStart = findSection('交流戦');
+
+  const chunks = [];
+  if (centralStart >= 0 && pacificStart > centralStart) {
+    chunks.push(html.slice(centralStart, pacificStart));
+  }
+  if (pacificStart >= 0) {
+    const end = interStart > pacificStart ? interStart : pacificStart + 100000;
+    chunks.push(html.slice(pacificStart, end));
+  }
+  if (!chunks.length) chunks.push(html);
+
+  const byTeam = new Map();
+  for (const chunk of chunks) {
+    const rowRe = /<tr class="bb-rankTable__row">([\s\S]*?)<\/tr>/g;
+    let match;
+    while ((match = rowRe.exec(chunk)) !== null) {
+      const block = match[1];
+      const teamJa = stripTags(block.match(/bb-rankTable__team[^>]*>([^<]+)</)?.[1]);
+      const teamName = mapTeam(teamJa);
+      if (!teamName) continue;
+
+      const cells = [...block.matchAll(/<td class="bb-rankTable__data[^"]*">([\s\S]*?)<\/td>/g)].map((m) =>
+        stripTags(m[1])
+      );
+      // 順位 | 隊名 | 試合 | 勝利 | 敗戦 | 引分 | 勝率 | 勝差 | 残試合 | 得点 | 失点 | ...
+      if (cells.length < 11) continue;
+      const games = parseInt(cells[2], 10);
+      const wins = parseInt(cells[3], 10);
+      const losses = parseInt(cells[4], 10);
+      const draws = parseInt(cells[5], 10);
+      const winPct = parseFloat(cells[6]);
+      const runsScored = parseInt(cells[9], 10);
+      const runsAllowed = parseInt(cells[10], 10);
+      if (!Number.isFinite(wins) || !Number.isFinite(losses)) continue;
+
+      // 過濾明顯非正式球季樣本（交流戦約 18 場等級）
+      if (Number.isFinite(games) && games < 40) continue;
+
+      const decisive = wins + losses;
+      const rating =
+        Number.isFinite(winPct) && winPct > 0
+          ? winPct
+          : decisive > 0
+            ? wins / decisive
+            : 0.5;
+
+      const row = {
+        teamName,
+        teamJa,
+        games: Number.isFinite(games) ? games : decisive + (draws || 0),
+        wins,
+        losses,
+        draws: Number.isFinite(draws) ? draws : 0,
+        winPct: rating,
+        runsScored: Number.isFinite(runsScored) ? runsScored : null,
+        runsAllowed: Number.isFinite(runsAllowed) ? runsAllowed : null,
+        source: 'yahoo_npb_standings',
+      };
+
+      const prev = byTeam.get(teamName);
+      if (!prev || row.games > prev.games) byTeam.set(teamName, row);
+    }
+  }
+  return [...byTeam.values()];
+}

@@ -11,7 +11,12 @@ import {
   extractFairH2hProb,
   clampProb,
 } from './H2hModel.js';
-import { calcEV, decimalToImpliedProb, decimalToNetOdds } from '../utils/odds.js';
+import {
+  calcEV,
+  decimalToImpliedProb,
+  decimalToNetOdds,
+  removeVig,
+} from '../utils/odds.js';
 
 const MLB_HOME_FIELD = 0.028;
 
@@ -102,12 +107,18 @@ function blend(modelProb, marketProb, weight) {
 export function computeH2hEdges(homeWinProb, awayWinProb, homeOdds, awayOdds) {
   const homeImplied = homeOdds ? decimalToImpliedProb(homeOdds) : null;
   const awayImplied = awayOdds ? decimalToImpliedProb(awayOdds) : null;
+  const fair =
+    homeImplied != null && awayImplied != null
+      ? removeVig(homeImplied, awayImplied)
+      : null;
+  const homeReference = fair?.fairA ?? homeImplied;
+  const awayReference = fair?.fairB ?? awayImplied;
 
   const homeEv = homeOdds ? calcEV(homeWinProb, decimalToNetOdds(homeOdds)) : null;
   const awayEv = awayOdds ? calcEV(awayWinProb, decimalToNetOdds(awayOdds)) : null;
 
-  const homeEdge = homeImplied != null ? (homeWinProb - homeImplied) * 100 : null;
-  const awayEdge = awayImplied != null ? (awayWinProb - awayImplied) * 100 : null;
+  const homeEdge = homeReference != null ? (homeWinProb - homeReference) * 100 : null;
+  const awayEdge = awayReference != null ? (awayWinProb - awayReference) * 100 : null;
 
   let bestSide = null;
   let bestEv = -Infinity;
@@ -134,8 +145,20 @@ export function computeH2hEdges(homeWinProb, awayWinProb, homeOdds, awayOdds) {
     bestEv >= config.minEvThreshold;
 
   return {
-    home: { ev: homeEv, edgePct: homeEdge, implied: homeImplied, odds: homeOdds },
-    away: { ev: awayEv, edgePct: awayEdge, implied: awayImplied, odds: awayOdds },
+    home: {
+      ev: homeEv,
+      edgePct: homeEdge,
+      implied: homeImplied,
+      fairProb: homeReference,
+      odds: homeOdds,
+    },
+    away: {
+      ev: awayEv,
+      edgePct: awayEdge,
+      implied: awayImplied,
+      fairProb: awayReference,
+      odds: awayOdds,
+    },
     bestSide,
     bestEv,
     favoriteTrap,

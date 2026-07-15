@@ -210,6 +210,76 @@ function migrateSchema() {
       ON recommendation_snapshots(model_version, league, market);
     CREATE INDEX IF NOT EXISTS idx_analysis_runs_started
       ON analysis_runs(started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS odds_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      game_id TEXT NOT NULL,
+      league TEXT NOT NULL,
+      captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+      bookmakers_json TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'odds_api',
+      UNIQUE(game_id, captured_at)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_odds_snapshots_game_time
+      ON odds_snapshots(game_id, captured_at);
+
+    CREATE TABLE IF NOT EXISTS model_run_configs (
+      analysis_run_id TEXT PRIMARY KEY,
+      model_version TEXT NOT NULL,
+      config_hash TEXT NOT NULL,
+      weights_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS feature_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      analysis_run_id TEXT NOT NULL,
+      game_id TEXT NOT NULL,
+      league TEXT NOT NULL,
+      features_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(analysis_run_id, game_id),
+      FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id),
+      FOREIGN KEY (game_id) REFERENCES games(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feature_snapshots_game
+      ON feature_snapshots(game_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS analysis_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      analysis_run_id TEXT NOT NULL,
+      feature_snapshot_id INTEGER,
+      game_id TEXT NOT NULL,
+      league TEXT NOT NULL,
+      market TEXT NOT NULL,
+      pick TEXT NOT NULL,
+      line REAL,
+      odds_decimal REAL NOT NULL,
+      raw_model_prob REAL,
+      market_prob REAL,
+      model_prob REAL NOT NULL,
+      implied_prob REAL NOT NULL,
+      ev REAL NOT NULL,
+      edge_prob REAL,
+      data_quality REAL,
+      actionable_score REAL,
+      eligible INTEGER NOT NULL DEFAULT 1,
+      selected INTEGER NOT NULL DEFAULT 0,
+      bet_strategy TEXT,
+      reject_reason TEXT,
+      model_version TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(analysis_run_id, game_id, market, pick, line),
+      FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id),
+      FOREIGN KEY (feature_snapshot_id) REFERENCES feature_snapshots(id),
+      FOREIGN KEY (game_id) REFERENCES games(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_analysis_decisions_model
+      ON analysis_decisions(model_version, league, market, selected);
   `);
   // 統一歷史結果字典，避免 won/lost 與 win/loss 混用。
   db.exec("UPDATE bet_log SET result = 'win' WHERE result = 'won'");

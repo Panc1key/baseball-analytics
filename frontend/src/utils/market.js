@@ -2,6 +2,8 @@ export const MARKET_LABELS = {
   h2h: '獨贏',
   spreads: '讓分',
   totals: '大小',
+  corners_totals: '角球大小',
+  team_totals: '球隊大小',
   pitcher_strikeouts: '投手三振',
   pitcher_outs: '投手出局',
   pitcher_hits_allowed: '投手被安打',

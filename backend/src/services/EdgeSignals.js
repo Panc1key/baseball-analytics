@@ -48,10 +48,12 @@ export function isContrarianDogPick(candidate, analysis) {
   const modelFavorsPick =
     (isHomePick && homeProb >= 0.5) || (!isHomePick && homeProb < 0.5);
 
-  const impliedFav = homeProb >= 0.5;
+  const marketHomeProb = analysis?.marketHomeProb;
+  if (marketHomeProb == null) return false;
+  const marketHomeFav = marketHomeProb >= 0.5;
   const pickingDog =
-    (isHomePick && !impliedFav && homeProb > 0.42) ||
-    (!isHomePick && impliedFav && homeProb < 0.58);
+    (isHomePick && !marketHomeFav) ||
+    (!isHomePick && marketHomeFav);
 
   return modelFavorsPick && pickingDog && (candidate.edgeProb ?? 0) >= 2;
 }
@@ -105,13 +107,28 @@ export function computeActionableScore(candidate, context = {}) {
     signals.push('球員近期趨勢');
   }
 
-  if (mtype === 'h2h') bonus += 5;
+  if (mtype === 'h2h') {
+    if (context.preferTotals) {
+      // 只降排序，不刪除有正 EV 的獨贏。
+      bonus -= 2;
+      signals.push('對壘膠著·壓低獨贏權重');
+    } else {
+      bonus += 5;
+    }
+  }
   if (mtype === 'spreads' && candidate.line != null && candidate.line < 0) bonus += 2;
 
   if (mtype === 'totals') {
     if (edge < (config.flatBetMinEdgePctTotals ?? 4)) return { score: -1, signals: [], bonus: 0 };
-    bonus -= config.totalsPrimaryScorePenalty ?? 15;
-    if (candidate.side === 'under') return { score: -1, signals: [], bonus: 0 };
+    if (context.preferTotals) {
+      // 膠著時大小是更合理主選，對沖預設罰分
+      bonus += config.totalsAmbiguousBoost ?? 6;
+      signals.push('對壘膠著·優先大小');
+    } else {
+      bonus -= config.totalsPrimaryScorePenalty ?? 15;
+      // 小球仍可進跨盤比較，但不輕易壓過清晰獨贏
+      if (candidate.side === 'under') bonus -= 6;
+    }
   }
 
   if (mtype === 'props') {

@@ -191,8 +191,9 @@ export function estimateCoverProbHeuristic(winProb, spreadPoint, options = {}) {
 
   if (spreadPoint > 0) {
     const competitiveness = Math.max(0, Math.min(1, (winProb - 0.36) / 0.22));
-    const oneRunLossProb = 0.06 + competitiveness * 0.05;
-    const extraRunLossProb = absLine >= 1.5 ? 0.04 + competitiveness * 0.035 : 0;
+    // 保守：降低 +1.5 額外加權（過去易把 50% 勝率灌到 60%+ 蓋盤）
+    const oneRunLossProb = 0.045 + competitiveness * 0.035;
+    const extraRunLossProb = absLine >= 1.5 ? 0.025 + competitiveness * 0.02 : 0;
 
     let cover = winProb + oneRunLossProb + extraRunLossProb;
     cover += pickPitcherEdge * 0.6;
@@ -200,7 +201,8 @@ export function estimateCoverProbHeuristic(winProb, spreadPoint, options = {}) {
 
     if (margin < -0.04) cover -= Math.abs(margin) * 0.35;
     if (pickPitcherEdge < -0.02) cover += pickPitcherEdge * 0.8;
-    if (winProb < 0.42) cover = Math.min(cover, winProb + 0.06);
+    if (winProb < 0.42) cover = Math.min(cover, winProb + 0.05);
+    if (absLine >= 1.5 && winProb < 0.52) cover = Math.min(cover, winProb + 0.08);
 
     return clampProb(cover);
   }

@@ -1,7 +1,8 @@
 import db from '../db/database.js';
-import { FOOTBALL_LEAGUES } from './config.js';
+import { FOOTBALL_LEAGUES, footballConfig } from './config.js';
 import { computeFootballH2h } from './models/FootballH2hModel.js';
 import { projectMatchGoals } from './models/FootballTotalsModel.js';
+import { projectMatchCorners } from './models/FootballCornersModel.js';
 import { fetchMatchIntel } from './FootballStatsService.js';
 
 /** 從比分歷史更新足球隊伍近期狀態 */
@@ -145,6 +146,17 @@ export async function analyzeFootballMatchup(leagueCode, homeTeam, awayTeam, boo
     xgFactors: [],
   });
 
+  const cornersProjection = footballConfig.enableCorners
+    ? projectMatchCorners({
+        league: leagueCode,
+        homeLambda: h2h.homeLambda,
+        awayLambda: h2h.awayLambda,
+        homeProfile,
+        awayProfile,
+        bookmakers,
+      })
+    : null;
+
   return {
     homeTeam,
     awayTeam,
@@ -152,7 +164,11 @@ export async function analyzeFootballMatchup(leagueCode, homeTeam, awayTeam, boo
     drawProb: h2h.drawProb,
     awayWinProb: h2h.awayWinProb,
     confidence: h2h.confidence,
-    factors: [...h2h.factors, ...totalsProjection.factors],
+    factors: [
+      ...h2h.factors,
+      ...totalsProjection.factors,
+      ...(cornersProjection?.factors || []),
+    ],
     marketHomeProb: h2h.market?.homeProb ?? null,
     marketDrawProb: h2h.market?.drawProb ?? null,
     marketAwayProb: h2h.market?.awayProb ?? null,
@@ -160,6 +176,7 @@ export async function analyzeFootballMatchup(leagueCode, homeTeam, awayTeam, boo
     homeLambda: h2h.homeLambda,
     awayLambda: h2h.awayLambda,
     totalsProjection,
+    cornersProjection,
     projectedTotal: totalsProjection.finalTotal,
     homeProfile,
     awayProfile,
