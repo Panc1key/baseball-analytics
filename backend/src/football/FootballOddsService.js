@@ -6,7 +6,28 @@ import {
   isOddsQuotaExhaustedError,
   remainingQuota,
 } from '../services/OddsApiClient.js';
-import { FOOTBALL_LEAGUES, SOCCER_BULK_MARKETS, SOCCER_PROP_MARKETS, footballConfig } from './config.js';
+import { FOOTBALL_LEAGUES, SOCCER_BULK_MARKETS, SOCCER_CORNERS_MARKETS, SOCCER_PROP_MARKETS, footballConfig } from './config.js';
+
+/** 將逐場角球 market 併入主盤 bookmakers */
+export function mergeCornersBookmakers(baseBooks, cornersBooks) {
+  const byTitle = new Map(
+    (baseBooks || []).map((b) => [b.title, { ...b, markets: [...(b.markets || [])] }])
+  );
+
+  for (const book of cornersBooks || []) {
+    const existing = byTitle.get(book.title);
+    if (existing) {
+      const keys = new Set(existing.markets.map((m) => m.key));
+      for (const market of book.markets || []) {
+        if (!keys.has(market.key)) existing.markets.push(market);
+      }
+    } else {
+      byTitle.set(book.title, book);
+    }
+  }
+
+  return [...byTitle.values()];
+}
 
 export async function fetchFootballOdds() {
   const client = new OddsApiClient();
@@ -92,6 +113,52 @@ export async function fetchFootballPlayerProps(games, leagueKey, maxGames = foot
   }
 
   return { propsByGameId, quota: client.getQuota(), aborted };
+}
+
+export async function fetchFootballCorners(
+  games,
+  leagueKey,
+  region = 'us',
+  maxGames = footballConfig.maxCornersGames
+) {
+  if (!footballConfig.enableCorners || !games?.length) {
+    return { cornersByGameId: {}, quota: null, aborted: false };
+  }
+
+  const client = new OddsApiClient();
+  const cornersByGameId = {};
+  const sorted = [...games]
+    .filter((g) => g.commence_time && new Date(g.commence_time) > new Date())
+    .sort((a, b) => new Date(a.commence_time) - new Date(b.commence_time))
+    .slice(0, maxGames);
+
+  let aborted = false;
+
+  for (const game of sorted) {
+    try {
+      const event = await client.getEventOdds(leagueKey, game.id, SOCCER_CORNERS_MARKETS, {
+        regions: region,
+      });
+      const bookmakers = Array.isArray(event) ? event : event?.bookmakers || [];
+      cornersByGameId[game.id] = bookmakers;
+      const left = remainingQuota(client.getQuota());
+      if (left != null && left < 5) {
+        console.warn(`[football/corners] 剩餘額度 ${left}，停止角球盤`);
+        aborted = true;
+        break;
+      }
+    } catch (err) {
+      console.warn(`[football/corners] ${game.id} 失敗:`, err.message);
+      cornersByGameId[game.id] = [];
+      if (isOddsQuotaExhaustedError(err)) {
+        console.warn('[football/corners] 額度耗盡，停止角球盤請求');
+        aborted = true;
+        break;
+      }
+    }
+  }
+
+  return { cornersByGameId, quota: client.getQuota(), aborted };
 }
 
 export async function listActiveFootballSports() {

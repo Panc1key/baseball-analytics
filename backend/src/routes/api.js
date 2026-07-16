@@ -99,7 +99,7 @@ router.get('/slate', (req, res) => {
   const slate = getSlateByDate({
     from: req.query.from || undefined,
     to: req.query.to || undefined,
-    days: parseInt(req.query.days || '7', 10),
+    days: parseInt(req.query.days || String(config.slateDefaultDays), 10),
     betStrategy: req.query.betStrategy || undefined,
     league: req.query.league || undefined,
     minEv: parseFloat(req.query.minEv || '0'),
@@ -116,7 +116,13 @@ router.get('/slate/status', (_req, res) => {
 router.post('/slate/refresh', async (_req, res) => {
   try {
     const data = await slateFullRefresh();
-    res.json({ success: true, data });
+    const hasErrors = data.errors?.length > 0;
+    res.json({
+      success: !hasErrors || data.totalRecommendations > 0,
+      data,
+      partial: hasErrors,
+      error: hasErrors ? data.errors.map((e) => `${e.sport}: ${e.message}`).join('；') : undefined,
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

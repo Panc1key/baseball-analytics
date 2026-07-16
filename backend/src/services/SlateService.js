@@ -61,7 +61,17 @@ function enrichRow(r) {
     is_live: false,
     pick_rank: r.pick_rank,
     rank_label:
-      r.pick_rank === 1 ? '主推' : r.pick_rank === 2 ? '次推' : r.pick_rank ? `第${r.pick_rank}推` : null,
+      r.tier === 'sample' && r.pick_rank === 1
+        ? '樣本'
+        : r.tier === 'watch' && r.pick_rank === 1
+          ? '觀察'
+          : r.pick_rank === 1
+            ? '主推'
+            : r.pick_rank === 2
+              ? '次推'
+              : r.pick_rank
+                ? `第${r.pick_rank}推`
+                : null,
     bet_strategy: r.bet_strategy || classifyBetStrategy(r),
     sport_category: sportCategory(r.league),
     league_name: LEAGUE_DISPLAY_NAMES[r.league] || r.league,
@@ -218,24 +228,60 @@ export function getSlateByDate(filters = {}) {
   };
 }
 
-/** 同步並分析所有已啟用聯盟 */
+/** 同步並分析所有已啟用聯盟（可依 config.slateRefreshSports 只跑部分運動） */
+async function runSlateModule(name, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error(`[slate/${name}] 失敗:`, err.message);
+    return { error: err.message };
+  }
+}
+
 export async function slateFullRefresh() {
-  const [baseball, football, basketball, tennis] = await Promise.all([
-    fullRefresh(),
-    footballFullRefresh(),
-    basketballFullRefresh(),
-    tennisFullRefresh(),
-  ]);
+  const modules = new Set(config.slateRefreshSports);
+  const result = { skipped: [], errors: [] };
+
+  if (modules.has('baseball')) {
+    const baseball = await runSlateModule('baseball', fullRefresh);
+    if (baseball?.error) result.errors.push({ sport: 'baseball', message: baseball.error });
+    result.baseball = baseball;
+  } else {
+    result.skipped.push('baseball');
+  }
+  if (modules.has('football')) {
+    const football = await runSlateModule('football', footballFullRefresh);
+    if (football?.error) result.errors.push({ sport: 'football', message: football.error });
+    result.football = football;
+  } else {
+    result.skipped.push('football');
+  }
+  if (modules.has('basketball')) {
+    const basketball = await runSlateModule('basketball', basketballFullRefresh);
+    if (basketball?.error) result.errors.push({ sport: 'basketball', message: basketball.error });
+    result.basketball = basketball;
+  } else {
+    result.skipped.push('basketball');
+  }
+  if (modules.has('tennis')) {
+    const tennis = await runSlateModule('tennis', tennisFullRefresh);
+    if (tennis?.error) result.errors.push({ sport: 'tennis', message: tennis.error });
+    result.tennis = tennis;
+  } else {
+    result.skipped.push('tennis');
+  }
+
+  if (result.skipped.length) {
+    console.log(`[slate] 略過同步: ${result.skipped.join(', ')}（SLATE_REFRESH_SPORTS）`);
+  }
+
   return {
-    baseball,
-    football,
-    basketball,
-    tennis,
+    ...result,
     totalRecommendations:
-      (baseball.recommendationCount ?? 0) +
-      (football.analysis?.recommendations ?? 0) +
-      (basketball.analysis?.recommendations ?? 0) +
-      (tennis.analysis?.recommendations ?? 0),
+      (result.baseball?.recommendationCount ?? 0) +
+      (result.football?.analysis?.recommendations ?? 0) +
+      (result.basketball?.analysis?.recommendations ?? 0) +
+      (result.tennis?.analysis?.recommendations ?? 0),
   };
 }
 

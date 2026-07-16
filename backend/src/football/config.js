@@ -47,11 +47,14 @@ export const footballConfig = {
   /** Dixon–Coles ρ：負值提高 0-0/1-1 相關（文獻常見 -0.03~-0.13） */
   dixonColesRho: parseFloat(process.env.FOOTBALL_DC_RHO || '-0.08'),
   baseDrawRate: parseFloat(process.env.FOOTBALL_BASE_DRAW_RATE || '0.24'),
-  /** 角球備選盤（主盤膠著時優先看角球大小） */
-  enableCorners: process.env.FOOTBALL_ENABLE_CORNERS !== 'false',
+  /** 角球備選盤（主盤膠著時優先看角球大小；逐場 event-odds，極耗額度） */
+  enableCorners: process.env.FOOTBALL_ENABLE_CORNERS === 'true',
+  maxCornersGames: parseInt(process.env.FOOTBALL_MAX_CORNERS_GAMES || '6', 10),
   cornersMarketBlend: parseFloat(process.env.FOOTBALL_CORNERS_MARKET_BLEND || '0.55'),
   cornersMinEdgePct: parseFloat(process.env.FOOTBALL_CORNERS_MIN_EDGE || '2.0'),
   cornersMinLineGap: parseFloat(process.env.FOOTBALL_CORNERS_MIN_LINE_GAP || '0.15'),
+  /** API-Football 免費方案約 10 次/分鐘，預設間隔 1.2s */
+  apiFootballMinGapMs: parseInt(process.env.API_FOOTBALL_MIN_GAP_MS || '1200', 10),
 };
 
 /** 聯盟定義：oddsKey 對應 The Odds API；apiFootballLeagueId 對應 API-Football */
@@ -98,10 +101,9 @@ export const FOOTBALL_LEAGUES = {
 
 export const FOOTBALL_LEAGUE_CODES = Object.keys(FOOTBALL_LEAGUES);
 
-/** 主盤；角球另加 alternate_totals_corners（多 1 個 market 計額度） */
-export const SOCCER_BULK_MARKETS = footballConfig.enableCorners
-  ? 'h2h,spreads,totals,alternate_totals_corners'
-  : 'h2h,spreads,totals';
+/** 主盤 bulk endpoint（角球不支援 bulk，改逐場 event-odds） */
+export const SOCCER_BULK_MARKETS = 'h2h,spreads,totals';
+export const SOCCER_CORNERS_MARKETS = 'alternate_totals_corners';
 export const SOCCER_PROP_MARKETS = [
   'player_goal_scorer_anytime',
   'player_first_goal_scorer',

@@ -2,7 +2,7 @@ import db from '../db/database.js';
 import { config } from '../config.js';
 import { footballConfig, FOOTBALL_LEAGUES, FOOTBALL_LEAGUE_CODES, SOCCER_PROP_MARKETS } from './config.js';
 import { activeGameWhere } from '../utils/activeGames.js';
-import { fetchFootballOdds, fetchFootballScores, fetchFootballPlayerProps } from './FootballOddsService.js';
+import { fetchFootballOdds, fetchFootballScores, fetchFootballPlayerProps, fetchFootballCorners, mergeCornersBookmakers } from './FootballOddsService.js';
 import { updateFootballTeamStatsFromScores, analyzeFootballMatchup } from './FootballTeamAnalyzer.js';
 import { extractSoccerMarkets } from './utils/footballOdds.js';
 import { extractSoccerPlayerProps } from './FootballPlayerAnalyzer.js';
@@ -118,6 +118,43 @@ export async function syncFootballData() {
     }
   }
 
+  let cornersQuota = null;
+  if (footballConfig.enableCorners) {
+    for (const [code, { games, league, error }] of Object.entries(oddsData.results)) {
+      if (error || !games?.length) continue;
+      try {
+        const { cornersByGameId, quota, aborted } = await fetchFootballCorners(
+          games,
+          league.key,
+          league.region,
+          footballConfig.maxCornersGames
+        );
+        cornersQuota = quota;
+        for (const [gameId, cornersBooks] of Object.entries(cornersByGameId)) {
+          if (!cornersBooks?.length) continue;
+          const row = db.prepare('SELECT raw_odds FROM games WHERE id = ?').get(gameId);
+          if (!row?.raw_odds) continue;
+          const merged = mergeCornersBookmakers(JSON.parse(row.raw_odds), cornersBooks);
+          db.prepare(`UPDATE games SET raw_odds = ?, updated_at = datetime('now') WHERE id = ?`).run(
+            JSON.stringify(merged),
+            gameId
+          );
+        }
+        const hit = Object.values(cornersByGameId).filter((b) => b?.length).length;
+        if (hit) console.log(`[football/${code}] 角球盤 ${hit} 場`);
+        if (aborted) {
+          console.warn('[football] 額度不足，跳過其餘聯盟角球盤');
+          break;
+        }
+      } catch (err) {
+        console.warn(`[football/${code}] 角球盤失敗:`, err.message);
+        if (/OUT_OF_USAGE_CREDITS|quota has been reached/i.test(err.message || '')) break;
+      }
+    }
+  } else {
+    console.log('[football] 角球盤已關閉（FOOTBALL_ENABLE_CORNERS≠true），節省 Odds API 額度');
+  }
+
   let propsQuota = null;
   if (footballConfig.enablePlayerProps) {
     for (const [code, { games, league }] of Object.entries(oddsData.results)) {
@@ -154,6 +191,7 @@ export async function syncFootballData() {
   return {
     oddsQuota: oddsData.quota,
     scoresQuota: scoresData.quota,
+    cornersQuota,
     propsQuota,
     gameCounts: Object.fromEntries(
       Object.entries(oddsData.results).map(([k, v]) => [k, v.games?.length || 0])

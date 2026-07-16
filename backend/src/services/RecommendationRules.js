@@ -144,10 +144,110 @@ export function formatTotalPick(name, point) {
   return `${label} ${point}`;
 }
 
-export function rankLabel(rank) {
+export function rankLabel(rank, tier = null) {
+  if (tier === 'sample' && rank === 1) return '樣本';
   if (rank === 1) return '主推';
   if (rank === 2) return '次推';
   return `第${rank}推`;
+}
+
+function sampleMarketPriority(preferTotals) {
+  return preferTotals
+    ? { totals: 0, h2h: 1, spreads: 2 }
+    : { h2h: 0, spreads: 1, totals: 2 };
+}
+
+function rankSampleDecisions(pool, preference) {
+  const order = sampleMarketPriority(preference.preferTotals);
+  return [...pool].sort((a, b) => {
+    const eligA = a.eligible ? 0 : 1;
+    const eligB = b.eligible ? 0 : 1;
+    if (eligA !== eligB) return eligA - eligB;
+    const mA = order[a.market] ?? 9;
+    const mB = order[b.market] ?? 9;
+    if (mA !== mB) return mA - mB;
+    return b.ev - a.ev || (b.edgeProb ?? 0) - (a.edgeProb ?? 0);
+  });
+}
+
+function pickBestSampleDecision(decisionUniverse, preference) {
+  const minOdds = config.sampleMinOdds ?? config.prematchMinOdds ?? 1.7;
+  const minEv = config.sampleMinEv ?? config.minEvThreshold ?? 0.03;
+  const basePool = (decisionUniverse || []).filter((d) => d.oddsDecimal >= minOdds);
+  if (!basePool.length) return null;
+
+  const strictPool = basePool.filter((d) => d.ev >= minEv && (d.edgeProb ?? 0) > 0);
+  let ranked = rankSampleDecisions(strictPool, preference);
+  if (!ranked.length) {
+    ranked = rankSampleDecisions(
+      basePool.filter((d) => d.ev >= 0),
+      preference
+    );
+  }
+  if (!ranked.length) ranked = rankSampleDecisions(basePool, preference);
+  return ranked[0] || null;
+}
+
+function buildSampleFallbackPick(game, analysis, decision, preference, baseReasoning, pickContext) {
+  const league = game.league;
+  const enriched = enrichCandidate(
+    {
+      market: decision.market,
+      marketGroup: 'main',
+      pick: decision.pick,
+      line: decision.line ?? null,
+      odds: { price: decision.oddsDecimal },
+      oddsDecimal: decision.oddsDecimal,
+      modelProb: decision.modelProb,
+      rawModelProb: decision.rawModelProb,
+      marketProb: decision.marketProb,
+      ev: decision.ev,
+      confidence: analysis.confidence,
+      structuralOk: true,
+      dataQuality: decision.dataQuality ?? analysis.dataQuality,
+      probabilityCalibrated: decision.marketProb != null,
+      edgePct: decision.edgeProb,
+    },
+    analysis,
+    league,
+    decision.market
+  );
+
+  const { score: actionableScore, signals } = computeActionableScore(enriched, pickContext);
+  const prefNote = preference.preferTotals && preference.reason ? `選盤: ${preference.reason}` : null;
+  const sampleNote = decision.rejectReason ? `樣本候選（${decision.rejectReason}）` : '樣本累積';
+
+  return {
+    ...enriched,
+    league,
+    hasTeamStrength: analysis.hasTeamStrength,
+    tier: 'sample',
+    score: Math.min(enriched.score ?? 0, (config.recommendWatchScore ?? 50) - 5),
+    actionableScore,
+    edgeSignals: [...(signals || []), '樣本累積'],
+    pickRank: 1,
+    isPrimary: false,
+    rankLabel: rankLabel(1, 'sample'),
+    sampleFallback: true,
+    reasoning: [buildPickReasoning({ ...enriched, tier: 'sample' }, baseReasoning), prefNote, sampleNote]
+      .filter(Boolean)
+      .join(' | '),
+    bookmaker: enriched.odds?.bookmaker || enriched.bookmaker,
+    marketPreference: preference.preferTotals ? 'totals_first' : 'default',
+  };
+}
+
+function buildSampleFallbackResults(
+  game,
+  analysis,
+  preference,
+  decisionUniverse,
+  baseReasoning,
+  pickContext
+) {
+  const decision = pickBestSampleDecision(decisionUniverse, preference);
+  if (!decision) return [];
+  return [buildSampleFallbackPick(game, analysis, decision, preference, baseReasoning, pickContext)];
 }
 
 /** 讓分方向：MatchupCore 熱門陷阱 + 本地 Poisson 結構門控 */
@@ -496,21 +596,21 @@ export function pickPrimaryRecommendation(candidates, context = {}) {
 export function pickGameRecommendations(game, markets, analysis, baseReasoning, propsContext = {}) {
   const bookmakers = propsContext.bookmakers || [];
   const decisionUniverse = buildDecisionUniverse(game, markets, analysis, bookmakers);
+  const preference = assessMarketPreference(analysis, game);
 
-  // 無隊力數據時不硬推（勝率優先：寧可空，不要垃圾受讓）
   if (
     (game.league === 'NPB' || game.league === 'KBO') &&
-    analysis.hasTeamStrength !== true
+    analysis.hasTeamStrength !== true &&
+    config.prematchSampleFallback === false
   ) {
     propsContext.onDecisionCandidates?.({
       candidates: decisionUniverse,
       selected: [],
-      preference: assessMarketPreference(analysis, game),
+      preference,
     });
     return [];
   }
 
-  const preference = assessMarketPreference(analysis, game);
   const h2h = pickH2hCandidate(game, markets, analysis);
   const spread = pickSpreadCandidate(game, markets, analysis, bookmakers);
   const total = pickTotalCandidate(game, markets, analysis, bookmakers);
@@ -521,14 +621,6 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
   }
 
   const allCandidates = [...[h2h, spread, total].filter(Boolean), ...propCandidates];
-  if (!allCandidates.length) {
-    propsContext.onDecisionCandidates?.({
-      candidates: decisionUniverse,
-      selected: [],
-      preference,
-    });
-    return [];
-  }
 
   const pickContext = {
     preferTotals: preference.preferTotals,
@@ -543,6 +635,34 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
     awayMlb: analysis.awayMlb,
   };
 
+  if (!allCandidates.length) {
+    if (config.prematchSampleFallback !== false) {
+      const fallback = buildSampleFallbackResults(
+        game,
+        analysis,
+        preference,
+        decisionUniverse,
+        baseReasoning,
+        pickContext
+      );
+      if (fallback.length) {
+        const finalized = assignBetStrategies(fallback, pickContext).map(enrichWithSuggestedStake);
+        propsContext.onDecisionCandidates?.({
+          candidates: decisionUniverse,
+          selected: finalized,
+          preference,
+        });
+        return finalized;
+      }
+    }
+    propsContext.onDecisionCandidates?.({
+      candidates: decisionUniverse,
+      selected: [],
+      preference,
+    });
+    return [];
+  }
+
   const scored = allCandidates
     .map((c) => {
       const { score, signals } = computeActionableScore(c, pickContext);
@@ -555,7 +675,7 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
         edgeSignals: signals?.length ? signals : c.edgeSignals,
       };
     })
-    .filter((c) => c.tier && c.actionableScore >= 0)
+    .filter((c) => c.tier && (c.actionableScore >= 0 || c.tier === 'sample'))
     .sort(
       (a, b) =>
         b.actionableScore - a.actionableScore ||
@@ -596,7 +716,7 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
       score,
       pickRank: rank,
       isPrimary: rank === 1,
-      rankLabel: rankLabel(rank),
+      rankLabel: rankLabel(rank, tier),
       reasoning: [buildPickReasoning({ ...pick, tier }, baseReasoning), prefNote]
         .filter(Boolean)
         .join(' | '),
@@ -605,6 +725,18 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
     });
     usedMarkets.add(pick.market);
     if (rank >= config.maxPicksPerGame) break;
+  }
+
+  if (results.length === 0 && config.prematchSampleFallback !== false) {
+    const fallback = buildSampleFallbackResults(
+      game,
+      analysis,
+      preference,
+      decisionUniverse,
+      baseReasoning,
+      pickContext
+    );
+    results.push(...fallback);
   }
 
   const finalized = assignBetStrategies(results, pickContext).map(enrichWithSuggestedStake);

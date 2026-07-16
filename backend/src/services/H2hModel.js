@@ -9,7 +9,8 @@ import { config } from '../config.js';
 import { blendScoreWithLog5 } from '../models/GameScoreModel.js';
 
 const PYTH_EXPONENT = 1.83;
-const MLB_HOME_FIELD = 0.035;
+/** MLB 主場優勢（勝率尺度，供 Log5 / 情境分共用） */
+export const MLB_HOME_FIELD = 0.035;
 
 export function parseL10Rate(last10) {
   if (!last10 || last10 === 'N/A') return null;

@@ -7,6 +7,30 @@ import { footballConfig, FOOTBALL_LEAGUES } from './config.js';
 
 const BASE_URL = 'https://v3.football.api-sports.io';
 
+let apiChain = Promise.resolve();
+let lastRequestAt = 0;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(err) {
+  const msg = err?.message || '';
+  return /429|rateLimit|Too many requests/i.test(msg);
+}
+
+async function enqueueApiRequest(fn) {
+  const run = apiChain.then(async () => {
+    const gap = footballConfig.apiFootballMinGapMs ?? 1200;
+    const wait = Math.max(0, gap - (Date.now() - lastRequestAt));
+    if (wait) await sleep(wait);
+    lastRequestAt = Date.now();
+    return fn();
+  });
+  apiChain = run.catch(() => {});
+  return run;
+}
+
 function normalizeName(name) {
   return (name || '')
     .toLowerCase()
@@ -33,27 +57,46 @@ async function apiRequest(path, params = {}, { soft = false } = {}) {
     if (v != null) url.searchParams.set(k, String(v));
   }
 
-  try {
-    const res = await fetch(url.toString(), {
-      headers: { 'x-apisports-key': footballConfig.apiFootballKey },
-    });
+  const maxAttempts = 3;
 
-    if (!res.ok) {
-      const body = await res.text();
-      if (soft) return null;
-      throw new Error(`API-Football ${res.status}: ${body.slice(0, 200)}`);
-    }
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await enqueueApiRequest(async () => {
+        const res = await fetch(url.toString(), {
+          headers: { 'x-apisports-key': footballConfig.apiFootballKey },
+        });
 
-    const json = await res.json();
-    if (json.errors && Object.keys(json.errors).length) {
+        if (!res.ok) {
+          const body = await res.text();
+          if (res.status === 429) {
+            throw new Error(`API-Football 429: ${body.slice(0, 200)}`);
+          }
+          if (soft) return null;
+          throw new Error(`API-Football ${res.status}: ${body.slice(0, 200)}`);
+        }
+
+        const json = await res.json();
+        if (json.errors && Object.keys(json.errors).length) {
+          const errText = JSON.stringify(json.errors);
+          if (/rateLimit|Too many requests/i.test(errText)) {
+            throw new Error(`API-Football: ${errText}`);
+          }
+          if (soft) return null;
+          throw new Error(`API-Football: ${errText}`);
+        }
+        return json.response ?? json;
+      });
+    } catch (err) {
+      if (isRateLimitError(err) && attempt < maxAttempts - 1) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
       if (soft) return null;
-      throw new Error(`API-Football: ${JSON.stringify(json.errors)}`);
+      throw err;
     }
-    return json.response ?? json;
-  } catch (err) {
-    if (soft) return null;
-    throw err;
   }
+
+  return soft ? null : undefined;
 }
 
 export async function fetchFixturesByDate(commenceTime) {
@@ -114,19 +157,19 @@ async function fetchTeamStatistics(teamId, leagueCode) {
 
 async function fetchLineups(fixtureId) {
   if (!fixtureId) return null;
-  const data = await apiRequest('/fixtures/lineups', { fixture: fixtureId });
+  const data = await apiRequest('/fixtures/lineups', { fixture: fixtureId }, { soft: true });
   return data || [];
 }
 
 async function fetchInjuries(fixtureId) {
   if (!fixtureId) return null;
-  const data = await apiRequest('/fixtures/injuries', { fixture: fixtureId });
+  const data = await apiRequest('/fixtures/injuries', { fixture: fixtureId }, { soft: true });
   return data || [];
 }
 
 async function fetchH2H(homeId, awayId) {
   if (!homeId || !awayId) return [];
-  const data = await apiRequest('/fixtures/headtohead', { h2h: `${homeId}-${awayId}` });
+  const data = await apiRequest('/fixtures/headtohead', { h2h: `${homeId}-${awayId}` }, { soft: true });
   return (data || []).slice(0, 8);
 }
 
@@ -241,9 +284,9 @@ export async function fetchMatchIntel(leagueCode, homeTeam, awayTeam, commenceTi
     }
 
     const fixtureId = fixture.fixture?.id;
-    const [lineups, injuries, homeProfile, awayProfile, h2h] = await Promise.all([
-      fetchLineups(fixtureId),
-      fetchInjuries(fixtureId),
+    const lineups = await fetchLineups(fixtureId);
+    const injuries = await fetchInjuries(fixtureId);
+    const [homeProfile, awayProfile, h2h] = await Promise.all([
       buildTeamProfile(homeTeam, leagueCode, fixture, 'home'),
       buildTeamProfile(awayTeam, leagueCode, fixture, 'away'),
       fetchH2H(fixture.teams?.home?.id, fixture.teams?.away?.id),

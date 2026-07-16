@@ -10,6 +10,7 @@ import {
   log5WinProb,
   extractFairH2hProb,
   clampProb,
+  MLB_HOME_FIELD,
 } from './H2hModel.js';
 import {
   calcEV,
@@ -17,8 +18,6 @@ import {
   decimalToNetOdds,
   removeVig,
 } from '../utils/odds.js';
-
-const MLB_HOME_FIELD = 0.028;
 
 function clamp01(v, min = 0.05, max = 0.95) {
   return Math.max(min, Math.min(max, v));

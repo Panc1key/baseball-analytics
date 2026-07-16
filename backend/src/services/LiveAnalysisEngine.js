@@ -1,8 +1,9 @@
 /**
- * 滾球分析引擎 v1.1
+ * 滾球分析引擎 v1.3
  * - 初盤 prior + 比分條件更新
- * - LiveDiscipline 硬閘（市場衝突 / <65% 禁強推 / 最壞風險）
- * - 禁止對沖；無比分不推薦
+ * - LiveDiscipline 硬閘（開局/0-0/平手凍結、市場衝突、<65% 禁強推）
+ * - 對齊初盤立場：早段禁止翻案推出初盤已拒絕方向
+ * - 膠著硬切獨贏；禁止對沖；無比分不推薦
  */
 
 import db from '../db/database.js';
@@ -30,6 +31,7 @@ import {
   applyDisciplineToCandidate,
   formatDisciplineRejectLog,
 } from './LiveDiscipline.js';
+import { loadPrematchStance } from './PrematchLiveGuard.js';
 import {
   getMlbStandings,
   getMlbScheduleWindow,
@@ -184,8 +186,13 @@ function applyLiveStakeCap(rec) {
   };
 }
 
-function gatePick(game, pick, live, hasScore, dq) {
-  const discipline = enforceLiveDiscipline(pick, { hasScore, dataQuality: dq, live });
+function gatePick(game, pick, live, hasScore, dq, prematchStance = null) {
+  const discipline = enforceLiveDiscipline(pick, {
+    hasScore,
+    dataQuality: dq,
+    live,
+    prematchStance,
+  });
   const gated = applyDisciplineToCandidate(pick, discipline, config.baseStakeUnit);
   if (!gated) {
     console.warn(formatDisciplineRejectLog(game.id, discipline.rejectReasons));
@@ -194,7 +201,7 @@ function gatePick(game, pick, live, hasScore, dq) {
   return gated;
 }
 
-function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
+function buildH2hLiveCandidates(game, markets, analysis, live, hasScore, prematchStance) {
   const minEv = config.liveMinEvThreshold ?? config.minEvThreshold;
   const minEdge = config.liveH2hMinEdgePct ?? 2.5;
   const maxEdge = config.liveMaxModelEdgePct ?? 0.045;
@@ -259,7 +266,7 @@ function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
       reasoning: buildLiveReasoning(game, live, hasScore, 'h2h', enriched),
     };
 
-    const gated = gatePick(game, pick, live, hasScore, dq);
+    const gated = gatePick(game, pick, live, hasScore, dq, prematchStance);
     if (!gated) continue;
     if (gated.ev < minEv || gated.edgeProb < minEdge) continue;
     options.push(gated);
@@ -269,12 +276,13 @@ function buildH2hLiveCandidates(game, markets, analysis, live, hasScore) {
   return options.slice(0, 1);
 }
 
-function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
+function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore, prematchStance) {
   if (!config.liveEnableTotals) return [];
   if (!hasScore) return [];
 
   const minEv = config.liveMinEvThreshold ?? config.minEvThreshold;
   const minEdge = config.liveTotalsMinEdgePct ?? 4;
+  const underMinEdge = Math.max(minEdge, config.liveUnderMinEdgePct ?? 6.5);
   const maxEdge = config.liveMaxModelEdgePct ?? 0.045;
   const results = [];
   const dq = liveDataQuality(analysis, live, hasScore);
@@ -283,6 +291,7 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
     if (!tot?.price || tot.point == null) continue;
     if (tot.price < (config.liveMinOdds ?? 1.55)) continue;
     const isOver = tot.name === 'Over' || tot.name === '大';
+    const sideMinEdge = isOver ? minEdge : underMinEdge;
     const distribution = liveTotalDistribution({
       homeScore: live.homeScore,
       awayScore: live.awayScore,
@@ -303,7 +312,7 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
       ? removeVig(implied, decimalToImpliedProb(opposite.price)).fairA
       : implied;
     const calibrated = calibrateModelProb(rawProb, marketProb, maxEdge);
-    if ((calibrated - marketProb) * 100 < minEdge) continue;
+    if ((calibrated - marketProb) * 100 < sideMinEdge) continue;
 
     const pickLabel = isOver ? `大 ${tot.point}` : `小 ${tot.point}`;
     const enriched = enrichCandidate(
@@ -357,14 +366,48 @@ function buildTotalsLiveCandidates(game, markets, analysis, live, hasScore) {
       reasoning: buildLiveReasoning(game, live, hasScore, 'totals', enriched),
     };
 
-    const gated = gatePick(game, pick, live, hasScore, dq);
+    const gated = gatePick(game, pick, live, hasScore, dq, prematchStance);
     if (!gated) continue;
-    if (gated.ev < minEv || gated.edgeProb < minEdge) continue;
+    if (gated.ev < minEv || gated.edgeProb < sideMinEdge) continue;
     results.push(gated);
   }
 
   results.sort((a, b) => b.ev - a.ev || b.edgeProb - a.edgeProb);
   return results.slice(0, 1);
+}
+
+function appendCalibrationNote(parts, pick) {
+  const raw = pick?.rawModelProb;
+  const cal = pick?.modelProb;
+  if (raw == null || cal == null) return;
+  const rawPct = raw * 100;
+  const calPct = cal * 100;
+  if (Math.abs(rawPct - calPct) >= 2) {
+    parts.push(`原始 ${rawPct.toFixed(1)}% → 校準 ${calPct.toFixed(1)}%（貼市上限）`);
+  }
+}
+
+function selectLivePicks(h2h, totals, preference) {
+  const max = config.maxLivePicksPerGame ?? 1;
+  // 膠著時硬切獨贏：只留大小，避免文案寫「優先大小」卻仍推獨贏
+  const pool = preference?.preferTotals
+    ? (totals.length ? [...totals] : [])
+    : [...h2h, ...totals];
+  if (!pool.length) return [];
+
+  pool.sort((a, b) => {
+    if (preference?.preferTotals) {
+      const aTot = a.market === 'totals' ? 1 : 0;
+      const bTot = b.market === 'totals' ? 1 : 0;
+      if (aTot !== bTot) return bTot - aTot;
+    }
+    return (
+      (b.ev ?? 0) * (b.dataQuality ?? 0.5) - (a.ev ?? 0) * (a.dataQuality ?? 0.5) ||
+      (b.modelProb ?? 0) - (a.modelProb ?? 0)
+    );
+  });
+
+  return pool.slice(0, Math.max(1, max));
 }
 
 function buildLiveReasoning(game, live, hasScore, market, pick) {
@@ -388,6 +431,7 @@ function buildLiveReasoning(game, live, hasScore, market, pick) {
       ? `優勢 ${pick.edgeProb > 0 ? '+' : ''}${Number(pick.edgeProb).toFixed(1)}%`
       : null,
   ];
+  appendCalibrationNote(parts, pick);
   return parts.filter(Boolean).join(' | ');
 }
 
@@ -581,15 +625,24 @@ export async function runLiveAnalysis() {
     }
 
     const preference = assessMarketPreference(analysis, game, live);
-    const h2h = buildH2hLiveCandidates(game, markets, analysis, live, hasScore);
-    const totals = buildTotalsLiveCandidates(game, markets, analysis, live, hasScore);
-    // 滾球不再因「膠著」硬刪獨贏；候選按風險調整後 EV 排序。
-    const picks = [...h2h, ...totals].sort(
-      (a, b) =>
-        (b.ev ?? 0) * (b.dataQuality ?? 0.5) -
-          (a.ev ?? 0) * (a.dataQuality ?? 0.5) ||
-        (b.modelProb ?? 0) - (a.modelProb ?? 0)
+    const prematchStance = loadPrematchStance(game.id);
+    const h2h = buildH2hLiveCandidates(
+      game,
+      markets,
+      analysis,
+      live,
+      hasScore,
+      prematchStance
     );
+    const totals = buildTotalsLiveCandidates(
+      game,
+      markets,
+      analysis,
+      live,
+      hasScore,
+      prematchStance
+    );
+    const picks = selectLivePicks(h2h, totals, preference);
     analyzed += 1;
 
     let rank = 0;

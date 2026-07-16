@@ -7,9 +7,9 @@ export async function refreshData() {
   return data;
 }
 
-/** 跨聯盟同步（棒球 + 足球） */
+/** 跨聯盟同步（棒球 + 足球 + 籃球 + 網球）；全量同步常需 1～3 分鐘 */
 export async function refreshSlate() {
-  const { data } = await api.post('/slate/refresh');
+  const { data } = await api.post('/slate/refresh', null, { timeout: 180000 });
   return data;
 }
 

@@ -298,7 +298,9 @@ export function computeTotalsProjection({
   } else if (league === 'MLB' && (homePitcherStats || awayPitcherStats)) {
     const homeEra = homePitcherStats?.era ?? 4.5;
     const awayEra = awayPitcherStats?.era ?? 4.5;
-    modelTotal = MLB_LEAGUE_RUNS_PER_GAME + (4.5 - (homeEra + awayEra) / 2) * 0.35;
+    const avgEra = (homeEra + awayEra) / 2;
+    // ERA 高於聯盟均值 → 總分偏高；強投 → 總分偏低
+    modelTotal = MLB_LEAGUE_RUNS_PER_GAME + (avgEra - 4.5) * 0.35;
     factors.push(`僅先發 ERA 估算總分 ${modelTotal.toFixed(1)}`);
   } else if (hasNpbStrength) {
     const homeOff = homeTeamStats.runs_scored / homeGames;

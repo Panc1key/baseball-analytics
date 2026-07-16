@@ -6,7 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
 export const config = {
-  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.4.0',
+  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.4.1',
   /** 獨贏膠著：勝率差距低於此視為難分（0.10 = 55/45） */
   h2hAmbiguousMaxGap: parseFloat(process.env.H2H_AMBIGUOUS_MAX_GAP || '0.10'),
   /** 獨贏膠著：熱門勝率低於此改走大小優先 */
@@ -47,14 +47,29 @@ export const config = {
   staleDataHours: parseFloat(process.env.STALE_DATA_HOURS || '3'),
   /** 已開賽但仍可推薦的滾球窗口（小時，MLB 一場約 3h） */
   liveGameGraceHours: parseFloat(process.env.LIVE_GAME_GRACE_HOURS || '6'),
-  /** 初盤分析向前看多少小時（7天 = 168，支援按日 Slate） */
-  upcomingGameHorizonHours: parseFloat(process.env.UPCOMING_GAME_HORIZON_HOURS || '168'),
-  /** 前端按日 Slate 預設顯示天數 */
-  slateDefaultDays: parseInt(process.env.SLATE_DEFAULT_DAYS || '7', 10),
+  /** 初盤分析向前看多少小時（48 = 約 2 天；7天 = 168） */
+  upcomingGameHorizonHours: parseFloat(process.env.UPCOMING_GAME_HORIZON_HOURS || '48'),
+  /** 前端按日 Slate 預設顯示天數（省額度可設 2） */
+  slateDefaultDays: parseInt(process.env.SLATE_DEFAULT_DAYS || '2', 10),
   /** 推薦列表時區（香港 UTC+8） */
   displayTimezone: process.env.DISPLAY_TIMEZONE || 'Asia/Hong_Kong',
+  /**
+   * 「同步並分析」要跑的運動（逗號分隔：baseball,football,basketball,tennis）
+   * 省 Odds API 額度時可只留 baseball
+   */
+  slateRefreshSports: (process.env.SLATE_REFRESH_SPORTS || 'baseball,football,basketball,tennis')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
   recommendPrimaryScore: parseFloat(process.env.RECOMMEND_PRIMARY_SCORE || '65'),
   recommendWatchScore: parseFloat(process.env.RECOMMEND_WATCH_SCORE || '50'),
+  /**
+   * 嚴格門檻無候選時，仍從主盤選最佳方向標為 sample（供樣本累積／回測）
+   * 不進均注；僅影響初盤推薦覆蓋率
+   */
+  prematchSampleFallback: process.env.PREMATCH_SAMPLE_FALLBACK !== 'false',
+  sampleMinEv: parseFloat(process.env.SAMPLE_MIN_EV || process.env.MIN_EV_THRESHOLD || '0.03'),
+  sampleMinOdds: parseFloat(process.env.SAMPLE_MIN_ODDS || process.env.PREMATCH_MIN_ODDS || '1.7'),
   maxPicksPerGame: parseInt(process.env.MAX_PICKS_PER_GAME || '3', 10),
   /** 同一場次最多均注腿數（不同盤口各一） */
   maxFlatBetsPerGame: parseInt(process.env.MAX_FLAT_BETS_PER_GAME || '1', 10),
@@ -171,16 +186,38 @@ export const config = {
   parlayAnchorMinOdds: parseFloat(process.env.PARLAY_ANCHOR_MIN_ODDS || '1.55'),
   parlayAnchorMaxOdds: parseFloat(process.env.PARLAY_ANCHOR_MAX_ODDS || '1.79'),
   parlayAnchorMinProb: parseFloat(process.env.PARLAY_ANCHOR_MIN_PROB || '0.58'),
-  /** 滾球 v1.1：對照事故總結加嚴 */
-  liveMinEvThreshold: parseFloat(process.env.LIVE_MIN_EV || '0.035'),
-  liveH2hMinEdgePct: parseFloat(process.env.LIVE_H2H_MIN_EDGE || '2.5'),
-  liveTotalsMinEdgePct: parseFloat(process.env.LIVE_TOTALS_MIN_EDGE || '4'),
+  /** 滾球 v1.3：對齊初盤過濾 + 0-0／開局加嚴（命中率優先） */
+  liveMinEvThreshold: parseFloat(process.env.LIVE_MIN_EV || '0.045'),
+  liveH2hMinEdgePct: parseFloat(process.env.LIVE_H2H_MIN_EDGE || '4.5'),
+  liveTotalsMinEdgePct: parseFloat(process.env.LIVE_TOTALS_MIN_EDGE || '5.5'),
+  /** 滾球小球另加嚴（對齊初盤 totals under 思路） */
+  liveUnderMinEdgePct: parseFloat(process.env.LIVE_UNDER_MIN_EDGE || '6.5'),
   liveMaxModelEdgePct: parseFloat(process.env.LIVE_MAX_MODEL_EDGE || '0.045'),
   liveEnableTotals: process.env.LIVE_ENABLE_TOTALS !== 'false',
+  /** 滾球每場最多推薦條數（膠著時優先大小，避免同場 h2h+小 重複） */
+  maxLivePicksPerGame: parseInt(process.env.MAX_LIVE_PICKS_PER_GAME || '1', 10),
+  /**
+   * 開局凍結：已進行局數低於此不推（約第 4 局初 = 3.0）
+   * 避免 0-0／前段把初盤當滾球推
+   */
+  liveMinInningsPlayed: parseFloat(process.env.LIVE_MIN_INNINGS_PLAYED || '3.0'),
+  /** 仍為 0-0 時，需打到此局數才允許任何滾球推薦 */
+  liveZeroZeroMinInning: parseFloat(process.env.LIVE_ZERO_ZERO_MIN_INNING || '4.0'),
+  /** 平手時獨贏至少進行到此局數才允許（否則噪音極大） */
+  liveTiedH2hMinInning: parseFloat(process.env.LIVE_TIED_H2H_MIN_INNING || '5'),
+  /** 開局前段（局數 < 此值）推小球時，預估終場須低於盤口至少此差距 */
+  liveEarlyUnderMaxInning: parseFloat(process.env.LIVE_EARLY_UNDER_MAX_INNING || '5'),
+  liveEarlyUnderMinGap: parseFloat(process.env.LIVE_EARLY_UNDER_MIN_GAP || '1.25'),
+  /** 滾球是否尊重初盤立場（禁止早段翻案） */
+  liveRespectPrematch: process.env.LIVE_RESPECT_PREMATCH !== 'false',
+  livePrematchGuardMaxInning: parseFloat(process.env.LIVE_PREMATCH_GUARD_MAX_INNING || '6'),
+  livePrematchGuardMaxMargin: parseFloat(process.env.LIVE_PREMATCH_GUARD_MAX_MARGIN || '1'),
   /** 真實概率低於此不得 primary / 「強烈」 */
   liveStrongProbFloor: parseFloat(process.env.LIVE_STRONG_PROB || '0.65'),
   liveWatchOnlyBelowProb: parseFloat(process.env.LIVE_WATCH_ONLY_BELOW || '0.65'),
-  liveMinRecommendProb: parseFloat(process.env.LIVE_MIN_RECOMMEND_PROB || '0.52'),
+  liveMinRecommendProb: parseFloat(process.env.LIVE_MIN_RECOMMEND_PROB || '0.56'),
+  /** 滾球獨贏另加一層勝率門檻（平手開局 54% 級別不推） */
+  liveH2hMinRecommendProb: parseFloat(process.env.LIVE_H2H_MIN_PROB || '0.60'),
   /** 模型比市場樂觀超過此值 → 拒絕（防硬剛莊家） */
   liveMaxMarketProbGap: parseFloat(process.env.LIVE_MAX_MARKET_GAP || '0.12'),
   liveMinDataQuality: parseFloat(process.env.LIVE_MIN_DATA_QUALITY || '0.55'),

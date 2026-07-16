@@ -39,7 +39,7 @@
 
       <el-tab-pane label="滾球推薦" name="live">
         <p class="hint">
-          棒球滾球 v1.2 · MLB 官方局數 + 條件勝率 · 請用「同步滾球」更新（不等於初盤已開賽）
+          棒球滾球 v1.3 · 開局凍結 + 對齊初盤 · 請用「同步滾球」更新
         </p>
         <LivePanel ref="livePanelRef" :auto-load="false" />
       </el-tab-pane>
@@ -267,11 +267,19 @@ async function handleRefresh() {
   if (!hasApiKey.value) return;
   refreshing.value = true;
   try {
-    await refreshSlate();
-    ElMessage.success('全聯盟同步與分析完成（棒球 + 足球）');
+    const res = await refreshSlate();
+    if (res.partial && res.error) {
+      ElMessage.warning(`部分聯盟同步失敗：${res.error}`);
+    } else {
+      ElMessage.success('全聯盟同步與分析完成');
+    }
     await loadAll();
+    slatePanelRef.value?.loadSlate?.();
   } catch (err) {
-    ElMessage.error(err.response?.data?.error || '同步失敗');
+    const msg = err.code === 'ECONNABORTED'
+      ? '同步逾時（全聯盟需 1～3 分鐘，請稍候或僅同步棒球）'
+      : (err.response?.data?.error || err.message || '同步失敗');
+    ElMessage.error(msg);
   } finally {
     refreshing.value = false;
   }

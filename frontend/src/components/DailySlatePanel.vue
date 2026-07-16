@@ -16,6 +16,7 @@
           <el-radio-button label="parlay_anchor">錨腿</el-radio-button>
         </el-radio-group>
         <el-select v-model="days" size="small" style="width: 110px" @change="loadSlate">
+          <el-option :value="2" label="2 天" />
           <el-option :value="3" label="3 天" />
           <el-option :value="7" label="7 天" />
           <el-option :value="14" label="14 天" />
@@ -156,7 +157,7 @@ const props = defineProps({
 const loading = ref(false);
 const slate = ref(null);
 const strategyFilter = ref('');
-const days = ref(7);
+const days = ref(2);
 const expandedDates = ref([]);
 
 const enabledLeagues = computed(() => {

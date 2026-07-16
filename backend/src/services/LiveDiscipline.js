@@ -8,9 +8,11 @@
  * 4. 真實概率 < 強推線 → 禁止 primary /「強烈」語意
  * 5. 禁止負 EV 對沖建議（系統不產出對沖單）
  * 6. 必須附帶最壞情況（損失 = 全損本金）
+ * 7. 開局／0-0／平手凍結 + 初盤對齊（v1.3）
  */
 
 import { config } from '../config.js';
+import { checkPrematchContradiction } from './PrematchLiveGuard.js';
 
 const STRONG_PROB = () => config.liveStrongProbFloor ?? 0.65;
 const WATCH_ONLY_BELOW = () => config.liveWatchOnlyBelowProb ?? 0.65;
@@ -44,6 +46,79 @@ export function enforceLiveDiscipline(candidate, context = {}) {
     rejectReasons.push('比賽已結束／中止：禁止滾球推薦');
   }
 
+  const inningsPlayed = Number(live?.inningsPlayed);
+  const minInnings = config.liveMinInningsPlayed ?? 3;
+  if (Number.isFinite(inningsPlayed) && inningsPlayed < minInnings) {
+    rejectReasons.push(
+      `開局凍結：已進行 ${inningsPlayed.toFixed(1)} 局 < ${minInnings}（禁止前段假滾球）`
+    );
+  }
+
+  const homeScore = Number(live?.homeScore);
+  const awayScore = Number(live?.awayScore);
+  const scoreTied =
+    Number.isFinite(homeScore) && Number.isFinite(awayScore) && homeScore === awayScore;
+  const stillZeroZero =
+    Number.isFinite(homeScore) &&
+    Number.isFinite(awayScore) &&
+    homeScore === 0 &&
+    awayScore === 0;
+  const market = candidate.market;
+
+  // 0-0 比分幾乎無滾球資訊：比一般開局凍結更嚴
+  if (stillZeroZero) {
+    const zzMin = config.liveZeroZeroMinInning ?? 4;
+    if (Number.isFinite(inningsPlayed) && inningsPlayed < zzMin) {
+      rejectReasons.push(
+        `0-0 凍結：${inningsPlayed.toFixed(1)} 局 < ${zzMin}（等比分打開或進入中盤）`
+      );
+    }
+  }
+
+  // 平手獨贏噪音極大：至少打到中後段才允許
+  if (market === 'h2h' && scoreTied) {
+    const tiedMin = config.liveTiedH2hMinInning ?? 5;
+    if (Number.isFinite(inningsPlayed) && inningsPlayed < tiedMin) {
+      rejectReasons.push(
+        `平手獨贏凍結：${inningsPlayed.toFixed(1)} 局 < ${tiedMin}（等比分打開再看勝負）`
+      );
+    }
+  }
+
+  // 開局系統性偏小：預估終場與盤口太近時禁止推小球
+  const isUnder =
+    market === 'totals' &&
+    (candidate.pick?.startsWith('小') || /^Under/i.test(candidate.pick || ''));
+  if (isUnder) {
+    const earlyMax = config.liveEarlyUnderMaxInning ?? 5;
+    const minGap = config.liveEarlyUnderMinGap ?? 1.25;
+    const expected =
+      Number(candidate.projectedTotal ?? live?.expectedFinalTotal);
+    const line = Number(candidate.line ?? candidate.marketLine);
+    if (
+      Number.isFinite(inningsPlayed) &&
+      inningsPlayed < earlyMax &&
+      Number.isFinite(expected) &&
+      Number.isFinite(line)
+    ) {
+      const gap = line - expected;
+      if (gap < minGap) {
+        rejectReasons.push(
+          `開局小球過近：預估 ${expected.toFixed(1)} vs 盤 ${line}（差距 ${gap.toFixed(1)} < ${minGap}）`
+        );
+      }
+    }
+  }
+
+  const prematchConflict = checkPrematchContradiction(
+    candidate,
+    live,
+    context.prematchStance
+  );
+  if (prematchConflict) {
+    rejectReasons.push(prematchConflict);
+  }
+
   const dataQ = candidate.dataQuality ?? context.dataQuality ?? 0;
   if (dataQ < MIN_DATA_Q()) {
     rejectReasons.push(`數據品質 ${(dataQ * 100).toFixed(0)}% < ${(MIN_DATA_Q() * 100).toFixed(0)}%`);
@@ -53,7 +128,6 @@ export function enforceLiveDiscipline(candidate, context = {}) {
   const implied = candidate.impliedProb ?? 0;
   const ev = candidate.ev ?? -1;
   const edge = candidate.edgeProb ?? 0;
-  const market = candidate.market;
   const odds =
     candidate.oddsDecimal ??
     candidate.odds_decimal ??
@@ -69,10 +143,13 @@ export function enforceLiveDiscipline(candidate, context = {}) {
   }
 
   const minEv = config.liveMinEvThreshold ?? 0.03;
-  const minEdge =
+  let minEdge =
     market === 'totals'
       ? (config.liveTotalsMinEdgePct ?? 3.5)
       : (config.liveH2hMinEdgePct ?? 2.5);
+  if (isUnder) {
+    minEdge = Math.max(minEdge, config.liveUnderMinEdgePct ?? 6.5);
+  }
 
   // 低水需更高 EV：否則薄利高方差，實用不值得
   let effectiveMinEv = minEv;
@@ -118,6 +195,11 @@ export function enforceLiveDiscipline(candidate, context = {}) {
     rejectReasons.push('禁止負EV/擴倉對沖推薦');
   }
 
+  const minProb =
+    market === 'h2h'
+      ? (config.liveH2hMinRecommendProb ?? config.liveMinRecommendProb ?? 0.58)
+      : (config.liveMinRecommendProb ?? 0.55);
+
   // 概率表達鐵律：<65% 不得 primary
   let tierCap = null;
   let confidenceLabel = '觀察';
@@ -131,11 +213,13 @@ export function enforceLiveDiscipline(candidate, context = {}) {
   } else {
     confidenceLabel = '觀察';
     tierCap = 'watch';
-    if (modelProb < (config.liveMinRecommendProb ?? 0.52)) {
-      rejectReasons.push(`勝率 ${(modelProb * 100).toFixed(0)}% 過低，不推薦`);
-    } else {
-      warnings.push('勝率僅過半，僅可觀察級');
-    }
+    warnings.push('勝率僅過半，僅可觀察級');
+  }
+  if (modelProb < minProb) {
+    rejectReasons.push(
+      `勝率 ${(modelProb * 100).toFixed(0)}% < 門檻 ${(minProb * 100).toFixed(0)}%` +
+        (market === 'h2h' ? '（滾球獨贏）' : '')
+    );
   }
 
   // 低水不得主推（即使勝率很高）

@@ -713,7 +713,7 @@ export function getRecommendations(filters = {}) {
       sql += ' ORDER BY r.model_prob DESC, r.ev DESC';
     }
   } else {
-    sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 ELSE 2 END, COALESCE(r.pick_rank, 99) ASC, r.actionable_score DESC, r.score DESC";
+    sql += " ORDER BY CASE r.tier WHEN 'primary' THEN 0 WHEN 'watch' THEN 1 WHEN 'sample' THEN 2 ELSE 3 END, COALESCE(r.pick_rank, 99) ASC, r.actionable_score DESC, r.score DESC";
   }
 
   const rows = db.prepare(sql).all(...params);

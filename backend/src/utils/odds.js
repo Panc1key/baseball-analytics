@@ -281,7 +281,7 @@ export function estimateProjectedTotal(league, homeEra = null, awayEra = null) {
   let total = LEAGUE_AVG_TOTAL[league] || 8.5;
   if (homeEra != null && awayEra != null) {
     const avgEra = (homeEra + awayEra) / 2;
-    total += (4.5 - avgEra) * 0.35;
+    total += (avgEra - 4.5) * 0.35;
   }
   return Math.max(5, Math.min(14, total));
 }

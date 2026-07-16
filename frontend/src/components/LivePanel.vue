@@ -2,9 +2,9 @@
   <div class="live-panel">
     <div class="live-toolbar">
       <div class="live-meta">
-        <el-tag type="danger" effect="dark" size="small">滾球 v1.2</el-tag>
+        <el-tag type="danger" effect="dark" size="small">滾球 v1.3</el-tag>
         <span v-if="meta">進行中 {{ meta.liveGameCount }} 場 · 推薦 {{ meta.recommendationCount }} 條</span>
-        <span class="hint-inline">MLB linescore 優先 · 初盤 prior + 條件勝率</span>
+        <span class="hint-inline">開局/0-0 凍結 · 對齊初盤 · 命中率優先</span>
       </div>
       <div class="live-actions">
         <el-radio-group v-model="league" size="small" @change="loadLive">
@@ -22,14 +22,14 @@
 
     <el-alert type="info" :closable="false" show-icon class="live-alert">
       <template #title>
-        v1.2：MLB 用官方 linescore；NPB 用 Yahoo 補比分（Odds API 常回傳空比分）· KBO 仍靠 Odds API。
-        無比分不推 · 賠率&lt;{{ meta?.thresholds?.minOdds ?? 1.55 }}不推 · &lt;{{ meta?.thresholds?.primaryMinOdds ?? 1.7 }}不得主推 ·
-        &lt;65% 禁主推 ·「同步滾球」更新比分+賠率後重算。
-        <span v-if="pollMinutes > 0">列表每 {{ pollMinutes }} 分鐘自動重載（不耗 API）；更新比分/盤口請按「同步滾球」。</span>
+        v1.3：開局前 3 局不推 · 0-0 需更晚 · 平手不推獨贏 · 小球加嚴 · 早段禁止翻初盤結論。
+        MLB 用官方 linescore；NPB 用 Yahoo 補比分。無比分不推 · 獨贏勝率&lt;60%不推 · &lt;65% 禁主推。
+        「同步滾球」更新比分+賠率後重算。
+        <span v-if="pollMinutes > 0">列表每 {{ pollMinutes }} 分鐘自動重載（不耗 API）；更新盤口請按「同步滾球」。</span>
       </template>
     </el-alert>
 
-    <el-table :data="recs" stripe v-loading="loading || refreshing" empty-text="目前無滾球推薦（可能無進行中賽事，或尚未同步）">
+    <el-table :data="recs" stripe v-loading="loading || refreshing" empty-text="目前無滾球推薦（開局凍結／門檻未過／無進行中賽事，屬正常）">
       <el-table-column label="聯盟" width="88">
         <template #default="{ row }">{{ leagueLabel(row.league) }}</template>
       </el-table-column>
