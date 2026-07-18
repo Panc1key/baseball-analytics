@@ -146,6 +146,18 @@ function migrateSchema() {
   addCol('ALTER TABLE team_stats ADD COLUMN goals_for REAL DEFAULT 0');
   addCol('ALTER TABLE team_stats ADD COLUMN goals_against REAL DEFAULT 0');
   addCol('ALTER TABLE team_stats ADD COLUMN draws INTEGER DEFAULT 0');
+  addCol('ALTER TABLE team_stats ADD COLUMN elo REAL DEFAULT 1500');
+  addCol('ALTER TABLE team_stats ADD COLUMN avg_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN obp_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN slg_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN ops_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN era_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN whip_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN rpg_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN rapg_30 REAL');
+  addCol('ALTER TABLE team_stats ADD COLUMN games_30 INTEGER DEFAULT 0');
+  addCol('ALTER TABLE team_stats ADD COLUMN rolling_window_days INTEGER DEFAULT 30');
+  addCol('ALTER TABLE team_stats ADD COLUMN rolling_updated_at TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_bet_strategy ON recommendations(bet_strategy)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_score ON recommendations(score DESC)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_tier ON recommendations(tier)');

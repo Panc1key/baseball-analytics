@@ -6,13 +6,14 @@ import {
   calcEVWithPush,
   decimalToNetOdds,
 } from '../utils/odds.js';
+import { applyReliabilityCalibration } from './ProbabilityCalibration.js';
 
-/** 各盤口水位帶 */
+/** 各盤口水位帶（僅作軟性排序，不作硬門檻） */
 export const MARKET_BANDS = {
-  h2h: { min: 1.4, max: 3.5, sweetMin: 1.65, sweetMax: 2.8 },
-  spreads: { min: 1.4, max: 2.6, sweetMin: 1.65, sweetMax: 2.35 },
-  totals: { min: 1.6, max: 2.3, sweetMin: 1.7, sweetMax: 2.15 },
-  props: { min: 1.7, max: 3.0, sweetMin: 1.75, sweetMax: 2.5 },
+  h2h: { min: 1.75, max: 3.5, sweetMin: 1.8, sweetMax: 2.8 },
+  spreads: { min: 1.75, max: 2.6, sweetMin: 1.8, sweetMax: 2.35 },
+  totals: { min: 1.75, max: 2.3, sweetMin: 1.8, sweetMax: 2.15 },
+  props: { min: 1.75, max: 3.0, sweetMin: 1.8, sweetMax: 2.5 },
 };
 
 export function oddsBandFit(odds, band) {
@@ -32,11 +33,15 @@ export function calcDataQuality(analysis, league) {
     if (analysis.factors?.some((f) => f.includes('戰績'))) q += 0.15;
     if (analysis.homeRuns != null && analysis.awayRuns != null) q += 0.1;
     if (analysis.factors?.some((f) => f.includes('主場球場'))) q += 0.05;
-  } else if (league === 'NPB') {
-    if (analysis.hasTeamStrength || analysis.factors?.some((f) => f.includes('Yahoo 順位'))) q += 0.4;
-    else q = Math.min(q, 0.3);
+  } else if (league === 'NPB' || league === 'KBO') {
+    if (
+      analysis.hasTeamStrength ||
+      analysis.factors?.some((f) => f.includes('Elo') || f.includes('Yahoo'))
+    ) {
+      q += 0.4;
+    } else q = Math.min(q, 0.3);
     if (analysis.marketHomeProb != null) q += 0.15;
-    if (analysis.factors?.some((f) => f.includes('近期實力') && !f.includes('50.0%'))) q += 0.1;
+    if (analysis.factors?.some((f) => f.includes('泊松') || f.includes('得失分'))) q += 0.1;
   } else if (analysis.factors?.length >= 2) {
     q += 0.35;
   }
@@ -44,13 +49,10 @@ export function calcDataQuality(analysis, league) {
   return Math.min(1, q);
 }
 
-function hitRateBonus(modelProb) {
-  if (modelProb >= 0.6) return 10;
-  if (modelProb >= 0.58) return 7;
-  if (modelProb >= 0.55) return 4;
-  return 0;
-}
-
+/**
+ * 決策導向打分：以 EV + 校準勝率為主，水位帶僅軟排序
+ * tier 由 EV/勝率門檻決定，不再靠 hitRateBonus 魔術加分
+ */
 export function scorePick({
   modelProb,
   impliedProb,
@@ -59,21 +61,47 @@ export function scorePick({
   marketType,
   dataQuality,
   structuralOk = true,
+  ev = null,
 }) {
   const fairReference = marketProb ?? impliedProb;
   const edgeProb = (modelProb - fairReference) * 100;
   const offeredEdgeProb = (modelProb - impliedProb) * 100;
-  const edgeScore = Math.min(40, Math.max(0, edgeProb * 3.5));
-  const dataScore = (dataQuality ?? 0.5) * 25;
-  const band = MARKET_BANDS[marketType] || MARKET_BANDS.props;
-  const oddsScore = oddsBandFit(oddsDecimal, band) * 20;
-  const structScore = structuralOk ? 15 : 0;
-  const hitScore = hitRateBonus(modelProb);
-  const score = edgeScore + dataScore + oddsScore + structScore + hitScore;
 
+  const netOdds = decimalToNetOdds(oddsDecimal);
+  const computedEv =
+    ev != null && Number.isFinite(ev)
+      ? ev
+      : calcEV(modelProb, netOdds);
+
+  // EV 主導（0.03 → 24，0.10 → 50 封頂）
+  const evScore = Math.min(50, Math.max(0, computedEv * 800));
+  // 校準勝率：達主推門檻給滿分段，否則線性
+  const primaryMin = config.prematchPrimaryMinProb ?? 0.58;
+  const probScore =
+    modelProb >= primaryMin
+      ? 25
+      : Math.max(0, ((modelProb - 0.5) / Math.max(0.01, primaryMin - 0.5)) * 18);
+  const dataScore = (dataQuality ?? 0.5) * 15;
+  const band = MARKET_BANDS[marketType] || MARKET_BANDS.props;
+  const oddsScore = oddsBandFit(oddsDecimal, band) * 10;
+  const structScore = structuralOk ? 10 : 0;
+  const score = evScore + probScore + dataScore + oddsScore + structScore;
+
+  const minEv = config.minEvThreshold ?? 0.03;
   let tier = null;
-  if (score >= config.recommendPrimaryScore) tier = 'primary';
-  else if (score >= config.recommendWatchScore) tier = 'watch';
+  if (structuralOk && computedEv >= minEv && modelProb >= primaryMin) {
+    tier = 'primary';
+  } else if (
+    structuralOk &&
+    computedEv >= minEv &&
+    modelProb >= Math.min(0.55, primaryMin - 0.03)
+  ) {
+    tier = 'watch';
+  } else if (score >= config.recommendPrimaryScore) {
+    tier = 'primary';
+  } else if (score >= config.recommendWatchScore) {
+    tier = 'watch';
+  }
 
   return {
     score: Math.round(score * 10) / 10,
@@ -92,12 +120,14 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
     marketType === 'spreads'
       ? (config.spreadsMaxModelEdgePct ?? config.maxModelEdgePct)
       : config.maxModelEdgePct;
-  // 每個候選只允許一次概率校準。H2H/讓分/大小若上游已完成市場
-  // shrinkage，這裡直接信任；球員盤等純模型候選才在此校準一次。
   const probabilityCalibrated = candidate.probabilityCalibrated === true;
-  const modelProb = probabilityCalibrated
+  let modelProb = probabilityCalibrated
     ? candidate.modelProb
     : calibrateModelProb(rawModelProb, impliedProb, maxEdge);
+
+  // 可靠度分箱校準（若有歷史表）
+  modelProb = applyReliabilityCalibration(modelProb, league, marketType);
+
   const pushProb = candidate.pushProb ?? 0;
   const ev =
     pushProb > 0
@@ -116,6 +146,7 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
     marketType,
     dataQuality,
     structuralOk: candidate.structuralOk !== false,
+    ev,
   });
 
   return {

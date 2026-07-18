@@ -9,6 +9,12 @@
     "dev": "node --watch src/index.js",
     "sync": "node src/jobs/syncData.js",
     "analyze": "node src/jobs/runAnalysis.js",
+    "backtest": "node src/jobs/runBacktest.js",
+    "backfill-odds": "node src/jobs/backfillHistoricalOdds.js",
+    "expand-backtest": "node src/jobs/expandBacktestData.js",
+    "rebuild-elo": "node src/jobs/rebuildElo.js",
+    "fit-blend": "node src/jobs/fitBlendWeights.js",
+    "fit-dixon-coles": "node src/jobs/fitDixonColes.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

@@ -23,7 +23,11 @@ export function marketLabel(market) {
 }
 
 export function tierLabel(tier) {
-  return { primary: '主推', watch: '觀察' }[tier] || tier;
+  return {
+    primary: '主推',
+    watch: '觀察',
+    sample: '樣本',
+  }[tier] || tier;
 }
 
 export function formatGameTime(iso) {

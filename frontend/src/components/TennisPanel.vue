@@ -137,6 +137,8 @@ async function handleRefresh() {
 }
 
 onMounted(loadAll);
+
+defineExpose({ loadAll });
 </script>
 
 <style scoped>

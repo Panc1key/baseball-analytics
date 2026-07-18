@@ -6,6 +6,11 @@
 
 import { config } from '../config.js';
 import { resolveNpbTeamStrength } from './NpbStrength.js';
+import { projectNpbFamilyRuns } from './NpbScoreModel.js';
+import {
+  offenseFormMultiplier,
+  staffWhipMultiplier,
+} from './TeamRollingStats.js';
 import {
   decimalToImpliedProb,
   decimalToNetOdds,
@@ -18,6 +23,7 @@ import {
   poissonTotalDistribution,
   poissonTotalOverProb,
 } from '../models/GameScoreModel.js';
+import { getDixonColesRho } from '../models/DixonColes.js';
 
 const MLB_LEAGUE_RUNS_PER_GAME = 8.8;
 const MLB_TEAM_RUNS_AVG = MLB_LEAGUE_RUNS_PER_GAME / 2;
@@ -212,8 +218,16 @@ export function probTotalOverWithContext(homeRuns, awayRuns, line, totalsContext
 }
 
 /** 小球概率與大球使用同一分布；投手/進攻條件只作推薦門控，不再修改概率。 */
-export function probTotalUnderWithContext(homeRuns, awayRuns, line, totalsContext, modelTotal, marketLine) {
-  return poissonTotalDistribution(homeRuns, awayRuns, line).underProb;
+export function probTotalUnderWithContext(
+  homeRuns,
+  awayRuns,
+  line,
+  totalsContext,
+  modelTotal,
+  marketLine,
+  rho = 0
+) {
+  return poissonTotalDistribution(homeRuns, awayRuns, line, undefined, rho).underProb;
 }
 
 /** 大於盤口線機率（logistic 備用，非 MLB Poisson 時） */
@@ -248,6 +262,7 @@ export function computeTotalsProjection({
   bookmakers = [],
   homeTeamStats = null,
   awayTeamStats = null,
+  eloOverride = null,
 }) {
   const parkFactor = league === 'MLB' ? getParkFactor(venueName) : 1.0;
   const market = extractMarketTotals(bookmakers);
@@ -288,6 +303,63 @@ export function computeTotalsProjection({
       parkFactor,
       isHome: false,
     });
+
+    // 近窗完賽形態（OBP/SLG→OPS、對手投手群 WHIP）— 類似足球近期 xG
+    const leagueOps = config.mlbRollingLeagueOps ?? 0.72;
+    const leagueWhip = config.mlbRollingLeagueWhip ?? 1.28;
+    const minG = config.rollingFormMinGames ?? 8;
+    const homeFormOk = (homeTeamStats?.games_30 || 0) >= minG;
+    const awayFormOk = (awayTeamStats?.games_30 || 0) >= minG;
+    if (homeFormOk || awayFormOk) {
+      const homeOpsMul = homeFormOk
+        ? offenseFormMultiplier(homeTeamStats?.ops_30, leagueOps)
+        : 1;
+      const awayOpsMul = awayFormOk
+        ? offenseFormMultiplier(awayTeamStats?.ops_30, leagueOps)
+        : 1;
+      const homeFaceWhip = awayFormOk
+        ? staffWhipMultiplier(awayTeamStats?.whip_30, leagueWhip)
+        : 1;
+      const awayFaceWhip = homeFormOk
+        ? staffWhipMultiplier(homeTeamStats?.whip_30, leagueWhip)
+        : 1;
+      // 近窗 RPG 與賽季 RPG 混合（60% 近窗）
+      if (homeFormOk && homeTeamStats?.rpg_30 != null) {
+        homeRuns =
+          homeRuns * 0.4 +
+          projectTeamRuns({
+            offenseRpg: homeTeamStats.rpg_30,
+            oppRunsAllowedRpg:
+              awayFormOk && awayTeamStats?.rapg_30 != null ? awayTeamStats.rapg_30 : awayRa,
+            oppPitcherStats: awayPitcherStats,
+            parkFactor,
+            isHome: true,
+          }) *
+            0.6;
+      }
+      if (awayFormOk && awayTeamStats?.rpg_30 != null) {
+        awayRuns =
+          awayRuns * 0.4 +
+          projectTeamRuns({
+            offenseRpg: awayTeamStats.rpg_30,
+            oppRunsAllowedRpg:
+              homeFormOk && homeTeamStats?.rapg_30 != null ? homeTeamStats.rapg_30 : homeRa,
+            oppPitcherStats: homePitcherStats,
+            parkFactor,
+            isHome: false,
+          }) *
+            0.6;
+      }
+      homeRuns *= homeOpsMul * homeFaceWhip;
+      awayRuns *= awayOpsMul * awayFaceWhip;
+      factors.push(
+        `近${homeTeamStats?.rolling_window_days || awayTeamStats?.rolling_window_days || 30}日形態` +
+          ` 主OPS ${homeTeamStats?.ops_30?.toFixed?.(3) ?? '-'}×${homeOpsMul.toFixed(2)}` +
+          ` 客OPS ${awayTeamStats?.ops_30?.toFixed?.(3) ?? '-'}×${awayOpsMul.toFixed(2)}` +
+          ` · 對WHIP×${homeFaceWhip.toFixed(2)}/${awayFaceWhip.toFixed(2)}`
+      );
+    }
+
     modelTotal = homeRuns + awayRuns;
 
     factors.push(
@@ -303,17 +375,22 @@ export function computeTotalsProjection({
     modelTotal = MLB_LEAGUE_RUNS_PER_GAME + (avgEra - 4.5) * 0.35;
     factors.push(`僅先發 ERA 估算總分 ${modelTotal.toFixed(1)}`);
   } else if (hasNpbStrength) {
-    const homeOff = homeTeamStats.runs_scored / homeGames;
-    const awayOff = awayTeamStats.runs_scored / awayGames;
-    const homeDef = (homeTeamStats.runs_allowed || 0) / homeGames;
-    const awayDef = (awayTeamStats.runs_allowed || 0) / awayGames;
-    homeRuns = (homeOff + awayDef) / 2 + 0.12;
-    awayRuns = (awayOff + homeDef) / 2;
-    modelTotal = homeRuns + awayRuns;
-    factors.push(
-      `NPB/KBO 得失分模型 主${homeRuns.toFixed(1)}+客${awayRuns.toFixed(1)}=${modelTotal.toFixed(1)}` +
-        `（主進${homeOff.toFixed(2)} 客進${awayOff.toFixed(2)}）`
-    );
+    const projected = projectNpbFamilyRuns({
+      league,
+      homeTeam: homeTeamStats.team_name,
+      awayTeam: awayTeamStats.team_name,
+      homeTeamStats,
+      awayTeamStats,
+      homeGames,
+      awayGames,
+      homeStrength: homeTeamStats.rating,
+      awayStrength: awayTeamStats.rating,
+      eloOverride,
+    });
+    homeRuns = projected.homeRuns;
+    awayRuns = projected.awayRuns;
+    modelTotal = projected.modelTotal;
+    factors.push(...projected.factors);
   } else {
     modelTotal = { MLB: 8.8, NPB: 8.0, KBO: 9.0 }[league] ?? 8.5;
     factors.push(`聯盟均值總分 ${modelTotal.toFixed(1)}`);
@@ -363,6 +440,7 @@ export function computeTotalsProjection({
   }
 
   return {
+    league,
     modelTotal,
     finalTotal,
     homeRuns,
@@ -385,6 +463,22 @@ export function computeTotalsProjection({
   };
 }
 
+function totalsLineBand(league) {
+  if (league === 'NPB' || league === 'KBO') {
+    return {
+      min: config.npbTotalsLineMin ?? 6.5,
+      max: config.npbTotalsLineMax ?? 13,
+    };
+  }
+  if (league === 'MLB') {
+    return {
+      min: config.mlbTotalsLineMin ?? 5.5,
+      max: config.mlbTotalsLineMax ?? 14,
+    };
+  }
+  return null;
+}
+
 /** 是否應跳過該盤口線 */
 export function shouldSkipTotalLine({
   projection,
@@ -393,6 +487,7 @@ export function shouldSkipTotalLine({
   modelProb,
   impliedProb,
   marketProb = null,
+  league = null,
 }) {
   const edgePct = (modelProb - (marketProb ?? impliedProb)) * 100;
   const minEdge = config.totalsMinEdgePct ?? 2;
@@ -403,6 +498,16 @@ export function shouldSkipTotalLine({
   const marketLine = projection.marketLine ?? line;
   const modelTotal = projection.modelTotal;
   const modelMarketGap = projection.modelMarketGap ?? Math.abs(modelTotal - marketLine);
+  const leagueCode = league || projection.league || null;
+
+  // 盤帶閘：排除滾球縮水線／非全場線（例：日職全場出現 3.5）
+  const band = totalsLineBand(leagueCode);
+  if (band && line != null && (line < band.min || line > band.max)) {
+    return {
+      skip: true,
+      reason: `大小線 ${line} 超出初盤合理帶 ${band.min}-${band.max}（疑似滾球/非全場）`,
+    };
+  }
 
   // 模型與市場總分幾乎一致 → 無資訊優勢，不推
   if (modelMarketGap < minSignal) {
@@ -436,7 +541,14 @@ export function shouldSkipTotalLine({
     }
   }
 
-  // 市場定低盤（強投手戰）但模型偏高 → 不輕易博大
+  // 市場定低盤（強投手戰／滾球縮水）但模型偏高 → 禁止博大假 EV
+  const softGap = config.totalsSoftLineOverGap ?? 1.5;
+  if (isOver && Number.isFinite(modelTotal) && line <= modelTotal - softGap) {
+    return {
+      skip: true,
+      reason: `市場線 ${line} 遠低於模型 ${modelTotal.toFixed(1)}，禁止博大（防滾球低線）`,
+    };
+  }
   if (isOver && marketLine <= modelTotal - 1.2 && edgePct < minContrarian) {
     return { skip: true, reason: '市場低盤線，模型不應博大' };
   }
@@ -480,11 +592,14 @@ export function buildTotalCandidates(markets, projection, league) {
   for (const [, total] of Object.entries(markets.totals || {})) {
     const isOver = total.name === 'Over';
     const line = total.point;
+    const rho = getDixonColesRho(league);
     const distribution = usePoisson
       ? poissonTotalDistribution(
           projection.probabilityHomeRuns,
           projection.probabilityAwayRuns,
-          line
+          line,
+          undefined,
+          rho
         )
       : null;
     const pushProb = distribution?.pushProb ?? 0;
@@ -521,6 +636,7 @@ export function buildTotalCandidates(markets, projection, league) {
       modelProb,
       impliedProb,
       marketProb,
+      league,
       offeredEdgePct: (modelProb - impliedProb) * 100,
     });
 

@@ -102,6 +102,7 @@ router.get('/slate', (req, res) => {
     days: parseInt(req.query.days || String(config.slateDefaultDays), 10),
     betStrategy: req.query.betStrategy || undefined,
     league: req.query.league || undefined,
+    sport: req.query.sport || undefined,
     minEv: parseFloat(req.query.minEv || '0'),
     tier: req.query.tier || undefined,
     marketGroup: req.query.marketGroup || undefined,
@@ -113,12 +114,18 @@ router.get('/slate/status', (_req, res) => {
   res.json({ success: true, data: getSlateStatus() });
 });
 
-router.post('/slate/refresh', async (_req, res) => {
+router.post('/slate/refresh', async (req, res) => {
   try {
-    const data = await slateFullRefresh();
+    const raw = req.body?.sports ?? req.query?.sports;
+    let sports = null;
+    if (Array.isArray(raw)) sports = raw;
+    else if (typeof raw === 'string' && raw.trim()) {
+      sports = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    const data = await slateFullRefresh(sports ? { sports } : {});
     const hasErrors = data.errors?.length > 0;
     res.json({
-      success: !hasErrors || data.totalRecommendations > 0,
+      success: !hasErrors || data.totalRecommendations > 0 || (data.sports?.length > 0 && !hasErrors),
       data,
       partial: hasErrors,
       error: hasErrors ? data.errors.map((e) => `${e.sport}: ${e.message}`).join('；') : undefined,

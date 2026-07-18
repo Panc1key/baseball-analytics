@@ -6,8 +6,8 @@
 
 const YAHOO_NPB_SCHEDULE = 'https://baseball.yahoo.co.jp/npb/schedule/';
 
-/** Yahoo 簡稱 → Odds API 英文隊名 */
-const NPB_JA_TO_EN = {
+/** 日文簡稱 → Odds API 英文隊名（Yahoo / baseball-data 共用） */
+export const NPB_JA_TO_EN = {
   巨人: 'Yomiuri Giants',
   ヤクルト: 'Tokyo Yakult Swallows',
   阪神: 'Hanshin Tigers',
@@ -32,13 +32,18 @@ function stripTags(s) {
     .trim();
 }
 
-function mapTeam(jaName) {
+export function mapNpbTeamJaToEn(jaName) {
   const n = stripTags(jaName);
   if (NPB_JA_TO_EN[n]) return NPB_JA_TO_EN[n];
   for (const [ja, en] of Object.entries(NPB_JA_TO_EN)) {
     if (n.includes(ja)) return en;
   }
   return null;
+}
+
+/** @deprecated 使用 mapNpbTeamJaToEn */
+function mapTeam(jaName) {
+  return mapNpbTeamJaToEn(jaName);
 }
 
 /**
@@ -101,8 +106,11 @@ export function parseNpbInningLabel(label) {
  *   homeTeam, awayTeam, homeScore, awayScore, status, inningLabel, linescore, gameUrl, source
  * }>>}
  */
-export async function fetchYahooNpbLiveScores() {
-  const res = await fetch(YAHOO_NPB_SCHEDULE, {
+export async function fetchYahooNpbLiveScores(dateIso = null) {
+  const url = dateIso
+    ? `${YAHOO_NPB_SCHEDULE}?date=${dateIso}`
+    : YAHOO_NPB_SCHEDULE;
+  const res = await fetch(url, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',

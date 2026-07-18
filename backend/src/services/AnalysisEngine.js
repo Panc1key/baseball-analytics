@@ -8,8 +8,21 @@ import {
   getProbablePitchers,
   getPitcherSeasonStats,
 } from './MlbStatsService.js';
-import { analyzeMatchup, updateTeamStatsFromScores, syncNpbStandingsFromYahoo } from './TeamAnalyzer.js';
+import {
+  analyzeMatchup,
+  updateTeamStatsFromScores,
+  updateTeamStatsFromDbGames,
+  syncNpbStandingsFromYahoo,
+} from './TeamAnalyzer.js';
+import { rebuildAllBaseballElo, createWalkForwardElo } from './BaseballElo.js';
+import { refreshAllRollingTeamForm } from './TeamRollingStats.js';
+import { fitAllDixonColesRho } from '../models/DixonColes.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { pickGameRecommendations } from './RecommendationRules.js';
+
+const __analysisDir = path.dirname(fileURLToPath(import.meta.url));
 import { buildParlaysFromDb, LEAGUE_MARKETS_INFO, getSlateCoverage } from './ParlayBuilder.js';
 import { extractPlayerProps } from './PlayerPropAnalyzer.js';
 import {
@@ -20,7 +33,12 @@ import {
 import { config, LEAGUES, BASEBALL_LEAGUE_CODES, BASEBALL_LEAGUE_SQL } from '../config.js';
 import { classifyBetStrategy } from './BetStrategy.js';
 import { enrichWithSuggestedStake, getStakeSizingMeta } from './StakeSizer.js';
-import { activeGameWhere, isGameStarted } from '../utils/activeGames.js';
+import {
+  activeGameWhere,
+  isGameStarted,
+  prematchAnalyzeGameWhere,
+  slateDisplayGameWhere,
+} from '../utils/activeGames.js';
 import { runLiveAnalysis, getLiveRecommendations, getLiveStatus } from './LiveAnalysisEngine.js';
 
 let refreshPromise = null;
@@ -37,17 +55,35 @@ function setMeta(key, value) {
   `).run(key, String(value));
 }
 
+/** app_meta 時間戳距今幾小時；無資料視為過期 */
+function metaAgeHours(key) {
+  const raw = getMeta(key);
+  if (!raw) return Infinity;
+  const age = (Date.now() - Date.parse(raw)) / 3600000;
+  return Number.isFinite(age) ? age : Infinity;
+}
+
+function shouldRebuildHeavy(key, maxAgeHours) {
+  return metaAgeHours(key) >= maxAgeHours;
+}
+
 export function isRefreshInProgress() {
   return !!refreshPromise;
 }
 
 function upsertGame(game, league, rawProps = null) {
   const bookmakersJson = JSON.stringify(game.bookmakers);
+  // 開賽後 Odds API 常回滾球縮水盤；初盤 raw_odds 必須鎖定，避免重算成「大 3.5」假 EV
+  const started =
+    game.commence_time && new Date(game.commence_time).getTime() <= Date.now();
   db.prepare(`
     INSERT INTO games (id, league, commence_time, home_team, away_team, raw_odds, raw_props, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
-      raw_odds = excluded.raw_odds,
+      raw_odds = CASE
+        WHEN datetime(games.commence_time) <= datetime('now') THEN games.raw_odds
+        ELSE excluded.raw_odds
+      END,
       raw_props = COALESCE(excluded.raw_props, games.raw_props),
       updated_at = datetime('now')
   `).run(
@@ -59,11 +95,12 @@ function upsertGame(game, league, rawProps = null) {
     bookmakersJson,
     rawProps ? JSON.stringify(rawProps) : null
   );
+  // 快照仍記錄當下盤（含滾球），供對帳；初盤分析只用鎖定的 games.raw_odds
   db.prepare(`
     INSERT OR IGNORE INTO odds_snapshots
       (game_id, league, captured_at, bookmakers_json, source)
-    VALUES (?, ?, datetime('now'), ?, 'odds_api')
-  `).run(game.id, league, bookmakersJson);
+    VALUES (?, ?, datetime('now'), ?, ?)
+  `).run(game.id, league, bookmakersJson, started ? 'odds_api_post_start' : 'odds_api');
 }
 
 function saveGameProps(gameId, bookmakers) {
@@ -72,11 +109,222 @@ function saveGameProps(gameId, bookmakers) {
   `).run(JSON.stringify(bookmakers), gameId);
 }
 
+function parseSnapshotTime(capturedAt) {
+  const s = String(capturedAt || '');
+  const iso = s.includes('T') ? s : `${s.replace(' ', 'T')}Z`;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : NaN;
+}
+
+function totalsLinesFromBooks(books) {
+  try {
+    const markets = extractMarkets(books);
+    return [
+      ...new Set(
+        Object.values(markets.totals || {})
+          .map((x) => x.point)
+          .filter((x) => x != null)
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function isSanePrematchTotals(league, lines) {
+  if (!lines?.length) return true;
+  const min =
+    league === 'MLB' ? (config.mlbTotalsLineMin ?? 5.5) : (config.npbTotalsLineMin ?? 6.5);
+  const max =
+    league === 'MLB' ? (config.mlbTotalsLineMax ?? 14) : (config.npbTotalsLineMax ?? 13);
+  return lines.some((p) => p >= min && p <= max);
+}
+
+/**
+ * 用開賽前最後一筆合理快照還原 games.raw_odds（修復已被滾球盤覆寫的初盤）
+ */
+export function restorePrematchOddsFromSnapshots() {
+  const games = db
+    .prepare(
+      `
+    SELECT id, league, commence_time, raw_odds
+    FROM games
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND completed = 0
+      AND datetime(commence_time) <= datetime('now')
+      AND datetime(commence_time) > datetime('now', '-18 hours')
+  `
+    )
+    .all();
+
+  let restored = 0;
+  const update = db.prepare(
+    `UPDATE games SET raw_odds = ?, updated_at = datetime('now') WHERE id = ?`
+  );
+
+  for (const game of games) {
+    const commenceMs = new Date(game.commence_time).getTime();
+    if (!Number.isFinite(commenceMs)) continue;
+
+    const snaps = db
+      .prepare(
+        `
+      SELECT captured_at, bookmakers_json
+      FROM odds_snapshots
+      WHERE game_id = ?
+      ORDER BY datetime(captured_at) ASC
+    `
+      )
+      .all(game.id);
+
+    let best = null;
+    for (const snap of snaps) {
+      const ts = parseSnapshotTime(snap.captured_at);
+      if (!Number.isFinite(ts) || ts > commenceMs) continue;
+      let books;
+      try {
+        books = JSON.parse(snap.bookmakers_json);
+      } catch {
+        continue;
+      }
+      if (!books?.length) continue;
+      const lines = totalsLinesFromBooks(books);
+      if (!isSanePrematchTotals(game.league, lines)) continue;
+      best = books;
+    }
+
+    if (!best) continue;
+
+    const currentLines = totalsLinesFromBooks(JSON.parse(game.raw_odds || '[]'));
+    if (isSanePrematchTotals(game.league, currentLines) && currentLines.length) {
+      // 現行盤已合理則不覆蓋（避免無謂跳動）
+      continue;
+    }
+
+    update.run(JSON.stringify(best), game.id);
+    restored += 1;
+  }
+
+  return { games: games.length, restored };
+}
+
+/** 讀取某場應用於初盤分析的 bookmakers（優先開賽前合理快照） */
+function loadPrematchBookmakers(game) {
+  const commenceMs = new Date(game.commence_time).getTime();
+  const started = Number.isFinite(commenceMs) && commenceMs <= Date.now();
+  if (!started) {
+    try {
+      return JSON.parse(game.raw_odds || '[]');
+    } catch {
+      return [];
+    }
+  }
+
+  const snaps = db
+    .prepare(
+      `
+    SELECT captured_at, bookmakers_json
+    FROM odds_snapshots
+    WHERE game_id = ?
+    ORDER BY datetime(captured_at) ASC
+  `
+    )
+    .all(game.id);
+
+  let best = null;
+  for (const snap of snaps) {
+    const ts = parseSnapshotTime(snap.captured_at);
+    if (!Number.isFinite(ts) || ts > commenceMs) continue;
+    try {
+      const books = JSON.parse(snap.bookmakers_json);
+      if (!books?.length) continue;
+      const lines = totalsLinesFromBooks(books);
+      if (isSanePrematchTotals(game.league, lines)) best = books;
+    } catch {
+      /* continue */
+    }
+  }
+  if (best) return best;
+  try {
+    return JSON.parse(game.raw_odds || '[]');
+  } catch {
+    return [];
+  }
+}
+
 function clearOldRecommendations() {
-  // 只清初盤，保留滾球 phase='live'（由 LiveAnalysisEngine 自行刷新）
+  // 只清「待重算」的初盤：未開賽（等會重跑）+ 完賽/過期
+  // 已開賽且仍在展示窗內的初盤推薦保留，方便對帳當時推了什麼
+  // 例外：模型版本已變、或違規 sample 冷門獨贏 → 必須清掉重算，否則重啟也看不到新算法
+  const keepStartedHours = Math.max(config.liveGameGraceHours ?? 6, 12);
+  const minSampleH2h = config.sampleMinH2hProb ?? 0.52;
   db.prepare(
-    `DELETE FROM recommendations WHERE league IN (${BASEBALL_LEAGUE_SQL}) AND IFNULL(phase, 'prematch') = 'prematch'`
+    `
+    DELETE FROM recommendations
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND IFNULL(phase, 'prematch') = 'prematch'
+      AND game_id IN (
+        SELECT id FROM games g
+        WHERE g.league IN (${BASEBALL_LEAGUE_SQL})
+          AND (
+            g.completed = 1
+            OR datetime(g.commence_time) > datetime('now')
+            OR datetime(g.commence_time) <= datetime('now', '-${keepStartedHours} hours')
+          )
+      )
+  `
   ).run();
+
+  // 舊模型版本的「進行中凍結單」作廢
+  db.prepare(
+    `
+    DELETE FROM recommendations
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND IFNULL(phase, 'prematch') = 'prematch'
+      AND IFNULL(model_version, 'legacy') != ?
+  `
+  ).run(config.modelVersion);
+
+  // 歷史殘留：樣本獨贏低於門檻（37%/43% 這類）一律清除
+  db.prepare(
+    `
+    DELETE FROM recommendations
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND IFNULL(phase, 'prematch') = 'prematch'
+      AND tier = 'sample'
+      AND market = 'h2h'
+      AND model_prob < ?
+  `
+  ).run(minSampleH2h);
+
+  // 滾球縮水盤污染的「初盤」大小：線不在全場合理帶 → 一律刪除重算
+  const npbMin = config.npbTotalsLineMin ?? 6.5;
+  const npbMax = config.npbTotalsLineMax ?? 13;
+  const mlbMin = config.mlbTotalsLineMin ?? 5.5;
+  const mlbMax = config.mlbTotalsLineMax ?? 14;
+  db.prepare(
+    `
+    DELETE FROM recommendations
+    WHERE IFNULL(phase, 'prematch') = 'prematch'
+      AND market = 'totals'
+      AND line IS NOT NULL
+      AND (
+        (league IN ('NPB','KBO') AND (line < ? OR line > ?))
+        OR (league = 'MLB' AND (line < ? OR line > ?))
+      )
+  `
+  ).run(npbMin, npbMax, mlbMin, mlbMax);
+
+  // 樣本層不應出現在使用者初盤列表（僅供內部回測宇宙）
+  db.prepare(
+    `
+    DELETE FROM recommendations
+    WHERE league IN (${BASEBALL_LEAGUE_SQL})
+      AND IFNULL(phase, 'prematch') = 'prematch'
+      AND tier = 'sample'
+  `
+  ).run();
+
   db.prepare('DELETE FROM parlay_recommendations').run();
 }
 
@@ -133,10 +381,16 @@ function saveFeatureSnapshot(analysisRunId, game, analysis) {
     awayInjurySummary: analysis.awayInjurySummary,
     h2hComponents: analysis.h2hComponents,
     totalsProjection: analysis.totalsProjection,
+    // SSOT prior：滾球條件更新只鎖定這組 λ / 純模型勝率
     scoringHomeRuns: analysis.scoringHomeRuns,
     scoringAwayRuns: analysis.scoringAwayRuns,
+    homeRuns: analysis.homeRuns,
+    awayRuns: analysis.awayRuns,
+    rawModelHomeProb: analysis.rawModelHomeProb,
+    homeWinProb: analysis.homeWinProb,
     dataQuality: analysis.dataQuality,
     hasTeamStrength: analysis.hasTeamStrength,
+    modelVersion: config.modelVersion,
   };
   return db.prepare(`
     INSERT INTO feature_snapshots
@@ -259,8 +513,13 @@ function saveRecommendation(rec) {
         odds_decimal: rec.oddsDecimal,
         data_quality: rec.dataQuality,
         pick_rank: rec.pickRank,
+        pick: rec.pick,
+        hasTeamStrength: rec.hasTeamStrength,
       },
-      { pickRank: rec.pickRank }
+      {
+        pickRank: rec.pickRank,
+        hasTeamStrength: rec.hasTeamStrength,
+      }
     );
 
   const recommendationId = db
@@ -312,8 +571,12 @@ function saveRecommendation(rec) {
   return recommendationId;
 }
 
-/** 同步賠率與比分，更新隊伍統計 */
-export async function syncAllData() {
+/**
+ * 同步賠率與比分，更新隊伍統計
+ * @param {{ forceHeavy?: boolean }} [options] forceHeavy=true 時無視 Yahoo/Elo/近窗快取
+ */
+export async function syncAllData(options = {}) {
+  const forceHeavy = options.forceHeavy === true;
   const [oddsData, scoresData] = await Promise.all([
     fetchAllLeagueOdds(),
     fetchAllLeagueScores(),
@@ -386,12 +649,119 @@ export async function syncAllData() {
     }
   }
 
+  const yahooMaxH = config.baseballYahooMaxAgeHours ?? 6;
+  const eloMaxH = config.baseballEloMaxAgeHours ?? 4;
+  const rollingMaxH = config.baseballRollingMaxAgeHours ?? 3;
+
   // NPB：Odds API scores 常為 null → Yahoo 順位表補隊力（免費、不耗 Odds 額度）
+  if (forceHeavy || shouldRebuildHeavy('baseball_yahoo_at', yahooMaxH)) {
+    try {
+      const npbSync = await syncNpbStandingsFromYahoo();
+      setMeta('baseball_yahoo_at', new Date().toISOString());
+      console.log(`[sync] Yahoo NPB 順位 ${npbSync.count} 隊`);
+    } catch (err) {
+      console.warn('[sync] Yahoo NPB 順位失敗:', err.message);
+    }
+  } else {
+    console.log(
+      `[sync] Yahoo NPB 沿用快取（${metaAgeHours('baseball_yahoo_at').toFixed(1)}h 前）`
+    );
+  }
+
+  // NPB/KBO：完賽序重放滾動 Elo（供獨贏 / 泊松 λ）
+  if (forceHeavy || shouldRebuildHeavy('baseball_elo_at', eloMaxH)) {
+    try {
+      const elo = rebuildAllBaseballElo();
+      setMeta('baseball_elo_at', new Date().toISOString());
+      console.log(
+        `[sync] Elo 重建 NPB ${elo.NPB.games}場/${elo.NPB.teams}隊 · KBO ${elo.KBO.games}場/${elo.KBO.teams}隊`
+      );
+    } catch (err) {
+      console.warn('[sync] Elo 重建失敗:', err.message);
+    }
+
+    // NPB/KBO：用 DB 完賽比分補回戰績/得失分（避免只剩 Elo 空殼 → 永遠樣本）
+    try {
+      const npbStats = updateTeamStatsFromDbGames('NPB');
+      const kboStats = updateTeamStatsFromDbGames('KBO');
+      console.log(
+        `[sync] 隊力重建 NPB ${npbStats.games}場/${npbStats.teams}隊 · KBO ${kboStats.games}場/${kboStats.teams}隊`
+      );
+    } catch (err) {
+      console.warn('[sync] 隊力重建失敗:', err.message);
+    }
+  } else {
+    console.log(
+      `[sync] Elo/隊力沿用快取（${metaAgeHours('baseball_elo_at').toFixed(1)}h 前）`
+    );
+    // 輕量：只補隊力數字，不做 Elo 重放
+    try {
+      updateTeamStatsFromDbGames('NPB');
+      updateTeamStatsFromDbGames('KBO');
+    } catch (err) {
+      console.warn('[sync] 隊力輕量更新失敗:', err.message);
+    }
+  }
+
+  // 近窗形態：完賽累積 RPG + MLB OBP/SLG/OPS/WHIP（初盤 λ 輸入）
+  if (forceHeavy || shouldRebuildHeavy('baseball_rolling_at', rollingMaxH)) {
+    try {
+      const rolling = await refreshAllRollingTeamForm();
+      setMeta('baseball_rolling_at', new Date().toISOString());
+      console.log(
+        `[sync] 近窗形態 NPB ${rolling.NPB.teams}隊 · KBO ${rolling.KBO.teams}隊` +
+          ` · MLB OPS ${rolling.MLB_ops?.teams ?? 0}隊` +
+          ` · NPB baseball-data ${rolling.NPB_ops?.teams ?? 0}隊` +
+          ` · KBO 官網 ${rolling.KBO_ops?.teams ?? 0}隊`
+      );
+    } catch (err) {
+      console.warn('[sync] 近窗形態失敗:', err.message);
+    }
+  } else {
+    console.log(
+      `[sync] 近窗形態沿用快取（${metaAgeHours('baseball_rolling_at').toFixed(1)}h 前）`
+    );
+  }
+
+  // Dixon–Coles ρ：24h 內已擬合則重用，避免每次同步重算
   try {
-    const npbSync = await syncNpbStandingsFromYahoo();
-    console.log(`[sync] Yahoo NPB 順位 ${npbSync.count} 隊`);
+    const dcPath = path.join(__analysisDir, '../../data/dixon-coles.json');
+    let reuse = null;
+    if (fs.existsSync(dcPath)) {
+      try {
+        const prev = JSON.parse(fs.readFileSync(dcPath, 'utf8'));
+        const ageH =
+          prev.fittedAt != null
+            ? (Date.now() - Date.parse(prev.fittedAt)) / 3600000
+            : Infinity;
+        if (Number.isFinite(ageH) && ageH < 24) reuse = prev;
+      } catch {
+        /* refit */
+      }
+    }
+    if (reuse?.NPB || reuse?.KBO) {
+      if (reuse.NPB?.rho != null) config.dixonColesRhoNpb = reuse.NPB.rho;
+      if (reuse.KBO?.rho != null) config.dixonColesRhoKbo = reuse.KBO.rho;
+      console.log(
+        `[sync] Dixon–Coles 沿用快取 ρ NPB=${reuse.NPB?.rho} · KBO=${reuse.KBO?.rho}` +
+          `（${reuse.fittedAt || ''}）`
+      );
+    } else {
+      const dc = fitAllDixonColesRho();
+      fs.mkdirSync(path.dirname(dcPath), { recursive: true });
+      fs.writeFileSync(
+        dcPath,
+        JSON.stringify({ ...dc, fittedAt: new Date().toISOString() }, null, 2),
+        'utf8'
+      );
+      if (dc.NPB?.rho != null) config.dixonColesRhoNpb = dc.NPB.rho;
+      if (dc.KBO?.rho != null) config.dixonColesRhoKbo = dc.KBO.rho;
+      console.log(
+        `[sync] Dixon–Coles ρ NPB=${dc.NPB?.rho} (n=${dc.NPB?.n}) · KBO=${dc.KBO?.rho} (n=${dc.KBO?.n})`
+      );
+    }
   } catch (err) {
-    console.warn('[sync] Yahoo NPB 順位失敗:', err.message);
+    console.warn('[sync] Dixon–Coles 擬合失敗:', err.message);
   }
 
   // 記錄 MLB 當日預期場次（用於串關覆蓋率顯示）
@@ -436,7 +806,33 @@ export async function syncAllData() {
 /** 對所有初盤場次跑分析並產生推薦 */
 export async function runAnalysis() {
   clearOldRecommendations();
+  try {
+    const oddsFix = restorePrematchOddsFromSnapshots();
+    if (oddsFix.restored) {
+      console.log(`[analysis] 還原初盤盤口 ${oddsFix.restored}/${oddsFix.games} 場`);
+    }
+  } catch (err) {
+    console.warn('[analysis] 還原初盤盤口失敗:', err.message);
+  }
   const analysisRunId = startAnalysisRun('prematch');
+
+  // 分析前確保隊力可用；近窗若 sync 剛刷過則沿用，避免連打兩次 MLB Stats API
+  try {
+    updateTeamStatsFromDbGames('NPB');
+    updateTeamStatsFromDbGames('KBO');
+    const rollingMaxH = config.baseballRollingMaxAgeHours ?? 3;
+    if (shouldRebuildHeavy('baseball_rolling_at', rollingMaxH)) {
+      await refreshAllRollingTeamForm();
+      setMeta('baseball_rolling_at', new Date().toISOString());
+      console.log('[analysis] 近窗形態已補刷');
+    } else {
+      console.log(
+        `[analysis] 近窗形態沿用快取（${metaAgeHours('baseball_rolling_at').toFixed(1)}h 前）`
+      );
+    }
+  } catch (err) {
+    console.warn('[analysis] 隊力/近窗形態重建失敗:', err.message);
+  }
 
   let mlbStandings = [];
   let mlbSchedule = [];
@@ -448,21 +844,71 @@ export async function runAnalysis() {
   } catch (err) {
     console.warn('MLB 資料取得失敗:', err.message);
   }
+  if (!Array.isArray(mlbStandings)) mlbStandings = [];
+  if (!Array.isArray(mlbSchedule)) mlbSchedule = [];
 
+  // 分析候選：常規窗（未開賽+開賽1h）∪ 展示窗內「尚無現行模型初盤」的已開賽場
+  // （模型升級後要把凍結的舊推薦重算掉，否則重啟也看不到變化）
   const upcoming = db
     .prepare(`
-    SELECT * FROM games
-    WHERE league IN (${BASEBALL_LEAGUE_SQL})
-      AND ${activeGameWhere()}
-      AND datetime(commence_time) > datetime('now')
-    ORDER BY commence_time ASC
+    SELECT * FROM games g
+    WHERE g.league IN (${BASEBALL_LEAGUE_SQL})
+      AND g.raw_odds IS NOT NULL
+      AND length(g.raw_odds) > 10
+      AND (
+        ${prematchAnalyzeGameWhere('g')}
+        OR (
+          ${slateDisplayGameWhere('g')}
+          AND NOT EXISTS (
+            SELECT 1 FROM recommendations r
+            WHERE r.game_id = g.id
+              AND IFNULL(r.phase, 'prematch') = 'prematch'
+              AND IFNULL(r.model_version, 'legacy') = ?
+          )
+        )
+      )
+    ORDER BY g.commence_time ASC
   `)
-    .all();
+    .all(config.modelVersion);
 
   const allRecs = [];
+  const hasCurrentPrematchRec = db.prepare(`
+    SELECT 1 AS ok FROM recommendations
+    WHERE game_id = ?
+      AND IFNULL(phase, 'prematch') = 'prematch'
+      AND IFNULL(model_version, 'legacy') = ?
+    LIMIT 1
+  `);
+
+  // NPB/KBO：開賽前 walk-forward Elo（與回測一致；不可直接用「含本場後」的 team_stats.elo）
+  const eloWalkers = {
+    NPB: createWalkForwardElo('NPB', { seedFromRating: false }),
+    KBO: createWalkForwardElo('KBO', { seedFromRating: false }),
+  };
+  const eloChrono = db
+    .prepare(
+      `
+    SELECT league, home_team, away_team, home_score, away_score, commence_time
+    FROM games
+    WHERE league IN ('NPB','KBO')
+      AND completed = 1
+      AND home_score IS NOT NULL
+      AND away_score IS NOT NULL
+      AND NOT (home_score = 0 AND away_score = 0)
+    ORDER BY datetime(commence_time) ASC
+  `
+    )
+    .all();
+  let eloCursor = 0;
+  const datetimeKey = (t) => String(t || '');
 
   for (const game of upcoming) {
-    const bookmakers = JSON.parse(game.raw_odds || '[]');
+    try {
+    const started = isGameStarted(game.commence_time, game.completed);
+    if (started && hasCurrentPrematchRec.get(game.id, config.modelVersion)) continue;
+
+    // 已開賽：強制用開賽前合理快照，禁止滾球縮水盤重算「初盤」
+    const bookmakers = loadPrematchBookmakers(game);
     if (!bookmakers.length) continue;
 
     let mlbScheduleGame = null;
@@ -478,12 +924,22 @@ export async function runAnalysis() {
       });
     }
 
+    while (eloCursor < eloChrono.length) {
+      const eg = eloChrono[eloCursor];
+      if (datetimeKey(eg.commence_time) >= datetimeKey(game.commence_time)) break;
+      const w = eloWalkers[eg.league];
+      if (w) w.applyGame(eg.home_team, eg.away_team, eg.home_score, eg.away_score);
+      eloCursor += 1;
+    }
+    const eloOverride =
+      game.league === 'NPB' || game.league === 'KBO' ? eloWalkers[game.league] : null;
+
     const analysis = await analyzeMatchup(
       game.league,
       game.home_team,
       game.away_team,
       bookmakers,
-      { mlbStandings, mlbScheduleGame }
+      { mlbStandings, mlbScheduleGame, eloOverride }
     );
     const featureSnapshotId = saveFeatureSnapshot(analysisRunId, game, analysis);
 
@@ -544,7 +1000,17 @@ export async function runAnalysis() {
       );
     }
 
-    for (const pick of picks) {
+    // 重算前清掉該場舊初盤，避免凍結殘留與新結果疊加
+    db.prepare(
+      `
+      DELETE FROM recommendations
+      WHERE game_id = ? AND IFNULL(phase, 'prematch') = 'prematch'
+    `
+    ).run(game.id);
+
+    // 樣本層只進 decisions 回測宇宙，不寫使用者初盤推薦
+    const publishPicks = (picks || []).filter((p) => p.tier && p.tier !== 'sample');
+    for (const pick of publishPicks) {
       const id = saveRecommendation({
         gameId: game.id,
         league: game.league,
@@ -572,10 +1038,14 @@ export async function runAnalysis() {
         suggestedStake: pick.suggestedStake,
         stakeMultiplier: pick.stakeMultiplier,
         betStrategy: pick.bet_strategy,
+        hasTeamStrength: pick.hasTeamStrength ?? analysis?.hasTeamStrength,
         analysisRunId,
         modelVersion: config.modelVersion,
       });
       allRecs.push(buildRecEntry(game, pick, id));
+    }
+    } catch (err) {
+      console.warn(`[analysis] ${game.league} ${game.away_team} @ ${game.home_team} 失敗:`, err.message);
     }
   }
 
@@ -1236,12 +1706,17 @@ export function getAppStatus() {
   };
 }
 
-/** 同步 → 分析，帶防重入鎖 */
-export async function fullRefresh() {
+/**
+ * 同步 → 分析，帶防重入鎖
+ * @param {{ includeLive?: boolean }} [options] includeLive 預設 false（初盤頁不順帶跑滾球）
+ */
+export async function fullRefresh(options = {}) {
   if (refreshPromise) return refreshPromise;
+  const includeLive = options.includeLive === true;
+  const forceHeavy = options.forceHeavy === true;
 
   refreshPromise = (async () => {
-    const sync = await syncAllData();
+    const sync = await syncAllData({ forceHeavy });
     setMeta('last_sync_at', new Date().toISOString());
     if (sync.oddsQuota?.remaining != null) {
       setMeta('odds_quota_remaining', parseInt(sync.oddsQuota.remaining, 10) || 0);
@@ -1253,11 +1728,13 @@ export async function fullRefresh() {
     setMeta('last_analysis_at', new Date().toISOString());
 
     let liveAnalysis = null;
-    try {
-      liveAnalysis = await runLiveAnalysis();
-      setMeta('last_live_analysis_at', new Date().toISOString());
-    } catch (err) {
-      console.warn('[live] 滾球分析失敗:', err.message);
+    if (includeLive) {
+      try {
+        liveAnalysis = await runLiveAnalysis();
+        setMeta('last_live_analysis_at', new Date().toISOString());
+      } catch (err) {
+        console.warn('[live] 滾球分析失敗:', err.message);
+      }
     }
 
     const recommendationCount = db

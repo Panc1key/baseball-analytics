@@ -109,8 +109,9 @@ export function computeActionableScore(candidate, context = {}) {
 
   if (mtype === 'h2h') {
     if (context.preferTotals) {
-      // 只降排序，不刪除有正 EV 的獨贏。
-      bonus -= 2;
+      // 膠著／高分環境：獨贏大幅降權，讓大小能排到主推（洛磯案：只 -2 仍被獨贏佔均注）
+      const park = Number(context.analysis?.parkFactor ?? context.parkFactor ?? 1);
+      bonus -= park >= 1.1 ? 18 : 14;
       signals.push('對壘膠著·壓低獨贏權重');
     } else {
       bonus += 5;

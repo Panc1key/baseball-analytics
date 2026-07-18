@@ -232,12 +232,20 @@ export function estimateCoverProbDetails(winProb, spreadPoint, options = {}) {
     awayRuns,
     bookmakers,
     teamName,
+    rho = 0,
   } = options;
 
   let rawModelProb;
   let pushProb = 0;
   if (homeRuns != null && awayRuns != null) {
-    const dist = poissonCoverDistribution(homeRuns, awayRuns, spreadPoint, pickIsHome);
+    const dist = poissonCoverDistribution(
+      homeRuns,
+      awayRuns,
+      spreadPoint,
+      pickIsHome,
+      undefined,
+      rho
+    );
     pushProb = dist.pushProb;
     const decisiveMass = Math.max(1e-9, dist.winProb + dist.lossProb);
     rawModelProb = dist.winProb / decisiveMass;

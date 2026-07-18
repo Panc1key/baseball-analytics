@@ -1,18 +1,18 @@
 <template>
   <div class="app">
     <header class="header">
-      <div>
-        <h1>初盤分析系統</h1>
-        <p class="subtitle">MLB / NPB / KBO · 足球 · 籃球 · 網球 · 香港時間按日推薦</p>
-        <div v-if="hasApiKey && lastSyncAt" class="status-line">
-          <span>{{ syncStatusText }}</span>
-          <span v-if="oddsQuota != null" class="quota">API 剩餘 {{ oddsQuota }} 次</span>
-        </div>
+      <div class="brand">
+        <h1>初盤分析</h1>
+        <p class="subtitle">{{ headerSubtitle }}</p>
       </div>
-      <div class="actions">
-        <el-tag v-if="!hasApiKey" type="danger">未設定 API Key</el-tag>
+      <div class="header-right">
+        <div v-if="hasApiKey && (lastSyncAt || lastAnalysisAt)" class="status-line">
+          <span v-if="lastAnalysisAt">更新 {{ relativeHk(lastAnalysisAt) }}</span>
+          <span v-if="oddsQuota != null" class="quota">額度 {{ oddsQuota }}</span>
+        </div>
+        <el-tag v-if="!hasApiKey" type="danger" size="small">未設定 API Key</el-tag>
         <el-button type="primary" :loading="refreshing" :disabled="!hasApiKey" @click="handleRefresh">
-          同步並分析
+          {{ refreshButtonLabel }}
         </el-button>
       </div>
     </header>
@@ -23,81 +23,33 @@
       :closable="false"
       show-icon
       title="尚未設定賠率 API"
-      description="1. 複製 backend/.env.example 為 backend/.env　2. 填入 ODDS_API_KEY　3. 重啟後端　4. 點擊「同步並分析」"
+      description="複製 backend/.env.example 為 .env，填入 ODDS_API_KEY 後重啟後端"
       class="setup-alert"
     />
 
-    <StatsCards :items="statItems" />
-
-    <el-tabs v-model="activeTab">
-      <el-tab-pane label="按日推薦" name="slate">
-        <p class="hint">
-          跨聯盟按<strong>香港時間</strong>分組 · 棒球 / 足球 / 籃球 / 網球 · 支援未來 7 天初盤
-        </p>
-        <DailySlatePanel ref="slatePanelRef" :auto-load="false" />
+    <el-tabs v-model="activeTab" class="main-tabs" @tab-change="onTabChange">
+      <el-tab-pane label="棒球" name="baseball">
+        <DailySlatePanel ref="baseballPanelRef" sport="baseball" :auto-load="false" />
+      </el-tab-pane>
+      <el-tab-pane label="籃球" name="basketball">
+        <BasketballPanel ref="basketballPanelRef" />
+      </el-tab-pane>
+      <el-tab-pane label="足球" name="football">
+        <FootballPanel ref="footballPanelRef" />
+      </el-tab-pane>
+      <el-tab-pane label="網球" name="tennis">
+        <TennisPanel ref="tennisPanelRef" />
+      </el-tab-pane>
+      <el-tab-pane label="全部" name="all">
+        <p class="all-hint">跨運動初盤一覽 · 頂部「同步全部」會依序請求棒／籃／足／網</p>
+        <DailySlatePanel ref="allPanelRef" sport="all" :auto-load="false" />
       </el-tab-pane>
 
-      <el-tab-pane label="滾球推薦" name="live">
-        <p class="hint">
-          棒球滾球 v1.3 · 開局凍結 + 對齊初盤 · 請用「同步滾球」更新
-        </p>
+      <el-tab-pane label="滾球" name="live">
         <LivePanel ref="livePanelRef" :auto-load="false" />
       </el-tab-pane>
 
-      <el-tab-pane label="均注精選" name="flat">
-        <div v-if="bettingMeta?.flatBet" class="strategy-banner flat">
-          <strong>{{ bettingMeta.flatBet.label }}</strong>
-          <span>賠率 ≥ {{ bettingMeta.flatBet.minOdds }}</span>
-          <span>勝率 ≥ {{ (bettingMeta.flatBet.minProb * 100).toFixed(0) }}%</span>
-          <span>EV ≥ {{ (bettingMeta.flatBet.minEv * 100).toFixed(0) }}%</span>
-          <span>基準均注 {{ bettingMeta.flatBet.baseUnit }}{{ bettingMeta.flatBet.currency || '元' }}（動態建議）</span>
-          <span class="desc">{{ bettingMeta.flatBet.description }}</span>
-        </div>
-        <div class="filter-bar">
-          <el-radio-group v-model="leagueFilter" size="small" @change="loadFlat">
-            <el-radio-button label="">全部聯盟</el-radio-button>
-            <el-radio-button label="MLB">MLB</el-radio-button>
-            <el-radio-button label="NPB">NPB</el-radio-button>
-            <el-radio-button label="KBO">KBO</el-radio-button>
-          </el-radio-group>
-        </div>
-        <RecommendationsTable
-          :recommendations="flatRecs"
-          :loading="loading"
-          :empty-text="flatEmptyText"
-          sort-hint="依 EV 排序 · 高賠實現價值"
-        />
-      </el-tab-pane>
-
-      <el-tab-pane label="串關錨腿" name="anchors">
-        <div v-if="bettingMeta?.parlayAnchor" class="strategy-banner anchor">
-          <strong>{{ bettingMeta.parlayAnchor.label }}</strong>
-          <span>賠率 {{ bettingMeta.parlayAnchor.minOdds }}～{{ bettingMeta.parlayAnchor.maxOdds }}</span>
-          <span>勝率 ≥ {{ (bettingMeta.parlayAnchor.minProb * 100).toFixed(0) }}%</span>
-          <span>基準 {{ bettingMeta.parlayAnchor.baseUnit }}{{ bettingMeta.parlayAnchor.currency || '元' }} × {{ ((bettingMeta.parlayAnchor.stakeRatio ?? 0.35) * 100).toFixed(0) }}%</span>
-          <span class="desc">{{ bettingMeta.parlayAnchor.description }}</span>
-        </div>
-        <div class="filter-bar">
-          <el-radio-group v-model="leagueFilter" size="small" @change="loadAnchors">
-            <el-radio-button label="">全部聯盟</el-radio-button>
-            <el-radio-button label="MLB">MLB</el-radio-button>
-            <el-radio-button label="NPB">NPB</el-radio-button>
-            <el-radio-button label="KBO">KBO</el-radio-button>
-          </el-radio-group>
-        </div>
-        <RecommendationsTable
-          :recommendations="anchorRecs"
-          :loading="loading"
-          :empty-text="anchorEmptyText"
-          sort-hint="依模型勝率排序 · 低水穩腿"
-          highlight-prob
-        />
-      </el-tab-pane>
-
-      <el-tab-pane label="串關組合" name="parlays">
-        <p class="hint parlay-hint">
-          全場大串：僅含<strong>主推</strong>獨贏/讓分（正 EV、禁大小球）· 缺主推的场次不硬补 · $1 六合彩
-        </p>
+      <el-tab-pane label="串關" name="parlays">
         <ParlayList
           :parlays="parlays"
           :meta="parlayMeta"
@@ -106,35 +58,32 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="API 盤口" name="markets">
-        <div v-if="marketsInfo" class="markets-panel">
-          <el-card v-for="(info, code) in marketsInfo" :key="code" class="market-card" shadow="never">
-            <template #header>
-              <strong>{{ info.name }}</strong>
-              <el-tag size="small" type="info" style="margin-left: 8px">{{ code }}</el-tag>
-            </template>
-            <p class="market-section-title">主盤（一次拉全聯盟）</p>
-            <el-tag v-for="m in info.bulkMarkets" :key="m" size="small" class="market-tag">{{ m }}</el-tag>
-            <template v-if="info.eventMarkets?.length">
-              <p class="market-section-title">球員盤（逐場 event-odds）</p>
-              <el-tag v-for="m in info.eventMarkets" :key="m" size="small" type="success" class="market-tag">{{ m }}</el-tag>
-            </template>
-            <p v-else class="market-note">{{ info.note }}</p>
-          </el-card>
+      <el-tab-pane label="清單" name="lists">
+        <div class="lists-toolbar">
+          <el-radio-group v-model="listMode" size="small" @change="loadListMode">
+            <el-radio-button label="flat">均注精選</el-radio-button>
+            <el-radio-button label="anchor">串關錨腿</el-radio-button>
+          </el-radio-group>
+          <el-radio-group v-model="leagueFilter" size="small" @change="loadListMode">
+            <el-radio-button label="">全部</el-radio-button>
+            <el-radio-button label="MLB">MLB</el-radio-button>
+            <el-radio-button label="NPB">NPB</el-radio-button>
+            <el-radio-button label="KBO">KBO</el-radio-button>
+          </el-radio-group>
         </div>
-        <el-empty v-else description="載入盤口說明中…" />
-      </el-tab-pane>
-
-      <el-tab-pane label="世界盃" name="football">
-        <FootballPanel />
-      </el-tab-pane>
-
-      <el-tab-pane label="籃球" name="basketball">
-        <BasketballPanel />
-      </el-tab-pane>
-
-      <el-tab-pane label="網球" name="tennis">
-        <TennisPanel />
+        <p class="list-hint">
+          {{
+            listMode === 'flat'
+              ? '滿額均注：勝率與賠率門檻較嚴，筆數會少'
+              : '低水錨腿：適合串關，不建議單獨滿額'
+          }}
+        </p>
+        <RecommendationsTable
+          :recommendations="listMode === 'flat' ? flatRecs : anchorRecs"
+          :loading="loading"
+          :empty-text="listMode === 'flat' ? flatEmptyText : anchorEmptyText"
+          :highlight-prob="listMode === 'anchor'"
+        />
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -143,7 +92,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
-import StatsCards from './components/StatsCards.vue';
 import RecommendationsTable from './components/RecommendationsTable.vue';
 import ParlayList from './components/ParlayList.vue';
 import FootballPanel from './components/FootballPanel.vue';
@@ -151,63 +99,109 @@ import BasketballPanel from './components/BasketballPanel.vue';
 import TennisPanel from './components/TennisPanel.vue';
 import DailySlatePanel from './components/DailySlatePanel.vue';
 import LivePanel from './components/LivePanel.vue';
-import { refreshSlate, getRecommendations, getParlays, getStatus, getMarkets } from './api/index.js';
+import {
+  refreshSlate,
+  refreshLive,
+  getRecommendations,
+  getParlays,
+  getStatus,
+} from './api/index.js';
+import { refreshBasketball } from './api/basketball.js';
+import { refreshFootball } from './api/football.js';
+import { refreshTennis } from './api/tennis.js';
 
-const activeTab = ref('slate');
-const slatePanelRef = ref(null);
+const ALL_SPORTS = ['baseball', 'basketball', 'football', 'tennis'];
+
+const activeTab = ref('baseball');
+const baseballPanelRef = ref(null);
+const allPanelRef = ref(null);
+const basketballPanelRef = ref(null);
+const footballPanelRef = ref(null);
+const tennisPanelRef = ref(null);
 const livePanelRef = ref(null);
 const loading = ref(false);
 const refreshing = ref(false);
+
+const headerSubtitle = computed(() => {
+  const map = {
+    baseball: '棒球 MLB / NPB / KBO · 香港時間',
+    basketball: '籃球 NBA / WNBA · 僅同步本頁',
+    football: '足球 · 僅同步本頁',
+    tennis: '網球 ATP / WTA · 僅同步本頁',
+    all: '全部運動 · 同步會請求棒／籃／足／網',
+    live: '滾球分析 · 依附棒球比分',
+    parlays: '棒球串關 · 香港時間',
+    lists: '棒球清單 · 香港時間',
+  };
+  return map[activeTab.value] || '香港時間';
+});
+
+const refreshButtonLabel = computed(() => {
+  const map = {
+    baseball: '同步棒球',
+    basketball: '同步籃球',
+    football: '同步足球',
+    tennis: '同步網球',
+    all: '同步全部',
+    live: '同步滾球',
+    parlays: '同步棒球',
+    lists: '同步棒球',
+  };
+  return map[activeTab.value] || '同步並分析';
+});
+
 const flatRecs = ref([]);
 const anchorRecs = ref([]);
 const parlays = ref([]);
 const parlayMeta = ref(null);
-const bettingMeta = ref(null);
-const marketsInfo = ref(null);
 const hasApiKey = ref(false);
 const leagueFilter = ref('');
+const listMode = ref('flat');
 const lastSyncAt = ref(null);
+const lastAnalysisAt = ref(null);
 const oddsQuota = ref(null);
+const listsLoaded = ref(false);
 
-const statItems = computed(() => {
-  const slateTotal = slatePanelRef.value?.slate?.totalPicks ?? 0;
-  const liveTotal = livePanelRef.value?.recs?.length ?? 0;
-  return [
-    { label: '按日推薦', value: slateTotal, class: 'positive' },
-    { label: '滾球推薦', value: liveTotal, class: liveTotal ? 'positive' : '' },
-    { label: '均注精選', value: flatRecs.value.length, class: 'positive' },
-    { label: '串關錨腿', value: anchorRecs.value.length },
-  ];
-});
+function formatHkTime(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('zh-HK', {
+    timeZone: 'Asia/Hong_Kong',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
 
-const syncStatusText = computed(() => {
-  if (!lastSyncAt.value) return '';
-  const diff = Date.now() - new Date(lastSyncAt.value).getTime();
+function relativeHk(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(diff) || diff < 0) return formatHkTime(iso);
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return '上次同步：剛剛';
-  if (mins < 60) return `上次同步：${mins} 分鐘前`;
+  if (mins < 1) return '剛剛';
+  if (mins < 60) return `${mins} 分鐘前`;
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `上次同步：${hours} 小時前`;
-  return `上次同步：${lastSyncAt.value.slice(0, 16).replace('T', ' ')}`;
-});
+  if (hours < 24) return `${hours} 小時前`;
+  return formatHkTime(iso);
+}
 
 const flatEmptyText = computed(() => {
   if (!hasApiKey.value) return '請先設定 API Key';
-  if (!lastSyncAt.value) return '請點擊「同步並分析」';
-  return '暫無符合均注條件的高賠推薦（賠率≥1.80、正EV）';
+  if (!lastSyncAt.value) return '請點擊「同步棒球」';
+  return '暫無均注精選';
 });
 
 const anchorEmptyText = computed(() => {
   if (!hasApiKey.value) return '請先設定 API Key';
-  if (!lastSyncAt.value) return '請點擊「同步並分析」';
-  return '暫無串關錨腿（需低水 1.55～1.79 且勝率≥58%）';
+  if (!lastSyncAt.value) return '請點擊「同步棒球」';
+  return '暫無串關錨腿';
 });
 
 const parlayEmptyText = computed(() => {
   if (!hasApiKey.value) return '請先設定 API Key';
-  if (!lastSyncAt.value) return '請先點擊「同步並分析」';
-  if (anchorRecs.value.length < 2) return `目前僅 ${anchorRecs.value.length} 條錨腿，需至少 2 條不同場次`;
-  return '暫無錨腿串關組合';
+  if (!lastSyncAt.value) return '請先同步棒球';
+  return '暫無串關組合';
 });
 
 function leagueParams() {
@@ -217,46 +211,51 @@ function leagueParams() {
 function applyStatus(cfg) {
   hasApiKey.value = cfg?.hasApiKey;
   lastSyncAt.value = cfg?.lastSyncAt || null;
+  lastAnalysisAt.value = cfg?.lastAnalysisAt || cfg?.lastSyncAt || null;
   oddsQuota.value = cfg?.oddsQuotaRemaining ?? null;
 }
 
-async function loadFlat() {
-  const res = await getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() });
-  flatRecs.value = res.data || [];
-  if (res.meta) bettingMeta.value = res.meta;
-}
-
-async function loadAnchors() {
-  const res = await getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() });
-  anchorRecs.value = res.data || [];
-  if (res.meta) bettingMeta.value = res.meta;
-}
-
-async function loadAll() {
+async function loadListMode() {
   loading.value = true;
   try {
-    const [flatRes, anchorRes, parRes, statusRes, marketsRes] = await Promise.all([
-      getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() }),
-      getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() }),
-      getParlays(40),
-      getStatus(),
-      getMarkets(),
-    ]);
-    flatRecs.value = flatRes.data || [];
-    anchorRecs.value = anchorRes.data || [];
-    bettingMeta.value = flatRes.meta || anchorRes.meta || null;
+    if (listMode.value === 'flat') {
+      const res = await getRecommendations({ betStrategy: 'flat_bet', ...leagueParams() });
+      flatRecs.value = res.data || [];
+    } else {
+      const res = await getRecommendations({ betStrategy: 'parlay_anchor', ...leagueParams() });
+      anchorRecs.value = res.data || [];
+    }
+    listsLoaded.value = true;
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || err.message || '載入失敗');
+  } finally {
+    loading.value = false;
+  }
+}
+
+function onTabChange(name) {
+  if (name === 'lists' && !listsLoaded.value) loadListMode();
+  if (name === 'live') livePanelRef.value?.loadLive?.();
+  if (name === 'baseball') baseballPanelRef.value?.loadSlate?.();
+  if (name === 'all') allPanelRef.value?.loadSlate?.();
+}
+
+async function loadBaseballViews() {
+  loading.value = true;
+  try {
+    const [parRes, statusRes] = await Promise.all([getParlays(40), getStatus()]);
     parlays.value = parRes.data || [];
     parlayMeta.value = parRes.meta || null;
-    marketsInfo.value = marketsRes.data || null;
     applyStatus(statusRes.data);
-    await slatePanelRef.value?.loadSlate();
-    await livePanelRef.value?.loadLive();
+    await baseballPanelRef.value?.loadSlate?.();
+    if (activeTab.value === 'all') await allPanelRef.value?.loadSlate?.();
+    const slateUpdated = baseballPanelRef.value?.slate?.updatedAt;
+    if (slateUpdated) lastAnalysisAt.value = slateUpdated;
   } catch (err) {
-    const msg = err.response?.data?.error || err.message || '載入失敗';
     if (!err.response) {
       ElMessage.error('無法連接後端（請確認 backend 已啟動在 port 3101）');
     } else {
-      ElMessage.error(msg);
+      ElMessage.error(err.response?.data?.error || err.message || '載入失敗');
     }
   } finally {
     loading.value = false;
@@ -266,59 +265,127 @@ async function loadAll() {
 async function handleRefresh() {
   if (!hasApiKey.value) return;
   refreshing.value = true;
+  const tab = activeTab.value;
   try {
-    const res = await refreshSlate();
-    if (res.partial && res.error) {
-      ElMessage.warning(`部分聯盟同步失敗：${res.error}`);
-    } else {
-      ElMessage.success('全聯盟同步與分析完成');
+    if (tab === 'live') {
+      const res = await refreshLive();
+      if (res?.success === false) {
+        ElMessage.warning(res.error || '滾球同步失敗');
+      } else {
+        ElMessage.success('滾球分析完成');
+      }
+      await livePanelRef.value?.loadLive?.();
+      return;
     }
-    await loadAll();
-    slatePanelRef.value?.loadSlate?.();
+
+    if (tab === 'basketball') {
+      await refreshBasketball();
+      ElMessage.success('籃球同步與分析完成');
+      await basketballPanelRef.value?.loadAll?.();
+      return;
+    }
+
+    if (tab === 'football') {
+      await refreshFootball();
+      ElMessage.success('足球同步與分析完成');
+      await footballPanelRef.value?.loadAll?.();
+      return;
+    }
+
+    if (tab === 'tennis') {
+      await refreshTennis();
+      ElMessage.success('網球同步與分析完成');
+      await tennisPanelRef.value?.loadAll?.();
+      return;
+    }
+
+    const sports = tab === 'all' ? ALL_SPORTS : ['baseball'];
+    const res = await refreshSlate({ sports });
+    if (res.partial && res.error) {
+      ElMessage.warning(`同步失敗：${res.error}`);
+    } else {
+      ElMessage.success(tab === 'all' ? '全部運動同步與分析完成' : '棒球同步與分析完成');
+    }
+
+    listsLoaded.value = false;
+    await loadBaseballViews();
+    if (tab === 'all') {
+      await Promise.all([
+        basketballPanelRef.value?.loadAll?.(),
+        footballPanelRef.value?.loadAll?.(),
+        tennisPanelRef.value?.loadAll?.(),
+        allPanelRef.value?.loadSlate?.(),
+      ]);
+    }
+    if (tab === 'lists') await loadListMode();
+    if (tab === 'parlays') {
+      const p = await getParlays();
+      if (p.success) {
+        parlays.value = p.data || [];
+        parlayMeta.value = p.meta || null;
+      }
+    }
   } catch (err) {
-    const msg = err.code === 'ECONNABORTED'
-      ? '同步逾時（全聯盟需 1～3 分鐘，請稍候或僅同步棒球）'
-      : (err.response?.data?.error || err.message || '同步失敗');
+    const msg =
+      err.code === 'ECONNABORTED'
+        ? '同步逾時（請改在對應運動頁單獨同步）'
+        : err.response?.data?.error || err.message || '同步失敗';
     ElMessage.error(msg);
   } finally {
     refreshing.value = false;
   }
 }
 
-onMounted(loadAll);
+onMounted(loadBaseballViews);
 </script>
 
 <style>
 * { box-sizing: border-box; }
-body { margin: 0; background: #f5f7fa; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-.app { max-width: 1400px; margin: 0 auto; padding: 20px; }
-.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
-.header h1 { margin: 0 0 4px; font-size: 24px; }
-.subtitle { margin: 0 0 8px; color: #909399; font-size: 14px; }
-.status-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; color: #606266; }
-.quota { color: #909399; }
-.actions { display: flex; gap: 12px; align-items: center; }
-.filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
-.hint { font-size: 13px; color: #909399; margin: 0 0 12px; }
-.parlay-hint { margin-bottom: 12px; }
-.strategy-banner {
+body {
+  margin: 0;
+  background: #f0f2f5;
+  font-family: "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  color: #1f2329;
+}
+.app { max-width: 1100px; margin: 0 auto; padding: 16px 16px 40px; }
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e6eb;
+}
+.brand h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.subtitle { margin: 4px 0 0; color: #86909c; font-size: 13px; }
+.header-right { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.status-line {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border-radius: 6px;
-  margin-bottom: 12px;
-  font-size: 13px;
+  gap: 8px;
+  font-size: 12px;
+  color: #4e5969;
 }
-.strategy-banner.flat { background: #ecf5ff; border: 1px solid #d9ecff; color: #303133; }
-.strategy-banner.anchor { background: #f0f9eb; border: 1px solid #e1f3d8; color: #303133; }
-.strategy-banner .desc { color: #909399; flex-basis: 100%; margin-top: 2px; }
-.markets-panel { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-.market-card :deep(.el-card__header) { padding: 12px 16px; }
-.market-section-title { font-size: 13px; color: #606266; margin: 12px 0 8px; }
-.market-section-title:first-of-type { margin-top: 0; }
-.market-tag { margin: 0 8px 8px 0; }
-.market-note { font-size: 13px; color: #909399; margin: 8px 0 0; }
-.setup-alert { margin-bottom: 16px; }
+.quota { color: #86909c; }
+.setup-alert { margin-bottom: 12px; }
+.all-hint { margin: 0 0 10px; font-size: 12px; color: #86909c; }
+.main-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
+.main-tabs :deep(.el-tabs__item) { font-size: 14px; padding: 0 14px; }
+.lists-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.list-hint { margin: 0 0 10px; font-size: 12px; color: #86909c; }
+@media (max-width: 640px) {
+  .header { flex-direction: column; align-items: flex-start; }
+  .app { padding: 12px; }
+}
 </style>

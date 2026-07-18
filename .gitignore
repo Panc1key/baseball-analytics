@@ -3,6 +3,7 @@ dist/
 .env
 backend/data/*.db
 backend/data/*.db-*
+backend/tmp-*.js
 *.log
 .DS_Store
 .cursor/

@@ -7,9 +7,17 @@ export async function refreshData() {
   return data;
 }
 
-/** 跨聯盟同步（棒球 + 足球 + 籃球 + 網球）；全量同步常需 1～3 分鐘 */
-export async function refreshSlate() {
-  const { data } = await api.post('/slate/refresh', null, { timeout: 180000 });
+/**
+ * 按運動同步（預設由後端 config；前端應傳當前頁面範圍）
+ * @param {{ sports?: string[] }} [opts] 例：{ sports: ['baseball'] }
+ */
+export async function refreshSlate(opts = {}) {
+  const body = opts.sports?.length ? { sports: opts.sports } : {};
+  // 單運動約 3 分鐘；「全部」四運動放寬
+  const many = (opts.sports?.length || 0) >= 3;
+  const { data } = await api.post('/slate/refresh', body, {
+    timeout: many ? 420000 : 180000,
+  });
   return data;
 }
 

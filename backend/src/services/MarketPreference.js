@@ -29,8 +29,13 @@ export function assessMarketPreference(analysis, game = {}, live = null) {
   const leagueRpg = leagueExpectedRpg(game.league);
   const homeRuns = analysis?.scoringHomeRuns ?? analysis?.homeRuns;
   const awayRuns = analysis?.scoringAwayRuns ?? analysis?.awayRuns;
+  // 滾球優先用條件更新後的預期總分（與剩餘 λ SSOT 一致）
   const projected =
-    homeRuns != null && awayRuns != null ? Number(homeRuns) + Number(awayRuns) : null;
+    live?.expectedFinalTotal != null
+      ? Number(live.expectedFinalTotal)
+      : homeRuns != null && awayRuns != null
+        ? Number(homeRuns) + Number(awayRuns)
+        : null;
 
   const bothStrongOffense =
     homeRuns != null &&

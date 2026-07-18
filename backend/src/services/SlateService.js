@@ -6,7 +6,11 @@ import { config, BASEBALL_LEAGUE_SQL, LEAGUES } from '../config.js';
 import { FOOTBALL_LEAGUES, FOOTBALL_LEAGUE_CODES } from '../football/config.js';
 import { BASKETBALL_LEAGUES, BASKETBALL_LEAGUE_CODES } from '../basketball/config.js';
 import { TENNIS_LEAGUE_SQL, isTennisLeagueCode } from '../tennis/config.js';
-import { activeGameWhere, isGameStarted } from '../utils/activeGames.js';
+import {
+  activeGameWhere,
+  slateDisplayGameWhere,
+  isGameStarted,
+} from '../utils/activeGames.js';
 import { classifyBetStrategy } from './BetStrategy.js';
 import { enrichWithSuggestedStake } from './StakeSizer.js';
 import { getBettingStrategyMeta } from './AnalysisEngine.js';
@@ -53,6 +57,17 @@ function sportCategory(league) {
   return 'other';
 }
 
+/** @returns {string|null} SQL fragment on `league` column, or null = 全部運動 */
+function sportLeaguePredicate(sport, column = 'league') {
+  const s = String(sport || '').toLowerCase().trim();
+  if (!s || s === 'all') return null;
+  if (s === 'baseball') return `${column} IN (${BASEBALL_LEAGUE_SQL})`;
+  if (s === 'football') return `${column} IN (${FOOTBALL_LEAGUE_SQL})`;
+  if (s === 'basketball') return `${column} IN (${BASKETBALL_LEAGUE_SQL})`;
+  if (s === 'tennis') return TENNIS_LEAGUE_SQL.replace(/\bleague\b/g, column);
+  return null;
+}
+
 function enrichRow(r) {
   const base = {
     ...r,
@@ -93,12 +108,14 @@ export function querySlatePicks(filters = {}) {
     toDate,
     betStrategy,
     league,
+    sport,
     minEv = 0,
     tier,
     marketGroup,
   } = filters;
 
   const localDateExpr = sqliteLocalDateExpr('g.commence_time', 8);
+  const sportPred = sportLeaguePredicate(sport, 'r.league');
   let sql = `
     SELECT r.*, g.home_team, g.away_team, g.commence_time, g.completed
     FROM recommendations r
@@ -107,10 +124,13 @@ export function querySlatePicks(filters = {}) {
       AND IFNULL(r.phase, 'prematch') = 'prematch'
       AND r.ev >= ?
       AND g.completed = 0
-      AND ${activeGameWhere('g')}
+      AND ${slateDisplayGameWhere('g')}
   `;
   const params = [minEv];
 
+  if (sportPred) {
+    sql += ` AND (${sportPred})`;
+  }
   if (fromDate) {
     sql += ` AND ${localDateExpr} >= ?`;
     params.push(fromDate);
@@ -142,7 +162,7 @@ export function querySlatePicks(filters = {}) {
   return db.prepare(sql).all(...params).map(enrichRow);
 }
 
-function summarizeDay(picks) {
+function summarizeDay(picks, gameCount = null) {
   const byLeague = {};
   const bySport = { baseball: 0, football: 0, basketball: 0, tennis: 0, other: 0 };
   let totalSuggestedStake = 0;
@@ -157,14 +177,176 @@ function summarizeDay(picks) {
     if (p.bet_strategy === 'parlay_anchor') anchorCount += 1;
   }
 
+  const uniqueGames = gameCount ?? new Set(picks.map((p) => p.game_id)).size;
+
   return {
     count: picks.length,
+    gameCount: uniqueGames,
     byLeague,
     bySport,
     flatCount,
     anchorCount,
     totalSuggestedStake: Math.round(totalSuggestedStake),
   };
+}
+
+function matchupKey(p) {
+  return [
+    p.league,
+    p.local_date || '',
+    p.away_team || '',
+    p.home_team || '',
+  ].join('|');
+}
+
+function pickDedupeKey(p) {
+  return [p.market, p.pick, p.line ?? ''].join('|');
+}
+
+/**
+ * 同場多盤口合併；同對戰不同 game_id 也合併，避免列表看起來像很多場
+ */
+export function groupPicksByGame(picks) {
+  const byMatchup = new Map();
+  for (const p of picks) {
+    const key = matchupKey(p);
+    if (!byMatchup.has(key)) byMatchup.set(key, []);
+    byMatchup.get(key).push(p);
+  }
+
+  const groups = [];
+  for (const bucket of byMatchup.values()) {
+    const byPick = new Map();
+    for (const p of bucket) {
+      const dk = pickDedupeKey(p);
+      const prev = byPick.get(dk);
+      if (
+        !prev ||
+        (p.ev ?? 0) > (prev.ev ?? 0) ||
+        ((p.ev ?? 0) === (prev.ev ?? 0) &&
+          (p.actionable_score ?? 0) > (prev.actionable_score ?? 0))
+      ) {
+        byPick.set(dk, p);
+      }
+    }
+    const merged = [...byPick.values()].sort(
+      (a, b) =>
+        (a.pick_rank ?? 99) - (b.pick_rank ?? 99) ||
+        (b.actionable_score ?? 0) - (a.actionable_score ?? 0) ||
+        (b.ev ?? 0) - (a.ev ?? 0)
+    );
+    const head = merged[0];
+    if (!head) continue;
+    groups.push({
+      game_id: head.game_id,
+      league: head.league,
+      league_name: head.league_name,
+      sport_category: head.sport_category,
+      home_team: head.home_team,
+      away_team: head.away_team,
+      commence_time: head.commence_time,
+      local_date: head.local_date,
+      local_time: head.local_time,
+      is_started: head.is_started,
+      is_live: head.is_live,
+      pickCount: merged.length,
+      picks: merged,
+    });
+  }
+
+  groups.sort(
+    (a, b) =>
+      String(a.commence_time).localeCompare(String(b.commence_time)) ||
+      String(a.away_team).localeCompare(String(b.away_team))
+  );
+  return groups;
+}
+
+function readMeta(key) {
+  const row = db.prepare('SELECT value FROM app_meta WHERE key = ?').get(key);
+  return row?.value ?? null;
+}
+
+function writeMeta(key, value) {
+  db.prepare(`
+    INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `).run(key, String(value));
+}
+
+function collectUpdateTimes() {
+  const keys = [
+    ['slate', 'slate_last_refresh_at'],
+    ['baseballSync', 'last_sync_at'],
+    ['baseballAnalysis', 'last_analysis_at'],
+    ['footballAnalysis', 'football_last_analysis_at'],
+    ['basketballAnalysis', 'basketball_last_analysis_at'],
+    ['tennisAnalysis', 'tennis_last_analysis_at'],
+  ];
+  const times = {};
+  let latest = null;
+  for (const [name, key] of keys) {
+    const v = readMeta(key);
+    times[name] = v;
+    if (v && (!latest || v > latest)) latest = v;
+  }
+  return { ...times, latest };
+}
+
+/** 有盤口但可能尚無推薦的場次（避免列表空白） */
+function querySlateShellGames({ fromDate, toDate, sport }) {
+  const localDateExpr = sqliteLocalDateExpr('g.commence_time', 8);
+  const sportPred = sportLeaguePredicate(sport, 'g.league');
+  const sportClause = sportPred ? ` AND (${sportPred})` : '';
+  return db
+    .prepare(
+      `
+    SELECT g.id as game_id, g.league, g.home_team, g.away_team, g.commence_time, g.completed
+    FROM games g
+    WHERE ${ALL_SLATE_LEAGUE_PRED.replace(/\bleague\b/g, 'g.league')}
+      AND g.completed = 0
+      AND ${slateDisplayGameWhere('g')}
+      AND g.raw_odds IS NOT NULL
+      AND length(g.raw_odds) > 10
+      AND ${localDateExpr} >= ?
+      AND ${localDateExpr} <= ?
+      ${sportClause}
+    ORDER BY g.commence_time ASC
+  `
+    )
+    .all(fromDate, toDate)
+    .map((g) => ({
+      game_id: g.game_id,
+      league: g.league,
+      league_name: LEAGUE_DISPLAY_NAMES[g.league] || g.league,
+      sport_category: sportCategory(g.league),
+      home_team: g.home_team,
+      away_team: g.away_team,
+      commence_time: g.commence_time,
+      local_date: toLocalDateKey(g.commence_time),
+      local_time: formatLocalTime(g.commence_time),
+      is_started: isGameStarted(g.commence_time, g.completed),
+      is_live: false,
+      pickCount: 0,
+      picks: [],
+      no_picks: true,
+    }));
+}
+
+function mergeShellGames(gamesWithPicks, shellGames) {
+  const seen = new Set(gamesWithPicks.map((g) => matchupKey(g)));
+  const extra = [];
+  for (const g of shellGames) {
+    const key = matchupKey(g);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extra.push(g);
+  }
+  return [...gamesWithPicks, ...extra].sort(
+    (a, b) =>
+      String(a.commence_time).localeCompare(String(b.commence_time)) ||
+      String(a.away_team).localeCompare(String(b.away_team))
+  );
 }
 
 /**
@@ -180,6 +362,9 @@ export function getSlateByDate(filters = {}) {
     fromDate,
     toDate,
   });
+  const shellGames = filters.betStrategy
+    ? []
+    : querySlateShellGames({ fromDate, toDate, sport: filters.sport });
 
   const byDate = new Map();
   for (const p of picks) {
@@ -189,21 +374,38 @@ export function getSlateByDate(filters = {}) {
     byDate.get(key).push(p);
   }
 
+  const shellByDate = new Map();
+  for (const g of shellGames) {
+    const key = g.local_date;
+    if (!key) continue;
+    if (!shellByDate.has(key)) shellByDate.set(key, []);
+    shellByDate.get(key).push(g);
+  }
+
   const dates = [];
   let cursor = fromDate;
+  let totalGames = 0;
   while (cursor <= toDate) {
     const dayPicks = byDate.get(cursor) || [];
+    const games = mergeShellGames(
+      groupPicksByGame(dayPicks),
+      shellByDate.get(cursor) || []
+    );
+    totalGames += games.length;
     dates.push({
       date: cursor,
       label: formatLocalDateLabel(cursor),
       isToday: cursor === todayLocalDateKey(),
       picks: dayPicks,
-      summary: summarizeDay(dayPicks),
+      games,
+      summary: summarizeDay(dayPicks, games.length),
     });
     cursor = addDaysToDateKey(cursor, 1);
   }
 
-  const allSummary = summarizeDay(picks);
+  const allGames = mergeShellGames(groupPicksByGame(picks), shellGames);
+  const allSummary = summarizeDay(picks, allGames.length);
+  const updated = collectUpdateTimes();
 
   return {
     timezone: HK_TIMEZONE,
@@ -211,7 +413,11 @@ export function getSlateByDate(filters = {}) {
     to: toDate,
     dates,
     totalPicks: picks.length,
+    totalGames: allGames.length || totalGames,
     summary: allSummary,
+    updatedAt: updated.latest,
+    updateTimes: updated,
+    note: '美職晚場在香港時間常落在「明天」；已開賽 1 小時內仍會顯示／補算初盤。',
     enabledLeagues: {
       baseball: Object.keys(LEAGUES),
       football: FOOTBALL_LEAGUE_CODES,
@@ -228,7 +434,7 @@ export function getSlateByDate(filters = {}) {
   };
 }
 
-/** 同步並分析所有已啟用聯盟（可依 config.slateRefreshSports 只跑部分運動） */
+/** 同步並分析（可指定 sports；未指定則用 config.slateRefreshSports） */
 async function runSlateModule(name, fn) {
   try {
     return await fn();
@@ -238,12 +444,33 @@ async function runSlateModule(name, fn) {
   }
 }
 
-export async function slateFullRefresh() {
-  const modules = new Set(config.slateRefreshSports);
-  const result = { skipped: [], errors: [] };
+const VALID_SLATE_SPORTS = new Set(['baseball', 'football', 'basketball', 'tennis', 'live']);
 
-  if (modules.has('baseball')) {
-    const baseball = await runSlateModule('baseball', fullRefresh);
+/**
+ * @param {{ sports?: string[] }} [options]
+ * sports 例：['baseball'] — 只跑棒球初盤；含 'live' 時棒球模組一併跑滾球
+ */
+export async function slateFullRefresh(options = {}) {
+  const requested = Array.isArray(options.sports)
+    ? options.sports.map((s) => String(s).toLowerCase().trim()).filter(Boolean)
+    : null;
+  const modules = new Set(
+    (requested?.length ? requested : config.slateRefreshSports).filter((s) =>
+      VALID_SLATE_SPORTS.has(s)
+    )
+  );
+  // live 依附棒球資料；單獨要求 live 時仍要能跑滾球分析
+  const wantLive = modules.has('live');
+  const wantBaseball = modules.has('baseball') || wantLive;
+  const result = { skipped: [], errors: [], sports: [...modules] };
+
+  console.log(`[slate] 本次同步範圍: ${[...modules].join(', ') || '(空)'}`);
+
+  if (wantBaseball) {
+    // 今日推薦只要初盤；滾球頁傳 sports=['live'] 才附帶滾球分析
+    const baseball = await runSlateModule('baseball', () =>
+      fullRefresh({ includeLive: wantLive })
+    );
     if (baseball?.error) result.errors.push({ sport: 'baseball', message: baseball.error });
     result.baseball = baseball;
   } else {
@@ -272,11 +499,14 @@ export async function slateFullRefresh() {
   }
 
   if (result.skipped.length) {
-    console.log(`[slate] 略過同步: ${result.skipped.join(', ')}（SLATE_REFRESH_SPORTS）`);
+    console.log(`[slate] 略過: ${result.skipped.join(', ')}`);
   }
+
+  writeMeta('slate_last_refresh_at', new Date().toISOString());
 
   return {
     ...result,
+    updatedAt: readMeta('slate_last_refresh_at'),
     totalRecommendations:
       (result.baseball?.recommendationCount ?? 0) +
       (result.football?.analysis?.recommendations ?? 0) +
@@ -305,10 +535,14 @@ export function getSlateStatus() {
     )
     .all();
 
+  const updated = collectUpdateTimes();
+
   return {
     timezone: HK_TIMEZONE,
     horizonHours: config.upcomingGameHorizonHours,
     slateDays: config.slateDefaultDays,
+    updatedAt: updated.latest,
+    updateTimes: updated,
     gamesByLeague: Object.fromEntries(gameCounts.map((r) => [r.league, r.cnt])),
     recsByLeague: Object.fromEntries(recCounts.map((r) => [r.league, r.cnt])),
     enabledLeagues: {

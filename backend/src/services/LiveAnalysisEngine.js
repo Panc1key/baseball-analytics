@@ -1,9 +1,8 @@
 /**
- * 滾球分析引擎 v1.3
- * - 初盤 prior + 比分條件更新
- * - LiveDiscipline 硬閘（開局/0-0/平手凍結、市場衝突、<65% 禁強推）
- * - 對齊初盤立場：早段禁止翻案推出初盤已拒絕方向
- * - 膠著硬切獨贏；禁止對沖；無比分不推薦
+ * 滾球分析引擎 v1.4（SSOT）
+ * - 鎖定初盤 feature_snapshot 的 λ prior，再用比分做條件更新
+ * - 無 snapshot 時才退回當輪 analyzeMatchup 的 λ
+ * - LiveDiscipline 硬閘；早段對齊初盤立場
  */
 
 import db from '../db/database.js';
@@ -49,6 +48,47 @@ import {
   fetchAllLeagueOdds,
   fetchAllLeagueScores,
 } from './OddsApiClient.js';
+
+/** 讀取初盤凍結的 λ / 純模型勝率（SSOT prior） */
+export function loadPrematchLambdaPrior(gameId) {
+  const row = db
+    .prepare(
+      `
+    SELECT features_json, created_at
+    FROM feature_snapshots
+    WHERE game_id = ?
+    ORDER BY datetime(created_at) DESC
+    LIMIT 1
+  `
+    )
+    .get(gameId);
+  if (!row?.features_json) return null;
+  try {
+    const f = JSON.parse(row.features_json);
+    const home =
+      f.scoringHomeRuns ?? f.totalsProjection?.probabilityHomeRuns ?? f.homeRuns;
+    const away =
+      f.scoringAwayRuns ?? f.totalsProjection?.probabilityAwayRuns ?? f.awayRuns;
+    if (home == null || away == null) return null;
+    const priorHomeWin =
+      f.rawModelHomeProb ??
+      f.h2hComponents?.rawModelHomeProb ??
+      f.homeWinProb ??
+      null;
+    return {
+      homeRunsPrior: Number(home),
+      awayRunsPrior: Number(away),
+      priorHomeWin:
+        priorHomeWin != null && Number.isFinite(Number(priorHomeWin))
+          ? Number(priorHomeWin)
+          : null,
+      source: 'feature_snapshot',
+      createdAt: row.created_at,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function clearLiveRecommendations() {
   db.prepare(
@@ -497,6 +537,8 @@ export async function runLiveAnalysis() {
   } catch (err) {
     console.warn('[live] MLB 資料失敗:', err.message);
   }
+  if (!Array.isArray(mlbStandings)) mlbStandings = [];
+  if (!Array.isArray(mlbSchedule)) mlbSchedule = [];
 
   let yahooNpbScores = [];
   try {
@@ -601,21 +643,34 @@ export async function runLiveAnalysis() {
       (homeScore != null && awayScore != null && !Number.isNaN(Number(homeScore))) ||
       parsed.hasScore;
 
+    // SSOT：優先鎖定初盤 snapshot λ，避免滾球盤口重估 prior
+    const lockedPrior = loadPrematchLambdaPrior(game.id);
     const leagueAvgRuns = game.league === 'NPB' || game.league === 'KBO' ? 4.0 : 4.5;
-    const priorHome =
-      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.homeRuns : leagueAvgRuns;
-    const priorAway =
-      analysis.homeRuns != null && analysis.awayRuns != null ? analysis.awayRuns : leagueAvgRuns;
+    const fallbackHome =
+      analysis.scoringHomeRuns ??
+      (analysis.homeRuns != null ? analysis.homeRuns : leagueAvgRuns);
+    const fallbackAway =
+      analysis.scoringAwayRuns ??
+      (analysis.awayRuns != null ? analysis.awayRuns : leagueAvgRuns);
+    const homeRunsPrior = lockedPrior?.homeRunsPrior ?? fallbackHome;
+    const awayRunsPrior = lockedPrior?.awayRunsPrior ?? fallbackAway;
+    const priorHomeWin =
+      lockedPrior?.priorHomeWin ??
+      analysis.rawModelHomeProb ??
+      analysis.homeWinProb ??
+      0.5;
 
     const live = projectLiveState({
       commenceTime: game.commence_time,
       homeScore: Number(homeScore) || 0,
       awayScore: Number(awayScore) || 0,
-      homeRunsPrior: analysis.scoringHomeRuns ?? priorHome,
-      awayRunsPrior: analysis.scoringAwayRuns ?? priorAway,
-      priorHomeWin: analysis.homeWinProb ?? 0.5,
+      homeRunsPrior,
+      awayRunsPrior,
+      priorHomeWin,
       linescore,
     });
+    live.priorSource = lockedPrior?.source || 'live_reanalyze';
+    live.priorLocked = Boolean(lockedPrior);
 
     const markets = extractMarkets(bookmakers);
     if (!hasScore) {

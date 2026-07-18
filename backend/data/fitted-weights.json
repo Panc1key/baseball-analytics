@@ -1,0 +1,12 @@
+{
+  "h2hMarketBlendNpbFull": 0.48,
+  "scoreModelBlendNpb": 0.55,
+  "totalsMarketBlendNpbFull": 0.5,
+  "n": 214,
+  "brier": 0.23896526923342154,
+  "logLoss": 0.6706090328009002,
+  "fittedAt": "2026-07-17T10:02:07.237Z",
+  "days": 45,
+  "objective": "min_brier_home_win",
+  "gridSize": 75
+}

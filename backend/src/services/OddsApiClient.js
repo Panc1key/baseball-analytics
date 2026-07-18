@@ -88,6 +88,22 @@ export class OddsApiClient {
     });
   }
 
+  /** 付費方案：指定時間點的聯盟盤口快照（成本 10 × markets × regions） */
+  async getHistoricalOdds(leagueKey, dateIso, options = {}) {
+    const {
+      regions = 'us',
+      markets = 'h2h,spreads,totals',
+      oddsFormat = 'decimal',
+    } = options;
+
+    return this.request(`/historical/sports/${leagueKey}/odds`, {
+      regions,
+      markets,
+      oddsFormat,
+      date: dateIso,
+    });
+  }
+
   async listSports({ all = false } = {}) {
     return this.request('/sports', { all: all ? 'true' : 'false' });
   }

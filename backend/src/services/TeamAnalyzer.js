@@ -33,6 +33,72 @@ function teamStatsUpsertStmt() {
 }
 
 /**
+ * 從 DB 完賽場次重建 NPB/KBO 戰績與得失分（不依賴 Odds API 近期窗口）
+ * Elo 重建只寫 elo，不會補 wins/runs；此函式補上隊力判定所需欄位。
+ */
+export function updateTeamStatsFromDbGames(league) {
+  if (league !== 'NPB' && league !== 'KBO') return { league, teams: 0, games: 0 };
+
+  const rows = db
+    .prepare(
+      `
+    SELECT home_team, away_team, home_score, away_score, commence_time
+    FROM games
+    WHERE league = ?
+      AND completed = 1
+      AND home_score IS NOT NULL
+      AND away_score IS NOT NULL
+      AND NOT (home_score = 0 AND away_score = 0)
+    ORDER BY datetime(commence_time) ASC
+  `
+    )
+    .all(league);
+
+  const teamGames = {};
+  for (const g of rows) {
+    const homeScore = Number(g.home_score);
+    const awayScore = Number(g.away_score);
+    if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) continue;
+    const homeWon = homeScore > awayScore;
+    for (const [team, won, gf, ga] of [
+      [g.home_team, homeWon, homeScore, awayScore],
+      [g.away_team, !homeWon, awayScore, homeScore],
+    ]) {
+      if (!teamGames[team]) teamGames[team] = [];
+      teamGames[team].push({ won, gf, ga, date: g.commence_time });
+    }
+  }
+
+  const upsert = teamStatsUpsertStmt();
+  const tx = db.transaction(() => {
+    for (const [team, games] of Object.entries(teamGames)) {
+      games.sort((a, b) => new Date(b.date) - new Date(a.date));
+      const wins = games.filter((x) => x.won).length;
+      const losses = games.length - wins;
+      const last10 = games.slice(0, 10);
+      const l10w = last10.filter((x) => x.won).length;
+      const l10l = last10.length - l10w;
+      const rs = games.reduce((s, x) => s + (x.gf || 0), 0);
+      const ra = games.reduce((s, x) => s + (x.ga || 0), 0);
+      const rating = games.length > 0 ? wins / games.length : 0.5;
+      upsert.run({
+        league,
+        team_name: team,
+        wins,
+        losses,
+        l10w,
+        l10l,
+        rating,
+        rs,
+        ra,
+      });
+    }
+  });
+  tx();
+  return { league, teams: Object.keys(teamGames).length, games: rows.length };
+}
+
+/**
  * 從比分歷史更新 NPB/KBO 隊伍近期狀態 (Odds API scores fallback)
  */
 export function updateTeamStatsFromScores(league, scores) {
@@ -141,7 +207,10 @@ export function getTeamStats(league, teamName) {
  * 綜合分析：MLB 用 MatchupCore（情境/EV）+ H2hModel/Poisson（校準勝率）
  */
 export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, options = {}) {
-  const { mlbStandings = [], mlbScheduleGame = null } = options;
+  // 顯式傳 null（例如 standings API 失敗）時不可用預設 []，需正規化
+  const mlbStandings = Array.isArray(options.mlbStandings) ? options.mlbStandings : [];
+  const mlbScheduleGame = options.mlbScheduleGame ?? null;
+  const eloOverride = options.eloOverride ?? null;
 
   let homeMlb = null;
   let awayMlb = null;
@@ -195,8 +264,12 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     }
   }
 
-  const homeStatsRow = league !== 'MLB' ? getTeamStats(league, homeTeam) : null;
-  const awayStatsRow = league !== 'MLB' ? getTeamStats(league, awayTeam) : null;
+  // MLB 也讀 team_stats：近窗 OPS/WHIP/RPG；NPB/KBO 另含戰績與 Elo
+  // 回測可傳 teamStatsOverride（開賽前 point-in-time，防洩漏）
+  const homeStatsRow =
+    options.teamStatsOverride?.[homeTeam] ?? getTeamStats(league, homeTeam);
+  const awayStatsRow =
+    options.teamStatsOverride?.[awayTeam] ?? getTeamStats(league, awayTeam);
   const strength = resolveNpbTeamStrength(homeStatsRow, awayStatsRow, league);
   const hasNpbStrength = strength.hasStrength;
 
@@ -210,12 +283,14 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     bookmakers,
     homeTeamStats: homeStatsRow,
     awayTeamStats: awayStatsRow,
+    eloOverride,
   });
 
   let matchupCore = null;
   let h2h;
 
   if (league === 'MLB') {
+    // MatchupCore 只保留情境/熱門陷阱標籤；勝率 SSOT 一律以 H2h(泊松λ) 覆寫
     const situationCore = buildMatchupAnalysis({
       league,
       homeTeam,
@@ -246,7 +321,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       homeFallbackRating,
       awayFallbackRating,
       venueName,
-      // 三盤口統一使用市場校準後的 scoring lambda。
+      // 三盤口統一使用市場校準後的 scoring lambda（SSOT）
       homeRuns: totalsProjection.probabilityHomeRuns,
       awayRuns: totalsProjection.probabilityAwayRuns,
     });
@@ -277,6 +352,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       homeRuns: totalsProjection.probabilityHomeRuns,
       awayRuns: totalsProjection.probabilityAwayRuns,
       hasNpbStrength,
+      eloOverride,
     });
   }
 
@@ -284,7 +360,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
   const totalsFactors = totalsProjection.factors.filter((f) => !coreFactors.some((c) => c === f));
 
   let dataQuality = matchupCore?.dataQuality ?? totalsProjection.dataQuality ?? 0.35;
-  if (league === 'NPB') {
+  if (league === 'NPB' || league === 'KBO') {
     dataQuality = hasNpbStrength ? Math.max(dataQuality, 0.72) : Math.min(dataQuality, 0.4);
   }
 
@@ -318,6 +394,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     homeInjurySummary,
     awayInjurySummary,
     venueName,
+    parkFactor: totalsProjection.parkFactor ?? 1,
     totalsProjection,
     projectedTotal: totalsProjection.finalTotal,
     matchupCore,

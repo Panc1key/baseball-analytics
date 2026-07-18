@@ -1,7 +1,13 @@
 <template>
   <div>
     <p v-if="sortHint" class="sort-hint">{{ sortHint }}</p>
-    <el-table :data="recommendations" stripe v-loading="loading" :empty-text="emptyText">
+    <el-table
+      :data="displayRows"
+      stripe
+      v-loading="loading"
+      :empty-text="emptyText"
+      :span-method="spanMethod"
+    >
     <el-table-column label="序位" width="72" fixed="left">
       <template #default="{ row }">
         <el-tag v-if="row.rank_label" :type="row.pick_rank === 1 ? 'success' : 'info'" size="small">
@@ -22,6 +28,7 @@
           <el-tag v-if="row.is_live" type="danger" size="small" effect="plain" class="live-tag">滾球</el-tag>
           <el-tag v-else-if="row.is_started" type="warning" size="small" effect="plain" class="live-tag">進行中</el-tag>
           {{ formatTime(row.commence_time) }}
+          <span v-if="row._groupSize > 1" class="group-n"> · {{ row._groupSize }} 盤</span>
         </div>
       </template>
     </el-table-column>
@@ -80,16 +87,55 @@
 </template>
 
 <script setup>
+import { computed } from 'vue';
 import { marketLabel, tierLabel } from '../utils/market.js';
 import { formatMatchup, leagueLabel, translatePick, translateReasoning, bookmakerLabel } from '../utils/teams.js';
 
-defineProps({
+const props = defineProps({
   recommendations: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   emptyText: { type: String, default: '尚無推薦' },
   sortHint: { type: String, default: '' },
   highlightProb: { type: Boolean, default: false },
 });
+
+function matchupKey(row) {
+  const day = row.commence_time ? String(row.commence_time).slice(0, 10) : '';
+  return `${row.league}|${day}|${row.away_team}|${row.home_team}`;
+}
+
+/** 同場排在一起，並標記合併列資訊 */
+const displayRows = computed(() => {
+  const groups = new Map();
+  for (const row of props.recommendations || []) {
+    const key = matchupKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const rows = [];
+  for (const list of groups.values()) {
+    list.forEach((row, idx) => {
+      rows.push({
+        ...row,
+        _groupKey: matchupKey(row),
+        _groupSize: list.length,
+        _groupIndex: idx,
+      });
+    });
+  }
+  return rows;
+});
+
+function spanMethod({ row, columnIndex }) {
+  // 合併：聯盟(1)、對戰(2)
+  if (columnIndex !== 1 && columnIndex !== 2) {
+    return { rowspan: 1, colspan: 1 };
+  }
+  if (row._groupIndex === 0) {
+    return { rowspan: row._groupSize, colspan: 1 };
+  }
+  return { rowspan: 0, colspan: 0 };
+}
 
 function formatTime(iso) {
   if (!iso) return '';
@@ -117,6 +163,7 @@ function evTag(ev) {
 <style scoped>
 .sort-hint { font-size: 12px; color: #909399; margin: 0 0 8px; }
 .sub { font-size: 12px; color: #909399; }
+.group-n { color: #409eff; }
 .direction-hint { color: #e6a23c; margin-top: 2px; }
 .live-tag { margin-right: 4px; vertical-align: middle; }
 .pos { color: #67c23a; font-weight: 600; }

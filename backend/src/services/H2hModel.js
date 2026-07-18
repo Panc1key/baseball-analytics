@@ -1,12 +1,14 @@
 /**
  * 獨贏（Moneyline / H2H）勝率模型
  * MLB：Pythagorean + 近況 + 先發投手 + 傷兵 + 市場校準
- * NPB/KBO：近期勝率 + 市場校準
+ * NPB/KBO：滾動 Elo + RPG/RAPG 泊松 + 市場校準
  */
 
 import { decimalToImpliedProb, removeVig } from '../utils/odds.js';
 import { config } from '../config.js';
 import { blendScoreWithLog5 } from '../models/GameScoreModel.js';
+import { eloHomeWinProb, eloToStrength, getTeamElo } from './BaseballElo.js';
+import { getDixonColesRho } from '../models/DixonColes.js';
 
 const PYTH_EXPONENT = 1.83;
 /** MLB 主場優勢（勝率尺度，供 Log5 / 情境分共用） */
@@ -111,9 +113,9 @@ export function resolveMarketBlend(league, hasMlbCore, hasPitchers, hasMarket, h
     if (hasMlbCore) return config.h2hMarketBlendMlb ?? 0.45;
     return config.h2hMarketBlendMlbLite ?? 0.5;
   }
-  // NPB：有隊力時仍偏貼市場（無先發資訊）
-  if (league === 'NPB' && hasNpbStrength) {
-    return config.h2hMarketBlendNpbFull ?? 0.52;
+  // NPB/KBO：有 Elo + 得失分時降低貼市權重
+  if ((league === 'NPB' || league === 'KBO') && hasNpbStrength) {
+    return config.h2hMarketBlendNpbFull ?? 0.38;
   }
   return config.h2hMarketBlendOther ?? 0.55;
 }
@@ -149,6 +151,7 @@ export function computeH2hProbabilities({
   homeRuns = null,
   awayRuns = null,
   hasNpbStrength = false,
+  eloOverride = null,
 }) {
   const factors = [];
   let homeStrength = homeFallbackRating;
@@ -156,6 +159,11 @@ export function computeH2hProbabilities({
   let hasMlbCore = false;
   let hasPitchers = false;
   let pitcherEdge = 0;
+  let eloHome = null;
+  let eloAway = null;
+  const useEloFamily =
+    (league === 'NPB' || league === 'KBO') && hasNpbStrength;
+  const rho = getDixonColesRho(league);
 
   if (league === 'MLB' && (homeMlb || awayMlb)) {
     hasMlbCore = Boolean(homeMlb && awayMlb);
@@ -192,13 +200,23 @@ export function computeH2hProbabilities({
           ` vs 客 ERA ${(awayPitcherStats.era || 0).toFixed(2)} WHIP ${(awayPitcherStats.whip || 0).toFixed(2)}）`
       );
     }
+  } else if (useEloFamily) {
+    eloHome = getTeamElo(league, homeTeam, eloOverride);
+    eloAway = getTeamElo(league, awayTeam, eloOverride);
+    homeStrength = eloToStrength(eloHome);
+    awayStrength = eloToStrength(eloAway);
+    factors.push(
+      `${homeTeam} Elo ${eloHome.toFixed(0)} · 實力 ${(homeStrength * 100).toFixed(1)}%`
+    );
+    factors.push(
+      `${awayTeam} Elo ${eloAway.toFixed(0)} · 實力 ${(awayStrength * 100).toFixed(1)}%`
+    );
+    factors.push(`${league} 隊力：滾動 Elo + 得失分泊松`);
   } else {
     factors.push(`${homeTeam} 近期實力 ${(homeStrength * 100).toFixed(1)}%`);
     factors.push(`${awayTeam} 近期實力 ${(awayStrength * 100).toFixed(1)}%`);
-    if (league === 'NPB' && hasNpbStrength) {
-      factors.push('NPB 隊力來源：Yahoo 順位表');
-    } else if (league === 'NPB') {
-      factors.push('NPB 隊力不足（無順位樣本）· 高度貼市');
+    if (league === 'NPB' || league === 'KBO') {
+      factors.push(`${league} 隊力不足（樣本不足）· 高度貼市`);
     }
   }
 
@@ -207,27 +225,38 @@ export function computeH2hProbabilities({
   homeStrength = Math.max(0.05, Math.min(0.95, homeStrength));
   awayStrength = Math.max(0.05, Math.min(0.95, awayStrength));
 
-  // 主場優勢：提升主隊實力後再 Log5
+  // 輔助先驗：NPB/KBO=Elo；MLB=Log5（有 λ 時僅輕量錨定，不作第二套勝率）
   const homeWithField = Math.min(0.95, homeStrength + MLB_HOME_FIELD);
-  let modelHomeProb = log5WinProb(homeWithField, awayStrength);
-  modelHomeProb = clampProb(modelHomeProb);
+  const priorHomeProb =
+    useEloFamily && eloHome != null
+      ? clampProb(eloHomeWinProb(eloHome, eloAway))
+      : clampProb(log5WinProb(homeWithField, awayStrength));
+  if (useEloFamily && eloHome != null) {
+    factors.push(`${league} Elo 先驗主勝 ${(priorHomeProb * 100).toFixed(1)}%（輔助）`);
+  }
 
   const scoreBlend = blendScoreWithLog5({
-    log5HomeProb: modelHomeProb,
+    log5HomeProb: priorHomeProb,
     homeRuns,
     awayRuns,
     hasMlbCore,
     hasPitchers,
     hasNpbStrength,
+    rho,
   });
+  let modelHomeProb = priorHomeProb;
   if (scoreBlend.scoreBlend > 0) {
     modelHomeProb = scoreBlend.homeWinProb;
     factors.push(
-      `得分模型 主勝${((scoreBlend.scoreHomeProb ?? 0) * 100).toFixed(1)}% · 混合${(scoreBlend.scoreBlend * 100).toFixed(0)}%`
+      `SSOT泊松 主勝${((scoreBlend.scoreHomeProb ?? 0) * 100).toFixed(1)}%` +
+        ` · 權重${(scoreBlend.scoreBlend * 100).toFixed(0)}%（Elo/Log5僅輔助）`
     );
+  } else {
+    modelHomeProb = priorHomeProb;
+    factors.push('無得分λ · 退回 Elo/Log5 先驗（非完整 SSOT）');
   }
 
-  // 純模型概率：只包含基本面/Log5/Poisson，不含市場。
+  // 純模型概率：泊松(+輕量先驗)，不含市場
   const rawModelHomeProb = modelHomeProb;
 
   const fairMarket = extractFairH2hProb(bookmakers, homeTeam, awayTeam);

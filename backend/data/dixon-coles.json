@@ -1,0 +1,21 @@
+{
+  "NPB": {
+    "league": "NPB",
+    "rho": 0.08,
+    "rawRho": 0.15,
+    "n": 120,
+    "lambdaH": 3.93,
+    "lambdaA": 3.81,
+    "logLik": -592.8166621851661
+  },
+  "KBO": {
+    "league": "KBO",
+    "rho": 0.08,
+    "rawRho": 0.15,
+    "n": 100,
+    "lambdaH": 4.84,
+    "lambdaA": 5.02,
+    "logLik": -550.3736366397201
+  },
+  "fittedAt": "2026-07-17T10:16:38.590Z"
+}

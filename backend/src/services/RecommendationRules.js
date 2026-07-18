@@ -8,6 +8,7 @@ import {
 } from '../utils/odds.js';
 import { enrichCandidate } from './PickScorer.js';
 import { poissonCoverProb } from '../models/GameScoreModel.js';
+import { getDixonColesRho } from '../models/DixonColes.js';
 import { pickPropCandidates } from './PlayerPropAnalyzer.js';
 import {
   computeTotalsProjection,
@@ -81,6 +82,7 @@ function buildDecisionUniverse(game, markets, analysis, bookmakers = []) {
       awayRuns,
       bookmakers,
       teamName: spread.name,
+      rho: getDixonColesRho(game.league),
     });
     const impliedProb = decimalToImpliedProb(spread.price);
     const modelProb = cover.coverProb;
@@ -173,18 +175,28 @@ function rankSampleDecisions(pool, preference) {
 function pickBestSampleDecision(decisionUniverse, preference) {
   const minOdds = config.sampleMinOdds ?? config.prematchMinOdds ?? 1.7;
   const minEv = config.sampleMinEv ?? config.minEvThreshold ?? 0.03;
-  const basePool = (decisionUniverse || []).filter((d) => d.oddsDecimal >= minOdds);
+  const minH2hProb = config.sampleMinH2hProb ?? 0.52;
+  const basePool = (decisionUniverse || []).filter((d) => {
+    if (d.oddsDecimal < minOdds) return false;
+    // 獨贏樣本禁止明顯冷門（高水低勝率只會誤導）
+    if (d.market === 'h2h' && (d.modelProb ?? 0) < minH2hProb) return false;
+    return true;
+  });
   if (!basePool.length) return null;
 
+  // NPB/KBO：樣本優先大小，避免退回弱獨贏
+  const preferTotals = preference?.preferTotals || preference?.league === 'NPB' || preference?.league === 'KBO';
+  const pref = preferTotals ? { ...preference, preferTotals: true } : preference;
+
   const strictPool = basePool.filter((d) => d.ev >= minEv && (d.edgeProb ?? 0) > 0);
-  let ranked = rankSampleDecisions(strictPool, preference);
+  let ranked = rankSampleDecisions(strictPool, pref);
   if (!ranked.length) {
     ranked = rankSampleDecisions(
       basePool.filter((d) => d.ev >= 0),
-      preference
+      pref
     );
   }
-  if (!ranked.length) ranked = rankSampleDecisions(basePool, preference);
+  if (!ranked.length) ranked = rankSampleDecisions(basePool, pref);
   return ranked[0] || null;
 }
 
@@ -245,7 +257,10 @@ function buildSampleFallbackResults(
   baseReasoning,
   pickContext
 ) {
-  const decision = pickBestSampleDecision(decisionUniverse, preference);
+  const decision = pickBestSampleDecision(decisionUniverse, {
+    ...preference,
+    league: game.league,
+  });
   if (!decision) return [];
   return [buildSampleFallbackPick(game, analysis, decision, preference, baseReasoning, pickContext)];
 }
@@ -282,7 +297,14 @@ export function isSpreadAlignedWithModel(spread, game, analysis) {
         const expectedMargin = isHome ? homeRuns - awayRuns : awayRuns - homeRuns;
         if (expectedMargin < (config.spreadsMinExpectedMargin ?? -0.35)) return false;
 
-        const poissonCover = poissonCoverProb(homeRuns, awayRuns, spread.point, isHome);
+        const poissonCover = poissonCoverProb(
+          homeRuns,
+          awayRuns,
+          spread.point,
+          isHome,
+          undefined,
+          getDixonColesRho(game.league)
+        );
         if (poissonCover < config.spreadsMinCoverProb) return false;
       } else if (config.spreadsBlockPlus15WithoutScoreModel !== false) {
         // NPB/KBO 無得分模型時，+1.5 啟發式極度樂觀 — 僅允許近似均勢且不得作純弱隊受讓
@@ -410,6 +432,7 @@ function pickSpreadCandidate(game, markets, analysis, bookmakers = []) {
       awayRuns,
       bookmakers,
       teamName: spread.name,
+      rho: getDixonColesRho(game.league),
     });
     const coverProb = cover.coverProb;
     const winProb = coverProb * (1 - cover.pushProb);
@@ -424,8 +447,8 @@ function pickSpreadCandidate(game, markets, analysis, bookmakers = []) {
     if (coverProb < config.spreadsMinCoverProb) continue;
     if (edgePct < config.spreadsMinEdgePct) continue;
     if (ev < config.minEvThreshold) continue;
-    // 初盤硬擋短水（1.51 這類鎖死受讓不算可用推薦）
-    if (spread.price < (config.prematchMinOdds ?? 1.65)) continue;
+    // 初盤硬擋短水（與全場最低賠率一致，避開臭水）
+    if (spread.price < (config.prematchMinOdds ?? 1.75)) continue;
 
     raw.push({
       spread,
@@ -624,12 +647,16 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
 
   const pickContext = {
     preferTotals: preference.preferTotals,
+    parkFactor: analysis.parkFactor ?? 1,
     analysis: {
       ...analysis,
       homeTeam: game.home_team,
       awayTeam: game.away_team,
       league: game.league,
       hasTeamStrength: analysis.hasTeamStrength,
+      preferTotals: preference.preferTotals,
+      parkFactor: analysis.parkFactor ?? 1,
+      venueName: analysis.venueName,
     },
     homeMlb: analysis.homeMlb,
     awayMlb: analysis.awayMlb,
@@ -693,16 +720,24 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
 
     let tier = pick.tier;
     let score = pick.score;
-    // NPB/KBO：主推等同「可均注」門檻，避免虛高主推
-    if (
-      (game.league === 'NPB' || game.league === 'KBO') &&
-      tier === 'primary' &&
-      (pick.modelProb < (config.flatBetMinProbNpb ?? 0.6) ||
-        pick.edgeProb < (config.flatBetMinEdgePctNpb ?? 3.5) ||
-        (pick.oddsDecimal ?? 0) < (config.flatBetMinOdds ?? 1.8))
-    ) {
-      tier = 'watch';
-      score = Math.min(score, config.recommendPrimaryScore - 0.1);
+    // 主推硬閘（可下注層）：≥58% / ≥1.75；均注門檻與主推對齊
+    // NPB 不再用均注級 edge/賠率把主推整批打成觀察（否則幾乎無單可下）
+    if (tier === 'primary') {
+      const minPrimaryProb = config.prematchPrimaryMinProb ?? 0.58;
+      const minPrimaryOdds = config.prematchPrimaryMinOdds ?? 1.75;
+      const mlbTotalsTooSoft =
+        game.league === 'MLB' &&
+        pick.market === 'totals' &&
+        pick.modelProb < (config.mlbTotalsPrimaryMinProb ?? 0.6);
+
+      if (
+        pick.modelProb < minPrimaryProb ||
+        (pick.oddsDecimal ?? 0) < minPrimaryOdds ||
+        mlbTotalsTooSoft
+      ) {
+        tier = 'watch';
+        score = Math.min(score, config.recommendPrimaryScore - 0.1);
+      }
     }
 
     const prefNote =
@@ -722,6 +757,8 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
         .join(' | '),
       bookmaker: pick.odds?.bookmaker || pick.bookmaker,
       marketPreference: preference.preferTotals ? 'totals_first' : 'default',
+      parkFactor: analysis.parkFactor ?? 1,
+      venueName: analysis.venueName,
     });
     usedMarkets.add(pick.market);
     if (rank >= config.maxPicksPerGame) break;

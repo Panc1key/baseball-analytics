@@ -5,7 +5,7 @@
  */
 
 import { config } from '../config.js';
-import { resolveNpbTeamStrength } from './NpbStrength.js';
+import { getParkFactor } from '../data/parkFactors.js';
 
 const MAIN_MARKETS = new Set(['h2h', 'spreads', 'totals']);
 const PROP_MARKET_PREFIX = /^(batter_|pitcher_)/;
@@ -54,7 +54,21 @@ function totalsAllowed(rec) {
   if (rec.market !== 'totals') return true;
   if (isUnderTotalPick(rec)) return false;
   const dq = pickNum(rec, 'data_quality', 'dataQuality') ?? 0;
-  return rec.league === 'MLB' && dq >= (config.flatBetMinDataQuality ?? 0.65);
+  const modelProb = pickNum(rec, 'model_prob', 'modelProb') ?? 0;
+
+  if (rec.league === 'MLB') {
+    if (!config.flatBetAllowMlbTotals) return false;
+    return dq >= (config.flatBetMinDataQuality ?? 0.65) && modelProb >= (config.flatBetMinProb ?? 0.6);
+  }
+  if (rec.league === 'NPB' || rec.league === 'KBO') {
+    if (rec.league === 'NPB' && !config.flatBetAllowNpbTotals) return false;
+    if (rec.league === 'KBO' && config.flatBetAllowKboTotals === false) return false;
+    return (
+      dq >= (config.flatBetMinDataQualityNpb ?? 0.7) &&
+      modelProb >= (config.flatBetMinProbNpb ?? 0.58)
+    );
+  }
+  return false;
 }
 
 function minEdgeForMarket(market) {
@@ -75,6 +89,40 @@ export function qualifiesFlatBet(rec, options = {}) {
   const edge = pickNum(rec, 'edge_prob', 'edgeProb');
   const dq = pickNum(rec, 'data_quality', 'dataQuality') ?? 0;
   const isNpbFamily = league === 'NPB' || league === 'KBO';
+  const analysis = options.analysis || {};
+  const preferTotals =
+    options.preferTotals === true ||
+    rec.marketPreference === 'totals_first' ||
+    analysis.preferTotals === true;
+  const parkFactor =
+    pickNum(rec, 'park_factor', 'parkFactor') ??
+    pickNum(analysis, 'parkFactor') ??
+    (league === 'MLB' ? getParkFactor(analysis.venueName || rec.venueName) : 1);
+  const homeTeam = analysis.homeTeam || analysis.home_team || rec.home_team;
+
+  // 過信閘：模型勝率過高（洛磯 74% / 異常大分）不進均注
+  const maxProb = config.flatBetMaxModelProb ?? 0.72;
+  if (modelProb != null && modelProb > maxProb) return false;
+
+  // 推理已優先大小時，獨贏不得進均注
+  if (
+    config.flatBetBlockH2hWhenPreferTotals !== false &&
+    preferTotals &&
+    market === 'h2h'
+  ) {
+    return false;
+  }
+
+  // 高球場係數主場獨贏：禁止均注（Coors 等）
+  if (
+    league === 'MLB' &&
+    market === 'h2h' &&
+    homeTeam &&
+    rec.pick === homeTeam &&
+    parkFactor >= (config.flatBetBlockHomeMlMinParkFactor ?? 1.12)
+  ) {
+    return false;
+  }
 
   // NPB/KBO 均注：勝率優先硬閘 — 無隊力 / 數據弱就不進「建議投注」
   if (isNpbFamily) {
@@ -84,15 +132,22 @@ export function qualifiesFlatBet(rec, options = {}) {
       options.analysis?.hasTeamStrength === true;
     if (!hasStrength) return false;
     if (dq < (config.flatBetMinDataQualityNpb ?? 0.7)) return false;
-    if (modelProb < (config.flatBetMinProbNpb ?? 0.6)) return false;
+    if (modelProb < (config.flatBetMinProbNpb ?? 0.58)) return false;
     if (edge < (config.flatBetMinEdgePctNpb ?? 3.5)) return false;
-    // NPB 大小暫不進均注（無先發總分不穩）
-    if (market === 'totals') return false;
   }
 
+  // 均注：主推優先；高勝率觀察亦可（避免主推過嚴導致整天無均注）
+  const strongEnough =
+    tier === 'primary' ||
+    (tier === 'watch' &&
+      modelProb >= (isNpbFamily ? config.flatBetMinProbNpb ?? 0.6 : config.flatBetMinProb) &&
+      odds != null &&
+      odds >= config.flatBetMinOdds);
   if (config.flatBetPrimaryOnly) {
-    if (pickRank === 1 && tier !== 'primary') return false;
-    if (pickRank > 1 && tier === 'watch' && edge < minEdgeForMarket(market)) return false;
+    if (pickRank === 1 && !strongEnough) return false;
+    if (pickRank > 1 && tier === 'watch' && !strongEnough && edge < minEdgeForMarket(market)) {
+      return false;
+    }
   }
   if (odds == null || odds < config.flatBetMinOdds) return false;
   if (!isNpbFamily && modelProb < config.flatBetMinProb) return false;
@@ -159,6 +214,8 @@ export function classifyBetStrategy(rec, context = {}) {
       pickRank,
       hasTeamStrength: context.hasTeamStrength ?? rec.hasTeamStrength,
       analysis: context.analysis,
+      preferTotals: context.preferTotals,
+      parkFactor: context.parkFactor ?? context.analysis?.parkFactor,
     })
   ) {
     return 'flat_bet';
