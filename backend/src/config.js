@@ -19,7 +19,7 @@ const fittedWeights = loadJsonSafe(path.join(__dirname, '../data/fitted-weights.
 const dixonColesFit = loadJsonSafe(path.join(__dirname, '../data/dixon-coles.json'));
 
 export const config = {
-  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.8.1',
+  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.9.0',
   /** SSOT：泊松獨贏權重下限（Elo/Log5 不得反客為主） */
   ssotPoissonMinWeight: parseFloat(process.env.SSOT_POISSON_MIN_WEIGHT || '0.72'),
   /** NPB/KBO 滾動 Elo */
@@ -27,6 +27,11 @@ export const config = {
   baseballEloHomeAdv: parseFloat(process.env.BASEBALL_ELO_HOME_ADV || '35'),
   /** 分箱可靠度校準（回測建表後啟用；回測過程本身關閉） */
   enableReliabilityCalibration: process.env.ENABLE_RELIABILITY_CALIBRATION !== 'false',
+  /** 可靠度表必須與目前模型版本一致，且精確切片達最低樣本數 */
+  reliabilityMinSliceSamples: parseInt(
+    process.env.RELIABILITY_MIN_SLICE_SAMPLES || '50',
+    10
+  ),
   /** Dixon–Coles 低分相關（可由 fit 寫入 data/dixon-coles.json） */
   dixonColesRhoNpb: parseFloat(
     process.env.DIXON_COLES_RHO_NPB ||
@@ -211,8 +216,8 @@ export const config = {
   spreadsMinEdgePct: parseFloat(process.env.SPREADS_MIN_EDGE_PCT || '2.5'),
   /** 讓分：模型勝率校準上限（比獨贏更保守） */
   spreadsMaxModelEdgePct: parseFloat(process.env.SPREADS_MAX_MODEL_EDGE_PCT || '0.05'),
-  /** 讓分 +1.5 主推評分折扣（避免受让霸佔主推） */
-  spreadsPlus15PrimaryPenalty: parseFloat(process.env.SPREADS_PLUS15_PRIMARY_PENALTY || '12'),
+  /** +1.5 不再固定扣分；改由假弱方證據與最終 edge 護欄判斷 */
+  spreadsPlus15PrimaryPenalty: parseFloat(process.env.SPREADS_PLUS15_PRIMARY_PENALTY || '0'),
   /** 讓分：受让最低獨贏勝率 */
   spreadsMinDogWinProb: parseFloat(process.env.SPREADS_MIN_DOG_WIN_PROB || '0.47'),
   /** 讓分：模型看衰對手時最大可接受差距 */
@@ -281,6 +286,19 @@ export const config = {
   /** 均注僅 primary，且不含大小盤小球 */
   flatBetPrimaryOnly: process.env.FLAT_BET_PRIMARY_ONLY !== 'false',
   flatBetMinDataQuality: parseFloat(process.env.FLAT_BET_MIN_DATA_QUALITY || '0.65'),
+  /** 負讓在未有方向切片 OOS 證據前只作 watch，不進均注 */
+  flatBetAllowNegativeSpreads: process.env.FLAT_BET_ALLOW_NEGATIVE_SPREADS === 'true',
+  /** 市場弱方需有可解釋的「模型不弱」證據才可進均注 */
+  flatBetRequireContrarianSupport:
+    process.env.FLAT_BET_REQUIRE_CONTRARIAN_SUPPORT !== 'false',
+  contrarianMinWinProb: parseFloat(process.env.CONTRARIAN_MIN_WIN_PROB || '0.48'),
+  contrarianMinDataQuality: parseFloat(process.env.CONTRARIAN_MIN_DATA_QUALITY || '0.80'),
+  contrarianMinSupportSignals: parseInt(
+    process.env.CONTRARIAN_MIN_SUPPORT_SIGNALS || '2',
+    10
+  ),
+  /** actionable EV 額外加分封頂；避免宣稱 EV 最大者自動排第一 */
+  actionableMaxEvBonus: parseFloat(process.env.ACTIONABLE_MAX_EV_BONUS || '6'),
   /** 串關錨腿：低水高勝率區間（可低於 1.75，僅作串關用，不進均注） */
   parlayAnchorMinOdds: parseFloat(process.env.PARLAY_ANCHOR_MIN_ODDS || '1.55'),
   parlayAnchorMaxOdds: parseFloat(process.env.PARLAY_ANCHOR_MAX_ODDS || '1.79'),

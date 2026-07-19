@@ -21,7 +21,7 @@ import {
 } from './ProbabilityCalibration.js';
 
 function emptyBag() {
-  return { n: 0, w: 0, l: 0, p: 0, sumProb: 0, sumEv: 0 };
+  return { n: 0, w: 0, l: 0, p: 0, sumProb: 0, sumEv: 0, profitUnits: 0 };
 }
 
 function addBag(bag, result, pick) {
@@ -31,6 +31,8 @@ function addBag(bag, result, pick) {
   if (result === 'win') bag.w += 1;
   else if (result === 'loss') bag.l += 1;
   else if (result === 'push') bag.p += 1;
+  if (result === 'win') bag.profitUnits += Number(pick.oddsDecimal ?? 1) - 1;
+  else if (result === 'loss') bag.profitUnits -= 1;
 }
 
 function fmtBag(bag) {
@@ -38,6 +40,7 @@ function fmtBag(bag) {
   const hit = decided ? `${((bag.w / decided) * 100).toFixed(1)}%` : 'n/a';
   const avgP = bag.n ? `${((bag.sumProb / bag.n) * 100).toFixed(1)}%` : '-';
   const avgEv = bag.n ? `${((bag.sumEv / bag.n) * 100).toFixed(1)}%` : '-';
+  const roi = bag.n ? `${((bag.profitUnits / bag.n) * 100).toFixed(1)}%` : '-';
   return {
     n: bag.n,
     wins: bag.w,
@@ -46,7 +49,9 @@ function fmtBag(bag) {
     hitRate: hit,
     avgPredictedProb: avgP,
     avgEv: avgEv,
-    text: `n=${bag.n} W${bag.w} L${bag.l} P${bag.p} 命中=${hit} 預測均值=${avgP} EV均值=${avgEv}`,
+    profitUnits: Math.round(bag.profitUnits * 100) / 100,
+    roi,
+    text: `n=${bag.n} W${bag.w} L${bag.l} P${bag.p} 命中=${hit} ROI=${roi} 預測均值=${avgP} EV均值=${avgEv}`,
   };
 }
 
@@ -56,6 +61,14 @@ function probBucket(p) {
   if (p >= 0.55) return '55-60';
   if (p >= 0.5) return '50-55';
   return '<50';
+}
+
+function edgeBucket(edgePct) {
+  const edge = Number(edgePct ?? 0);
+  if (edge >= 8) return '8+';
+  if (edge >= 5) return '5-8';
+  if (edge >= 3) return '3-5';
+  return '<3';
 }
 
 function isGradableGame(game) {
@@ -287,6 +300,12 @@ export async function runHistoricalBacktest(options = {}) {
           `${game.league}|bucket:${probBucket(pred)}`,
         ];
         if (pick.bet_strategy) keys.push(`strategy:${pick.bet_strategy}`);
+        keys.push(`edge:${edgeBucket(pick.edgeProb)}`);
+        if (pick.market === 'spreads') {
+          if (Number(pick.line) > 0) keys.push('spread:plus');
+          else if (Number(pick.line) < 0) keys.push('spread:minus');
+          else keys.push('spread:pk');
+        }
         if (pred >= 0.6) keys.push('prob60+');
         if (pick.tier === 'primary') keys.push('primary');
 
@@ -303,6 +322,18 @@ export async function runHistoricalBacktest(options = {}) {
           modelProb: pred,
           ev: pick.ev,
           edgeProb: pick.edgeProb,
+          spreadSign:
+            pick.market !== 'spreads'
+              ? null
+              : Number(pick.line) > 0
+                ? 'plus'
+                : Number(pick.line) < 0
+                  ? 'minus'
+                  : 'pk',
+          rawModelProb: pick.rawModelProb,
+          marketProb: pick.marketProb,
+          preCapProb: pick.preCapProb,
+          finalEdgeCapped: pick.finalEdgeCapped === true,
           betStrategy: pick.bet_strategy,
           score: `${game.away_score}-${game.home_score}`,
           teams: `${game.away_team} @ ${game.home_team}`,
@@ -420,6 +451,13 @@ export function formatBacktestReport(report) {
     'market:h2h',
     'market:spreads',
     'market:totals',
+    'spread:plus',
+    'spread:minus',
+    'spread:pk',
+    'edge:<3',
+    'edge:3-5',
+    'edge:5-8',
+    'edge:8+',
     'tier:primary',
     'tier:watch',
     'MLB|h2h',

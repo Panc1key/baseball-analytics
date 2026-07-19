@@ -107,6 +107,7 @@ function buildDecisionUniverse(game, markets, analysis, bookmakers = []) {
       marketProb: cover.marketProb,
       modelProb,
       impliedProb,
+      pushProb: cover.pushProb,
       ev,
       edgeProb,
       dataQuality: analysis.dataQuality,
@@ -134,7 +135,48 @@ function buildDecisionUniverse(game, markets, analysis, bookmakers = []) {
     });
   }
 
-  return decisions;
+  return decisions.map((decision) => {
+    const enriched = enrichCandidate(
+      {
+        ...decision,
+        marketGroup: 'main',
+        probabilityCalibrated: decision.marketProb != null,
+        structuralOk: true,
+      },
+      analysis,
+      game.league,
+      decision.market
+    );
+    const reasons = new Set(
+      String(decision.rejectReason || '')
+        .split('；')
+        .filter(Boolean)
+        .filter((reason) => !['EV不足', '蓋盤率不足', '優勢不足'].includes(reason))
+    );
+    const minEv =
+      decision.market === 'totals'
+        ? (config.totalsMinEv ?? config.minEvThreshold)
+        : config.minEvThreshold;
+    if (enriched.ev < minEv) reasons.add('EV不足');
+    if (decision.market === 'spreads') {
+      if (enriched.modelProb < config.spreadsMinCoverProb) reasons.add('蓋盤率不足');
+      if (enriched.edgeProb < config.spreadsMinEdgePct) reasons.add('優勢不足');
+    } else if (decision.market === 'h2h' && enriched.edgeProb <= 0) {
+      reasons.add('優勢不足');
+    }
+    return {
+      ...decision,
+      modelProb: enriched.modelProb,
+      calibratedProb: enriched.calibratedProb,
+      preCapProb: enriched.preCapProb,
+      finalEdgeCapped: enriched.finalEdgeCapped,
+      ev: enriched.ev,
+      edgeProb: enriched.edgeProb,
+      dataQuality: enriched.dataQuality,
+      eligible: reasons.size === 0,
+      rejectReason: [...reasons].join('；') || null,
+    };
+  });
 }
 
 export function formatSpreadPick(team, point) {
@@ -505,6 +547,17 @@ function pickSpreadCandidate(game, markets, analysis, bookmakers = []) {
           game.league,
           'spreads'
         );
+        if (
+          g.line < 0 &&
+          config.flatBetAllowNegativeSpreads !== true &&
+          enriched.tier === 'primary'
+        ) {
+          enriched.tier = 'watch';
+          enriched.score = Math.min(
+            enriched.score,
+            config.recommendPrimaryScore - 0.1
+          );
+        }
         // +1.5 主推折扣（config 原先未接線）
         if (g.line >= 1.5 && (config.spreadsPlus15PrimaryPenalty || 0) > 0) {
           enriched.score = Math.max(0, (enriched.score ?? 0) - config.spreadsPlus15PrimaryPenalty);
@@ -605,8 +658,16 @@ export function pickPrimaryRecommendation(candidates, context = {}) {
   if (!candidates?.length) return null;
   const ranked = candidates
     .map((c) => {
-      const { score, signals } = computeActionableScore(c, context);
-      return { ...c, actionableScore: score, edgeSignals: signals };
+      const { score, signals, contrarianProfile } = computeActionableScore(c, context);
+      return {
+        ...c,
+        actionableScore: score,
+        edgeSignals: signals,
+        marketDog: contrarianProfile?.marketDog ?? false,
+        contrarianQualified: contrarianProfile?.qualified ?? false,
+        contrarianSupportCount: contrarianProfile?.supportCount ?? 0,
+        contrarianReasons: contrarianProfile?.supports ?? [],
+      };
     })
     .filter((c) => c.actionableScore >= 0)
     .sort((a, b) => b.actionableScore - a.actionableScore || b.ev - a.ev);
@@ -692,7 +753,7 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
 
   const scored = allCandidates
     .map((c) => {
-      const { score, signals } = computeActionableScore(c, pickContext);
+      const { score, signals, contrarianProfile } = computeActionableScore(c, pickContext);
       return {
         ...c,
         league: game.league,
@@ -700,6 +761,10 @@ export function pickGameRecommendations(game, markets, analysis, baseReasoning, 
         dataQuality: c.dataQuality ?? analysis.dataQuality,
         actionableScore: score,
         edgeSignals: signals?.length ? signals : c.edgeSignals,
+        marketDog: contrarianProfile?.marketDog ?? false,
+        contrarianQualified: contrarianProfile?.qualified ?? false,
+        contrarianSupportCount: contrarianProfile?.supportCount ?? 0,
+        contrarianReasons: contrarianProfile?.supports ?? [],
       };
     })
     .filter((c) => c.tier && (c.actionableScore >= 0 || c.tier === 'sample'))

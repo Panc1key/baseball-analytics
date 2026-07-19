@@ -104,6 +104,31 @@ export function applyBinCalibration(p, table) {
 let cachedTable = null;
 let cachedMtime = null;
 
+function calibrationSampleCount(table) {
+  return (table?.bins || []).reduce(
+    (sum, bin) => sum + Number(bin.n || 0),
+    0
+  );
+}
+
+export function selectCompatibleCalibration(
+  tableDoc,
+  league = null,
+  market = null,
+  minSamples = config.reliabilityMinSliceSamples ?? 50
+) {
+  if (!tableDoc || tableDoc.modelVersion !== config.modelVersion) return null;
+  let table = null;
+  if (league && market) {
+    table = tableDoc.byLeagueMarket?.[`${league}|${market}`] || null;
+  } else if (league) {
+    table = tableDoc.byLeague?.[league] || null;
+  } else {
+    table = tableDoc.global || null;
+  }
+  return calibrationSampleCount(table) >= minSamples ? table : null;
+}
+
 export function loadCalibrationTable(filePath = DEFAULT_TABLE_PATH) {
   try {
     if (!fs.existsSync(filePath)) return null;
@@ -132,12 +157,8 @@ export function applyReliabilityCalibration(p, league = null, market = null) {
   if (config.enableReliabilityCalibration === false) return p;
   const tableDoc = loadCalibrationTable();
   if (!tableDoc) return p;
-
-  const key =
-    (league && market && tableDoc.byLeagueMarket?.[`${league}|${market}`]) ||
-    (league && tableDoc.byLeague?.[league]) ||
-    tableDoc.global ||
-    null;
+  // 正式決策要求同模型版本、精確 league|market 且樣本足量。
+  const key = selectCompatibleCalibration(tableDoc, league, market);
   if (!key) return p;
   return applyBinCalibration(p, key);
 }

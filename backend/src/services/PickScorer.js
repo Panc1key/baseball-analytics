@@ -127,6 +127,11 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
 
   // 可靠度分箱校準（若有歷史表）
   modelProb = applyReliabilityCalibration(modelProb, league, marketType);
+  // 最終 trust-region 必須在所有校準之後套用；不能因上游已市場混合而繞過。
+  const fairReference = candidate.marketProb ?? impliedProb;
+  const preCapProb = modelProb;
+  modelProb = calibrateModelProb(modelProb, fairReference, maxEdge);
+  const finalEdgeCapped = Math.abs(modelProb - preCapProb) > 1e-9;
 
   const pushProb = candidate.pushProb ?? 0;
   const ev =
@@ -154,6 +159,8 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
     rawModelProb,
     marketProb: candidate.marketProb ?? impliedProb,
     calibratedProb: modelProb,
+    preCapProb,
+    finalEdgeCapped,
     probabilityCalibrated: true,
     calibrationCount: (candidate.calibrationCount ?? 0) + (probabilityCalibrated ? 0 : 1),
     modelProb,

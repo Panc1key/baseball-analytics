@@ -83,7 +83,6 @@ export function qualifiesFlatBet(rec, options = {}) {
   const market = rec.market;
   const tier = rec.tier;
   const league = rec.league;
-  const pickRank = options.pickRank ?? pickNum(rec, 'pick_rank', 'pickRank') ?? 1;
   const odds = pickNum(rec, 'odds_decimal', 'oddsDecimal');
   const modelProb = pickNum(rec, 'model_prob', 'modelProb');
   const edge = pickNum(rec, 'edge_prob', 'edgeProb');
@@ -99,10 +98,36 @@ export function qualifiesFlatBet(rec, options = {}) {
     pickNum(analysis, 'parkFactor') ??
     (league === 'MLB' ? getParkFactor(analysis.venueName || rec.venueName) : 1);
   const homeTeam = analysis.homeTeam || analysis.home_team || rec.home_team;
+  const line = pickNum(rec, 'line');
 
   // 過信閘：模型勝率過高（洛磯 74% / 異常大分）不進均注
   const maxProb = config.flatBetMaxModelProb ?? 0.72;
   if (modelProb != null && modelProb > maxProb) return false;
+
+  // flat_bet 合約與 API 一致：primary-only 就不允許 watch 偷渡。
+  if (config.flatBetPrimaryOnly && tier !== 'primary') return false;
+
+  // 未經方向切片 OOS 驗證前，負讓僅保留為 watch。
+  if (
+    market === 'spreads' &&
+    line != null &&
+    line < 0 &&
+    config.flatBetAllowNegativeSpreads !== true
+  ) {
+    return false;
+  }
+
+  // 正讓及市場冷門獨贏，必須是「市場看弱但模型有可解釋支持」。
+  const isMarketDogCandidate =
+    (market === 'spreads' && line != null && line > 0) ||
+    (market === 'h2h' && rec.marketDog === true);
+  if (
+    isMarketDogCandidate &&
+    config.flatBetRequireContrarianSupport !== false &&
+    rec.contrarianQualified !== true
+  ) {
+    return false;
+  }
 
   // 推理已優先大小時，獨贏不得進均注
   if (
@@ -136,19 +161,6 @@ export function qualifiesFlatBet(rec, options = {}) {
     if (edge < (config.flatBetMinEdgePctNpb ?? 3.5)) return false;
   }
 
-  // 均注：主推優先；高勝率觀察亦可（避免主推過嚴導致整天無均注）
-  const strongEnough =
-    tier === 'primary' ||
-    (tier === 'watch' &&
-      modelProb >= (isNpbFamily ? config.flatBetMinProbNpb ?? 0.6 : config.flatBetMinProb) &&
-      odds != null &&
-      odds >= config.flatBetMinOdds);
-  if (config.flatBetPrimaryOnly) {
-    if (pickRank === 1 && !strongEnough) return false;
-    if (pickRank > 1 && tier === 'watch' && !strongEnough && edge < minEdgeForMarket(market)) {
-      return false;
-    }
-  }
   if (odds == null || odds < config.flatBetMinOdds) return false;
   if (!isNpbFamily && modelProb < config.flatBetMinProb) return false;
   if (!isNpbFamily && edge < minEdgeForMarket(market)) return false;
@@ -206,7 +218,7 @@ export function assignBetStrategies(picks, context = {}) {
 
 export function classifyBetStrategy(rec, context = {}) {
   const pickRank = pickNum(rec, 'pick_rank', 'pickRank') ?? 99;
-  const maxFlat = config.maxFlatBetsPerGame ?? 2;
+  const maxFlat = config.maxFlatBetsPerGame ?? 1;
 
   if (
     pickRank <= maxFlat &&

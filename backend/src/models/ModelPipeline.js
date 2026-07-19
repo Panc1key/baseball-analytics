@@ -11,9 +11,11 @@
  *        ↓
  *   盤口概率                ← 獨贏 / 讓分 / 大小 皆由同一組 λ 推出
  *        ↓
- *   可靠度校準 C(p)         ← ProbabilityCalibration（分箱，可選）
+ *   市場去水混合            ← H2hModel / odds（shrinkage）
  *        ↓
- *   市場去水混合 + edge 上限 ← H2hModel / calibrateModelProb
+ *   可靠度校準 C(p)         ← ProbabilityCalibration（同版本、足量切片）
+ *        ↓
+ *   最終 edge 上限          ← PickScorer / calibrateModelProb（不可旁路）
  *        ↓
  *   EV → 決策門檻           ← PickScorer / BetStrategy（以 EV + p_cal 為主）
  *
@@ -24,7 +26,7 @@
  * - PickScorer：排序分可作 UI，硬決策以 EV 與最低校準勝率為準
  */
 
-export const MODEL_PIPELINE_VERSION = 'baseball-v2.8.1';
+export const MODEL_PIPELINE_VERSION = 'baseball-v2.9.0';
 
 /**
  * SSOT 硬約束（v2.8.1：高球場/preferTotals/過信機率均注閘）：
@@ -37,7 +39,8 @@ export const MODEL_STAGES = [
   'strength_to_lambda',
   'score_distribution',
   'market_probs',
-  'reliability_calibration',
-  'market_blend_and_edge_cap',
+  'market_blend',
+  'versioned_reliability_calibration',
+  'final_market_edge_cap',
   'ev_and_gates',
 ];

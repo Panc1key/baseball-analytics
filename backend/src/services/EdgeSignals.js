@@ -36,26 +36,73 @@ export function computeMomentumShifts(homeMlb, awayMlb, threshold = 0.06) {
   return { homeBoost, awayBoost, factors };
 }
 
-/** 是否為高水冷門獨贏候選 */
+/** 市場看弱、但模型由可解釋基本面判斷不弱。 */
+export function assessContrarianProfile(candidate, analysis = {}) {
+  const team =
+    candidate.market === 'spreads'
+      ? candidate.odds?.name || candidate.spread?.name
+      : candidate.pick;
+  const homeTeam = analysis.homeTeam || analysis.home_team;
+  const awayTeam = analysis.awayTeam || analysis.away_team;
+  const isHome = team === homeTeam;
+  const isAway = team === awayTeam;
+  if (!team || (!isHome && !isAway)) {
+    return { marketDog: false, qualified: false, supports: [] };
+  }
+
+  const modelProb = isHome
+    ? Number(analysis.homeWinProb ?? 0.5)
+    : Number(analysis.awayWinProb ?? 0.5);
+  const marketProb = isHome
+    ? Number(analysis.marketHomeProb ?? 0.5)
+    : Number(analysis.marketAwayProb ?? (1 - Number(analysis.marketHomeProb ?? 0.5)));
+  const line = Number(candidate.line);
+  const marketDog =
+    (candidate.market === 'spreads' && Number.isFinite(line) && line > 0) ||
+    (candidate.market === 'h2h' && marketProb < 0.5);
+
+  const supports = [];
+  if (isHome) supports.push('主場');
+
+  const pitcherEdge = Number(analysis.pitcherEdge ?? 0);
+  const pickPitcherEdge = isHome ? pitcherEdge : -pitcherEdge;
+  if (pickPitcherEdge >= 0.005) supports.push('先發投手');
+
+  const homeMomentum = teamMomentum(analysis.homeMlb);
+  const awayMomentum = teamMomentum(analysis.awayMlb);
+  const momentumEdge = isHome
+    ? homeMomentum - awayMomentum
+    : awayMomentum - homeMomentum;
+  if (momentumEdge >= 0.04) supports.push('近期狀態');
+
+  const homeRuns = Number(analysis.scoringHomeRuns ?? analysis.homeRuns);
+  const awayRuns = Number(analysis.scoringAwayRuns ?? analysis.awayRuns);
+  if (Number.isFinite(homeRuns) && Number.isFinite(awayRuns)) {
+    const expectedMargin = isHome ? homeRuns - awayRuns : awayRuns - homeRuns;
+    if (expectedMargin >= 0) supports.push('得分模型不落後');
+  }
+
+  const dataQuality = Number(candidate.dataQuality ?? analysis.dataQuality ?? 0);
+  const qualified =
+    marketDog &&
+    modelProb >= (config.contrarianMinWinProb ?? 0.48) &&
+    dataQuality >= (config.contrarianMinDataQuality ?? 0.8) &&
+    supports.length >= (config.contrarianMinSupportSignals ?? 2);
+
+  return {
+    team,
+    marketDog,
+    qualified,
+    modelProb,
+    marketProb,
+    supportCount: supports.length,
+    supports,
+  };
+}
+
+/** 是否為有基本面支持的高水冷門候選。 */
 export function isContrarianDogPick(candidate, analysis) {
-  if (candidate.market !== 'h2h') return false;
-  const odds = candidate.oddsDecimal ?? candidate.odds?.price ?? 0;
-  if (odds < (config.flatBetMinOdds ?? 1.8)) return false;
-
-  const pick = candidate.pick;
-  const homeProb = analysis?.homeWinProb ?? 0.5;
-  const isHomePick = pick === analysis?.homeTeam;
-  const modelFavorsPick =
-    (isHomePick && homeProb >= 0.5) || (!isHomePick && homeProb < 0.5);
-
-  const marketHomeProb = analysis?.marketHomeProb;
-  if (marketHomeProb == null) return false;
-  const marketHomeFav = marketHomeProb >= 0.5;
-  const pickingDog =
-    (isHomePick && !marketHomeFav) ||
-    (!isHomePick && marketHomeFav);
-
-  return modelFavorsPick && pickingDog && (candidate.edgeProb ?? 0) >= 2;
+  return assessContrarianProfile(candidate, analysis).qualified;
 }
 
 function marketTypeKey(market) {
@@ -117,8 +164,6 @@ export function computeActionableScore(candidate, context = {}) {
       bonus += 5;
     }
   }
-  if (mtype === 'spreads' && candidate.line != null && candidate.line < 0) bonus += 2;
-
   if (mtype === 'totals') {
     if (edge < (config.flatBetMinEdgePctTotals ?? 4)) return { score: -1, signals: [], bonus: 0 };
     if (context.preferTotals) {
@@ -141,12 +186,20 @@ export function computeActionableScore(candidate, context = {}) {
   else if (odds >= 1.8) bonus += 2;
 
   const base = candidate.score ?? 0;
-  const actionable = base + bonus + evPct * 0.45;
+  const evBonus = Math.min(
+    config.actionableMaxEvBonus ?? 6,
+    Math.max(0, evPct - (config.minEvThreshold ?? 0.03) * 100) * 0.35
+  );
+  if (candidate.finalEdgeCapped) signals.push('最終edge已限幅');
+  const contrarianProfile = assessContrarianProfile(candidate, context.analysis);
+  const actionable = base + bonus + evBonus;
 
   return {
     score: Math.round(actionable * 10) / 10,
     signals,
     bonus,
+    evBonus: Math.round(evBonus * 10) / 10,
+    contrarianProfile,
   };
 }
 
