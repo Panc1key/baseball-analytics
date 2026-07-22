@@ -7,6 +7,7 @@ import 'dotenv/config';
 import db from '../db/database.js';
 import { LEAGUES } from '../config.js';
 import { OddsApiClient, isOddsQuotaExhaustedError } from '../services/OddsApiClient.js';
+import { recordOddsSnapshot } from '../services/PitOddsService.js';
 
 function argValue(name) {
   const prefix = `--${name}=`;
@@ -94,10 +95,14 @@ for (const [key, games] of groups) {
       db.prepare(
         `UPDATE games SET raw_odds = ?, updated_at = datetime('now') WHERE id = ?`
       ).run(json, g.id);
-      db.prepare(
-        `INSERT INTO odds_snapshots (game_id, league, captured_at, bookmakers_json, source)
-         VALUES (?, ?, ?, ?, 'historical_api')`
-      ).run(g.id, g.league, resp.timestamp || snapAt, json);
+      recordOddsSnapshot({
+        gameId: g.id,
+        league: g.league,
+        commenceTime: g.commence_time,
+        capturedAt: resp.timestamp || snapAt,
+        bookmakers: ev.bookmakers,
+        source: 'historical_api',
+      });
       filled += 1;
     }
 

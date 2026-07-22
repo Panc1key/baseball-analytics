@@ -24,38 +24,15 @@ import {
   poissonTotalOverProb,
 } from '../models/GameScoreModel.js';
 import { getDixonColesRho } from '../models/DixonColes.js';
+import {
+  pitcherQualityIndex,
+  pitcherRunSuppression,
+} from './PitcherQuality.js';
+
+export { pitcherQualityIndex, pitcherRunSuppression };
 
 const MLB_LEAGUE_RUNS_PER_GAME = 8.8;
 const MLB_TEAM_RUNS_AVG = MLB_LEAGUE_RUNS_PER_GAME / 2;
-
-/**
- * 先發投手質量指數（越高越差，類似足球後防漏洞）
- * 棒球不對稱：一側投手差 → 大分機率顯著上升；小球需兩側都穩
- */
-export function pitcherQualityIndex(pitcherStats) {
-  if (!pitcherStats) {
-    return { index: 0, tier: 'unknown', weak: false, solid: false, elite: false, era: null, whip: null };
-  }
-  const era = pitcherStats.era ?? 4.5;
-  const whip = pitcherStats.whip ?? 1.3;
-  const index = (era - 4.5) * 0.55 + (whip - 1.3) * 2.2;
-
-  let tier = 'avg';
-  if (index > 0.85 || era >= 5.2 || whip >= 1.48) tier = 'weak';
-  else if (index > 0.35 || era >= 4.8) tier = 'below_avg';
-  else if (index < -0.35 && era <= 3.6 && whip <= 1.12) tier = 'elite';
-  else if (index < 0.15 && era <= 4.0) tier = 'solid';
-
-  return {
-    index,
-    tier,
-    weak: tier === 'weak' || tier === 'below_avg',
-    solid: tier === 'solid' || tier === 'elite',
-    elite: tier === 'elite',
-    era,
-    whip,
-  };
-}
 
 /** 大小球場景：大分觸發 vs 小球可行（不對稱） */
 export function analyzePitchingTotalsContext({
@@ -129,22 +106,6 @@ export function runsAllowedPerGame(mlbTeam) {
   const gp = (mlbTeam.wins || 0) + (mlbTeam.losses || 0);
   if (!gp) return MLB_TEAM_RUNS_AVG;
   return (mlbTeam.runsAllowed || 0) / gp;
-}
-
-/** 先發投手對對手得分的影響（弱投非線性放大） */
-function pitcherRunSuppression(pitcherStats) {
-  if (!pitcherStats) return 0;
-  const q = pitcherQualityIndex(pitcherStats);
-  if (q.tier === 'weak') {
-    return 0.45 + Math.max(0, q.index) * 0.5;
-  }
-  if (q.tier === 'below_avg') {
-    return 0.22 + Math.max(0, q.index) * 0.35;
-  }
-  if (q.elite) {
-    return -0.35 + q.index * 0.25;
-  }
-  return q.index * 0.35;
 }
 
 /**
@@ -258,6 +219,8 @@ export function computeTotalsProjection({
   awayMlb = null,
   homePitcherStats = null,
   awayPitcherStats = null,
+  homePitcherName = null,
+  awayPitcherName = null,
   venueName = null,
   bookmakers = [],
   homeTeamStats = null,
@@ -386,6 +349,10 @@ export function computeTotalsProjection({
       homeStrength: homeTeamStats.rating,
       awayStrength: awayTeamStats.rating,
       eloOverride,
+      homePitcherStats,
+      awayPitcherStats,
+      homePitcherName,
+      awayPitcherName,
     });
     homeRuns = projected.homeRuns;
     awayRuns = projected.awayRuns;
@@ -428,7 +395,7 @@ export function computeTotalsProjection({
   const marketFavorsOver = marketOverProb != null ? marketOverProb >= 0.5 : finalTotal > (marketLine ?? finalTotal);
 
   let totalsContext = null;
-  if (league === 'MLB' && hasPitchers) {
+  if (hasPitchers && (league === 'MLB' || league === 'KBO' || league === 'NPB')) {
     totalsContext = analyzePitchingTotalsContext({
       homePitcherStats,
       awayPitcherStats,
@@ -436,7 +403,19 @@ export function computeTotalsProjection({
       awayMlb,
       parkFactor,
     });
-    factors.push(...totalsContext.factors);
+    // NPB/KBO：λ 路徑已寫「先發λ」因子，此處只補 tier 摘要、避免重複長句
+    if (league === 'MLB') {
+      factors.push(...totalsContext.factors);
+    } else {
+      const hp = totalsContext.homePitcher;
+      const ap = totalsContext.awayPitcher;
+      if (hp?.tier && hp.tier !== 'unknown') {
+        factors.push(`主先發 ${hp.tier}（ERA ${hp.era?.toFixed(2)} WHIP ${hp.whip?.toFixed(2)}）`);
+      }
+      if (ap?.tier && ap.tier !== 'unknown') {
+        factors.push(`客先發 ${ap.tier}（ERA ${ap.era?.toFixed(2)} WHIP ${ap.whip?.toFixed(2)}）`);
+      }
+    }
   }
 
   return {

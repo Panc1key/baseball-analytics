@@ -23,7 +23,7 @@ const baseFlatBet = {
   pick: 'Home',
 };
 
-test('最終 edge 護欄在可靠度校準後仍不可旁路', () => {
+test('市場只作比較，不可用固定 edge 護欄改寫模型機率', () => {
   const scored = enrichCandidate(
     {
       modelProb: 0.7,
@@ -40,8 +40,8 @@ test('最終 edge 護欄在可靠度校準後仍不可旁路', () => {
     'spreads'
   );
 
-  assert.equal(scored.modelProb, 0.5);
-  assert.equal(scored.finalEdgeCapped, true);
+  assert.equal(scored.modelProb, 0.72);
+  assert.equal(scored.finalEdgeCapped, false);
 });
 
 test('校準表必須模型版本一致且精確切片樣本足量', () => {

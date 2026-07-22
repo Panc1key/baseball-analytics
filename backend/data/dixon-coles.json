@@ -3,19 +3,19 @@
     "league": "NPB",
     "rho": 0.08,
     "rawRho": 0.15,
-    "n": 120,
-    "lambdaH": 3.93,
-    "lambdaA": 3.81,
-    "logLik": -592.8166621851661
+    "n": 473,
+    "lambdaH": 3.62,
+    "lambdaA": 3.53,
+    "logLik": -2348.3549696264104
   },
   "KBO": {
     "league": "KBO",
     "rho": 0.08,
     "rawRho": 0.15,
-    "n": 100,
+    "n": 409,
     "lambdaH": 4.84,
-    "lambdaA": 5.02,
-    "logLik": -550.3736366397201
+    "lambdaA": 5.03,
+    "logLik": -2223.136148574754
   },
-  "fittedAt": "2026-07-17T10:16:38.590Z"
+  "fittedAt": "2026-07-20T12:47:22.744Z"
 }

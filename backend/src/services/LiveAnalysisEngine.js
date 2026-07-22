@@ -31,6 +31,7 @@ import {
   formatDisciplineRejectLog,
 } from './LiveDiscipline.js';
 import { loadPrematchStance } from './PrematchLiveGuard.js';
+import { recordOddsSnapshot } from './PitOddsService.js';
 import {
   getMlbStandings,
   getMlbScheduleWindow,
@@ -556,6 +557,7 @@ export async function runLiveAnalysis() {
   let yahooScoreHits = 0;
 
   for (const game of liveGames) {
+    if (config.mlbTruthResearchOnly && game.league === 'MLB') continue;
     let bookmakers = [];
     try {
       bookmakers = JSON.parse(game.raw_odds || '[]');
@@ -623,7 +625,11 @@ export async function runLiveAnalysis() {
       game.home_team,
       game.away_team,
       bookmakers,
-      { mlbStandings, mlbScheduleGame }
+      {
+        mlbStandings,
+        mlbScheduleGame,
+        commenceTime: game.commence_time,
+      }
     );
 
     const parsed = parseScores(game);
@@ -813,6 +819,9 @@ export function getLiveRecommendations(filters = {}) {
       AND IFNULL(g.status, '') NOT IN ('completed', 'cancelled', 'postponed')
       AND r.ev >= ?
   `;
+  if (config.mlbTruthResearchOnly) {
+    sql += " AND r.league != 'MLB'";
+  }
   const params = [minEv];
   if (league) {
     sql += ' AND r.league = ?';
@@ -853,6 +862,7 @@ export function getLiveStatus() {
        JOIN games g ON g.id = r.game_id
        WHERE r.phase = 'live'
          AND r.league IN (${BASEBALL_LEAGUE_SQL})
+         ${config.mlbTruthResearchOnly ? "AND r.league != 'MLB'" : ''}
          AND g.completed = 0
          AND IFNULL(g.status, '') NOT IN ('completed', 'cancelled', 'postponed')`
     )
@@ -861,7 +871,9 @@ export function getLiveStatus() {
     liveGameCount: games.length,
     recommendationCount: recCount ?? 0,
     leagues: Object.keys(LEAGUES),
-    note: 'v1.2：MLB linescore + NPB Yahoo 比分補源 + LiveDiscipline',
+    note: config.mlbTruthResearchOnly
+      ? 'MLB research_only：滾球推薦已停用'
+      : 'v1.2：MLB linescore + NPB Yahoo 比分補源 + LiveDiscipline',
     version: 'live-v1.2',
     scoreSources: {
       MLB: 'statsapi.mlb.com linescore',
@@ -965,7 +977,10 @@ export async function syncLiveDataLite() {
         INSERT INTO games (id, league, commence_time, home_team, away_team, raw_odds, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(id) DO UPDATE SET
-          raw_odds = excluded.raw_odds,
+          raw_odds = CASE
+            WHEN datetime(games.commence_time) <= datetime('now') THEN games.raw_odds
+            ELSE excluded.raw_odds
+          END,
           commence_time = excluded.commence_time,
           updated_at = datetime('now')
       `).run(
@@ -976,6 +991,13 @@ export async function syncLiveDataLite() {
         game.away_team,
         JSON.stringify(game.bookmakers || [])
       );
+      recordOddsSnapshot({
+        gameId: game.id,
+        league: code,
+        commenceTime: game.commence_time,
+        bookmakers: game.bookmakers || [],
+        source: 'odds_api',
+      });
       oddsUpdates += 1;
     }
   }

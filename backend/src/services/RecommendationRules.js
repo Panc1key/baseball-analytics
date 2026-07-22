@@ -116,23 +116,25 @@ function buildDecisionUniverse(game, markets, analysis, bookmakers = []) {
     });
   }
 
-  for (const total of buildTotalCandidates(
-    markets,
-    analysis.totalsProjection,
-    game.league
-  )) {
-    const rejectReasons = [];
-    if (!total.structuralOk) rejectReasons.push(total.skipReason || '結構不符');
-    if (total.ev < (config.totalsMinEv ?? config.minEvThreshold)) {
-      rejectReasons.push('EV不足');
+  if (game.league !== 'MLB' || config.enableMlbLegacyTotals) {
+    for (const total of buildTotalCandidates(
+      markets,
+      analysis.totalsProjection,
+      game.league
+    )) {
+      const rejectReasons = [];
+      if (!total.structuralOk) rejectReasons.push(total.skipReason || '結構不符');
+      if (total.ev < (config.totalsMinEv ?? config.minEvThreshold)) {
+        rejectReasons.push('EV不足');
+      }
+      decisions.push({
+        ...total,
+        edgeProb: total.edgePct,
+        dataQuality: analysis.totalsProjection?.dataQuality ?? analysis.dataQuality,
+        eligible: rejectReasons.length === 0,
+        rejectReason: rejectReasons.join('；') || null,
+      });
     }
-    decisions.push({
-      ...total,
-      edgeProb: total.edgePct,
-      dataQuality: analysis.totalsProjection?.dataQuality ?? analysis.dataQuality,
-      eligible: rejectReasons.length === 0,
-      rejectReason: rejectReasons.join('；') || null,
-    });
   }
 
   return decisions.map((decision) => {
@@ -190,9 +192,9 @@ export function formatTotalPick(name, point) {
 
 export function rankLabel(rank, tier = null) {
   if (tier === 'sample' && rank === 1) return '樣本';
-  if (rank === 1) return '主推';
-  if (rank === 2) return '次推';
-  return `第${rank}推`;
+  if (rank === 1) return '關注';
+  if (rank === 2) return '次選';
+  return `第${rank}選`;
 }
 
 function sampleMarketPriority(preferTotals) {
@@ -597,6 +599,8 @@ function pickTotalCandidate(game, markets, analysis, bookmakers) {
       awayMlb: analysis.awayMlb,
       homePitcherStats: analysis.homePitcherStats,
       awayPitcherStats: analysis.awayPitcherStats,
+      homePitcherName: analysis.homePitcherName,
+      awayPitcherName: analysis.awayPitcherName,
       venueName: analysis.venueName,
       bookmakers: bookmakers || [],
     });

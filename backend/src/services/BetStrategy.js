@@ -50,6 +50,10 @@ function isSpreadPlus15Pick(rec) {
   return rec.market === 'spreads' && /\+1\.5\b/.test(rec.pick || '');
 }
 
+function isSpreadMinus15Pick(rec) {
+  return rec.market === 'spreads' && /-1\.5\b/.test(rec.pick || '');
+}
+
 function totalsAllowed(rec) {
   if (rec.market !== 'totals') return true;
   if (isUnderTotalPick(rec)) return false;
@@ -165,11 +169,21 @@ export function qualifiesFlatBet(rec, options = {}) {
   if (!isNpbFamily && modelProb < config.flatBetMinProb) return false;
   if (!isNpbFamily && edge < minEdgeForMarket(market)) return false;
 
+  // 獨贏額外勝率下限（實驗：砍掉 58–63% 軟熱門噪音帶）
+  const h2hMin = config.flatBetMinProbH2h ?? 0;
+  if (market === 'h2h' && h2hMin > 0 && modelProb < h2hMin) return false;
+
   if (market === 'totals') return totalsAllowed(rec);
   if (isPropMarket(market)) return config.enablePlayerProps;
 
   if (isSpreadPlus15Pick(rec)) {
     const minCover = config.flatBetPlus15MinCover ?? 0.62;
+    if (modelProb < minCover) return false;
+  }
+
+  // −1.5：需較強蓋盤信心才進均注（避免 68% 熱門讓分過鬆）
+  if (isSpreadMinus15Pick(rec)) {
+    const minCover = config.flatBetMinus15MinCover ?? 0.7;
     if (modelProb < minCover) return false;
   }
 

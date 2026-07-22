@@ -24,7 +24,8 @@ export function marketLabel(market) {
 
 export function tierLabel(tier) {
   return {
-    primary: '主推',
+    // primary≠必下：僅高評分關注；真下看「均注」
+    primary: '關注',
     watch: '觀察',
     sample: '樣本',
   }[tier] || tier;

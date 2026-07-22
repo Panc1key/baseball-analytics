@@ -127,6 +127,9 @@ export function querySlatePicks(filters = {}) {
       AND ${slateDisplayGameWhere('g')}
   `;
   const params = [minEv];
+  if (config.mlbTruthResearchOnly) {
+    sql += " AND r.league != 'MLB'";
+  }
 
   if (sportPred) {
     sql += ` AND (${sportPred})`;
@@ -469,7 +472,7 @@ export async function slateFullRefresh(options = {}) {
   if (wantBaseball) {
     // 今日推薦只要初盤；滾球頁傳 sports=['live'] 才附帶滾球分析
     const baseball = await runSlateModule('baseball', () =>
-      fullRefresh({ includeLive: wantLive })
+      fullRefresh({ includeLive: wantLive, leagueCodes: ['MLB'] })
     );
     if (baseball?.error) result.errors.push({ sport: 'baseball', message: baseball.error });
     result.baseball = baseball;

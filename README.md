@@ -1,8 +1,9 @@
-# Baseball Analytics - 棒球初盤分析系統
+# Baseball Analytics - MLB 賽前研究系統
 
-個人測試用棒球盤口分析工具，支援 **MLB / NPB / KBO** 初盤分析、EV 計算、串關推薦與投注紀錄。
+個人用 MLB 賽前資料研究工具。目前採取 `research_only` 模式：
+不提供實投推薦、均注、串關或建議下注金額。
 
-> 目的：用數據輔助決策，減少情緒下注。均注 $2、串關 $1，僅供測試驗證模型效果。
+> 目的：建立可稽核的賽前資料、紙上帳本與樣本外驗證流程；未通過驗證前不宣稱盈利。
 
 ## 功能
 
@@ -82,8 +83,20 @@ baseball-analytics/
 │   │   └── db/           # SQLite
 │   └── data/             # analytics.db
 └── frontend/
-    └── src/              # Vue 3 Dashboard
+│   └── src/              # Vue 3 賽前事實資料面板
+└── collector/            # 獨立 Python 外部資料蒐集與封存工具
+    ├── sofascore_collector/
+    ├── data/             # collector.db（原始資料與標準化列）
+    └── exports/          # 僅 prematch 的 Node.js 交接檔
 ```
+
+## 資料責任邊界
+
+| 元件 | 唯一責任 | 禁止事項 |
+|---|---|---|
+| `collector/` Python | 取得、封存、標準化外部資料 | 計算推薦、調整權重、寫入投注帳 |
+| `backend/` Node.js | 驗證時間點、建立特徵、紙上追蹤與 PIT 驗證 | 直接依賴未審核爬蟲回應 |
+| `frontend/` Vue | 顯示資料來源、`✓/△/×` 狀態與研究結果 | 將模型輸出包裝為投注訊號 |
 
 ## 後續可擴展
 

@@ -5,8 +5,9 @@ import {
   getMlbStandings,
   getMlbScheduleRange,
   matchMlbTeam,
+  matchMlbOfficialGame,
   getProbablePitchers,
-  getPitcherSeasonStats,
+  getMlbPitcherPregameFeatures,
 } from './MlbStatsService.js';
 import {
   analyzeMatchup,
@@ -21,6 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { pickGameRecommendations } from './RecommendationRules.js';
+import { recordOddsSnapshot, resolvePitOdds } from './PitOddsService.js';
 
 const __analysisDir = path.dirname(fileURLToPath(import.meta.url));
 import { buildParlaysFromDb, LEAGUE_MARKETS_INFO, getSlateCoverage } from './ParlayBuilder.js';
@@ -40,6 +42,11 @@ import {
   slateDisplayGameWhere,
 } from '../utils/activeGames.js';
 import { runLiveAnalysis, getLiveRecommendations, getLiveStatus } from './LiveAnalysisEngine.js';
+import { runMlbPrematchTruthPipeline } from './MlbPrematchTruthPipeline.js';
+import {
+  autoCreateEligiblePaperBets,
+  autoSettleMlbPaperBets,
+} from './MlbPaperLedger.js';
 
 let refreshPromise = null;
 
@@ -95,12 +102,14 @@ function upsertGame(game, league, rawProps = null) {
     bookmakersJson,
     rawProps ? JSON.stringify(rawProps) : null
   );
-  // 快照仍記錄當下盤（含滾球），供對帳；初盤分析只用鎖定的 games.raw_odds
-  db.prepare(`
-    INSERT OR IGNORE INTO odds_snapshots
-      (game_id, league, captured_at, bookmakers_json, source)
-    VALUES (?, ?, datetime('now'), ?, ?)
-  `).run(game.id, league, bookmakersJson, started ? 'odds_api_post_start' : 'odds_api');
+  // 快照仍記錄當下盤（含滾球）；PIT resolver 只允許 captured_at < commence_time。
+  recordOddsSnapshot({
+    gameId: game.id,
+    league,
+    commenceTime: game.commence_time,
+    bookmakers: game.bookmakers || [],
+    source: started ? 'odds_api_post_start' : 'odds_api',
+  });
 }
 
 function saveGameProps(gameId, bookmakers) {
@@ -210,6 +219,10 @@ export function restorePrematchOddsFromSnapshots() {
 
 /** 讀取某場應用於初盤分析的 bookmakers（優先開賽前合理快照） */
 function loadPrematchBookmakers(game) {
+  if (game.league === 'MLB') {
+    const pit = resolvePitOdds(game.id, game.commence_time);
+    return pit.ok ? pit.bookmakers : [];
+  }
   const commenceMs = new Date(game.commence_time).getTime();
   const started = Number.isFinite(commenceMs) && commenceMs <= Date.now();
   if (!started) {
@@ -573,13 +586,15 @@ function saveRecommendation(rec) {
 
 /**
  * 同步賠率與比分，更新隊伍統計
- * @param {{ forceHeavy?: boolean }} [options] forceHeavy=true 時無視 Yahoo/Elo/近窗快取
+ * @param {{ forceHeavy?: boolean, leagueCodes?: string[] }} [options]
+ * forceHeavy=true 時無視 Yahoo/Elo/近窗快取；leagueCodes 限制外部賠率／比分同步範圍
  */
 export async function syncAllData(options = {}) {
   const forceHeavy = options.forceHeavy === true;
+  const leagueCodes = Array.isArray(options.leagueCodes) ? options.leagueCodes : null;
   const [oddsData, scoresData] = await Promise.all([
-    fetchAllLeagueOdds(),
-    fetchAllLeagueScores(),
+    fetchAllLeagueOdds(leagueCodes),
+    fetchAllLeagueScores(leagueCodes),
   ]);
 
   let mlbStandings = [];
@@ -652,116 +667,124 @@ export async function syncAllData(options = {}) {
   const yahooMaxH = config.baseballYahooMaxAgeHours ?? 6;
   const eloMaxH = config.baseballEloMaxAgeHours ?? 4;
   const rollingMaxH = config.baseballRollingMaxAgeHours ?? 3;
+  const isMlbOnlyRefresh =
+    Array.isArray(leagueCodes) &&
+    leagueCodes.length === 1 &&
+    leagueCodes[0] === 'MLB';
 
-  // NPB：Odds API scores 常為 null → Yahoo 順位表補隊力（免費、不耗 Odds 額度）
-  if (forceHeavy || shouldRebuildHeavy('baseball_yahoo_at', yahooMaxH)) {
-    try {
-      const npbSync = await syncNpbStandingsFromYahoo();
-      setMeta('baseball_yahoo_at', new Date().toISOString());
-      console.log(`[sync] Yahoo NPB 順位 ${npbSync.count} 隊`);
-    } catch (err) {
-      console.warn('[sync] Yahoo NPB 順位失敗:', err.message);
-    }
-  } else {
-    console.log(
-      `[sync] Yahoo NPB 沿用快取（${metaAgeHours('baseball_yahoo_at').toFixed(1)}h 前）`
-    );
-  }
-
-  // NPB/KBO：完賽序重放滾動 Elo（供獨贏 / 泊松 λ）
-  if (forceHeavy || shouldRebuildHeavy('baseball_elo_at', eloMaxH)) {
-    try {
-      const elo = rebuildAllBaseballElo();
-      setMeta('baseball_elo_at', new Date().toISOString());
-      console.log(
-        `[sync] Elo 重建 NPB ${elo.NPB.games}場/${elo.NPB.teams}隊 · KBO ${elo.KBO.games}場/${elo.KBO.teams}隊`
-      );
-    } catch (err) {
-      console.warn('[sync] Elo 重建失敗:', err.message);
-    }
-
-    // NPB/KBO：用 DB 完賽比分補回戰績/得失分（避免只剩 Elo 空殼 → 永遠樣本）
-    try {
-      const npbStats = updateTeamStatsFromDbGames('NPB');
-      const kboStats = updateTeamStatsFromDbGames('KBO');
-      console.log(
-        `[sync] 隊力重建 NPB ${npbStats.games}場/${npbStats.teams}隊 · KBO ${kboStats.games}場/${kboStats.teams}隊`
-      );
-    } catch (err) {
-      console.warn('[sync] 隊力重建失敗:', err.message);
-    }
-  } else {
-    console.log(
-      `[sync] Elo/隊力沿用快取（${metaAgeHours('baseball_elo_at').toFixed(1)}h 前）`
-    );
-    // 輕量：只補隊力數字，不做 Elo 重放
-    try {
-      updateTeamStatsFromDbGames('NPB');
-      updateTeamStatsFromDbGames('KBO');
-    } catch (err) {
-      console.warn('[sync] 隊力輕量更新失敗:', err.message);
-    }
-  }
-
-  // 近窗形態：完賽累積 RPG + MLB OBP/SLG/OPS/WHIP（初盤 λ 輸入）
-  if (forceHeavy || shouldRebuildHeavy('baseball_rolling_at', rollingMaxH)) {
-    try {
-      const rolling = await refreshAllRollingTeamForm();
-      setMeta('baseball_rolling_at', new Date().toISOString());
-      console.log(
-        `[sync] 近窗形態 NPB ${rolling.NPB.teams}隊 · KBO ${rolling.KBO.teams}隊` +
-          ` · MLB OPS ${rolling.MLB_ops?.teams ?? 0}隊` +
-          ` · NPB baseball-data ${rolling.NPB_ops?.teams ?? 0}隊` +
-          ` · KBO 官網 ${rolling.KBO_ops?.teams ?? 0}隊`
-      );
-    } catch (err) {
-      console.warn('[sync] 近窗形態失敗:', err.message);
-    }
-  } else {
-    console.log(
-      `[sync] 近窗形態沿用快取（${metaAgeHours('baseball_rolling_at').toFixed(1)}h 前）`
-    );
-  }
-
-  // Dixon–Coles ρ：24h 內已擬合則重用，避免每次同步重算
-  try {
-    const dcPath = path.join(__analysisDir, '../../data/dixon-coles.json');
-    let reuse = null;
-    if (fs.existsSync(dcPath)) {
+  if (!isMlbOnlyRefresh) {
+    // NPB：Odds API scores 常為 null → Yahoo 順位表補隊力（免費、不耗 Odds 額度）
+    if (forceHeavy || shouldRebuildHeavy('baseball_yahoo_at', yahooMaxH)) {
       try {
-        const prev = JSON.parse(fs.readFileSync(dcPath, 'utf8'));
-        const ageH =
-          prev.fittedAt != null
-            ? (Date.now() - Date.parse(prev.fittedAt)) / 3600000
-            : Infinity;
-        if (Number.isFinite(ageH) && ageH < 24) reuse = prev;
-      } catch {
-        /* refit */
+        const npbSync = await syncNpbStandingsFromYahoo();
+        setMeta('baseball_yahoo_at', new Date().toISOString());
+        console.log(`[sync] Yahoo NPB 順位 ${npbSync.count} 隊`);
+      } catch (err) {
+        console.warn('[sync] Yahoo NPB 順位失敗:', err.message);
+      }
+    } else {
+      console.log(
+        `[sync] Yahoo NPB 沿用快取（${metaAgeHours('baseball_yahoo_at').toFixed(1)}h 前）`
+      );
+    }
+
+    // NPB/KBO：完賽序重放滾動 Elo（供獨贏 / 泊松 λ）
+    if (forceHeavy || shouldRebuildHeavy('baseball_elo_at', eloMaxH)) {
+      try {
+        const elo = rebuildAllBaseballElo();
+        setMeta('baseball_elo_at', new Date().toISOString());
+        console.log(
+          `[sync] Elo 重建 NPB ${elo.NPB.games}場/${elo.NPB.teams}隊 · KBO ${elo.KBO.games}場/${elo.KBO.teams}隊`
+        );
+      } catch (err) {
+        console.warn('[sync] Elo 重建失敗:', err.message);
+      }
+
+      // NPB/KBO：用 DB 完賽比分補回戰績/得失分（避免只剩 Elo 空殼 → 永遠樣本）
+      try {
+        const npbStats = updateTeamStatsFromDbGames('NPB');
+        const kboStats = updateTeamStatsFromDbGames('KBO');
+        console.log(
+          `[sync] 隊力重建 NPB ${npbStats.games}場/${npbStats.teams}隊 · KBO ${kboStats.games}場/${kboStats.teams}隊`
+        );
+      } catch (err) {
+        console.warn('[sync] 隊力重建失敗:', err.message);
+      }
+    } else {
+      console.log(
+        `[sync] Elo/隊力沿用快取（${metaAgeHours('baseball_elo_at').toFixed(1)}h 前）`
+      );
+      // 輕量：只補隊力數字，不做 Elo 重放
+      try {
+        updateTeamStatsFromDbGames('NPB');
+        updateTeamStatsFromDbGames('KBO');
+      } catch (err) {
+        console.warn('[sync] 隊力輕量更新失敗:', err.message);
       }
     }
-    if (reuse?.NPB || reuse?.KBO) {
-      if (reuse.NPB?.rho != null) config.dixonColesRhoNpb = reuse.NPB.rho;
-      if (reuse.KBO?.rho != null) config.dixonColesRhoKbo = reuse.KBO.rho;
-      console.log(
-        `[sync] Dixon–Coles 沿用快取 ρ NPB=${reuse.NPB?.rho} · KBO=${reuse.KBO?.rho}` +
-          `（${reuse.fittedAt || ''}）`
-      );
+
+    // 近窗形態：完賽累積 RPG + MLB OBP/SLG/OPS/WHIP（初盤 λ 輸入）
+    if (forceHeavy || shouldRebuildHeavy('baseball_rolling_at', rollingMaxH)) {
+      try {
+        const rolling = await refreshAllRollingTeamForm();
+        setMeta('baseball_rolling_at', new Date().toISOString());
+        console.log(
+          `[sync] 近窗形態 NPB ${rolling.NPB.teams}隊 · KBO ${rolling.KBO.teams}隊` +
+            ` · MLB OPS ${rolling.MLB_ops?.teams ?? 0}隊` +
+            ` · NPB baseball-data ${rolling.NPB_ops?.teams ?? 0}隊` +
+            ` · KBO 官網 ${rolling.KBO_ops?.teams ?? 0}隊`
+        );
+      } catch (err) {
+        console.warn('[sync] 近窗形態失敗:', err.message);
+      }
     } else {
-      const dc = fitAllDixonColesRho();
-      fs.mkdirSync(path.dirname(dcPath), { recursive: true });
-      fs.writeFileSync(
-        dcPath,
-        JSON.stringify({ ...dc, fittedAt: new Date().toISOString() }, null, 2),
-        'utf8'
-      );
-      if (dc.NPB?.rho != null) config.dixonColesRhoNpb = dc.NPB.rho;
-      if (dc.KBO?.rho != null) config.dixonColesRhoKbo = dc.KBO.rho;
       console.log(
-        `[sync] Dixon–Coles ρ NPB=${dc.NPB?.rho} (n=${dc.NPB?.n}) · KBO=${dc.KBO?.rho} (n=${dc.KBO?.n})`
+        `[sync] 近窗形態沿用快取（${metaAgeHours('baseball_rolling_at').toFixed(1)}h 前）`
       );
     }
-  } catch (err) {
-    console.warn('[sync] Dixon–Coles 擬合失敗:', err.message);
+
+    // Dixon–Coles ρ：24h 內已擬合則重用，避免每次同步重算
+    try {
+      const dcPath = path.join(__analysisDir, '../../data/dixon-coles.json');
+      let reuse = null;
+      if (fs.existsSync(dcPath)) {
+        try {
+          const prev = JSON.parse(fs.readFileSync(dcPath, 'utf8'));
+          const ageH =
+            prev.fittedAt != null
+              ? (Date.now() - Date.parse(prev.fittedAt)) / 3600000
+              : Infinity;
+          if (Number.isFinite(ageH) && ageH < 24) reuse = prev;
+        } catch {
+          /* refit */
+        }
+      }
+      if (reuse?.NPB || reuse?.KBO) {
+        if (reuse.NPB?.rho != null) config.dixonColesRhoNpb = reuse.NPB.rho;
+        if (reuse.KBO?.rho != null) config.dixonColesRhoKbo = reuse.KBO.rho;
+        console.log(
+          `[sync] Dixon–Coles 沿用快取 ρ NPB=${reuse.NPB?.rho} · KBO=${reuse.KBO?.rho}` +
+            `（${reuse.fittedAt || ''}）`
+        );
+      } else {
+        const dc = fitAllDixonColesRho();
+        fs.mkdirSync(path.dirname(dcPath), { recursive: true });
+        fs.writeFileSync(
+          dcPath,
+          JSON.stringify({ ...dc, fittedAt: new Date().toISOString() }, null, 2),
+          'utf8'
+        );
+        if (dc.NPB?.rho != null) config.dixonColesRhoNpb = dc.NPB.rho;
+        if (dc.KBO?.rho != null) config.dixonColesRhoKbo = dc.KBO.rho;
+        console.log(
+          `[sync] Dixon–Coles ρ NPB=${dc.NPB?.rho} (n=${dc.NPB?.n}) · KBO=${dc.KBO?.rho} (n=${dc.KBO?.n})`
+        );
+      }
+    } catch (err) {
+      console.warn('[sync] Dixon–Coles 擬合失敗:', err.message);
+    }
+  } else {
+    console.log('[sync] MLB 賽前排程略過 NPB/KBO 重建與衍生資料寫入');
   }
 
   // 記錄 MLB 當日預期場次（用於串關覆蓋率顯示）
@@ -805,6 +828,16 @@ export async function syncAllData(options = {}) {
 
 /** 對所有初盤場次跑分析並產生推薦 */
 export async function runAnalysis() {
+  if (config.mlbTruthResearchOnly) {
+    return {
+      disabled: true,
+      mode: 'research_only',
+      reason: 'legacy_recommendation_pipeline_disabled',
+      singles: 0,
+      parlays: 0,
+      modelVersion: config.modelVersion,
+    };
+  }
   clearOldRecommendations();
   try {
     const oddsFix = restorePrematchOddsFromSnapshots();
@@ -913,15 +946,7 @@ export async function runAnalysis() {
 
     let mlbScheduleGame = null;
     if (game.league === 'MLB') {
-      mlbScheduleGame = mlbSchedule.find((g) => {
-        const home = g.teams?.home?.team?.name;
-        const away = g.teams?.away?.team?.name;
-        if (!home || !away) return false;
-        return (
-          matchMlbTeam(game.home_team, [{ name: home }]) &&
-          matchMlbTeam(game.away_team, [{ name: away }])
-        );
-      });
+      mlbScheduleGame = matchMlbOfficialGame(game, mlbSchedule);
     }
 
     while (eloCursor < eloChrono.length) {
@@ -939,7 +964,12 @@ export async function runAnalysis() {
       game.home_team,
       game.away_team,
       bookmakers,
-      { mlbStandings, mlbScheduleGame, eloOverride }
+      {
+        mlbStandings,
+        mlbScheduleGame,
+        eloOverride,
+        commenceTime: game.commence_time,
+      }
     );
     const featureSnapshotId = saveFeatureSnapshot(analysisRunId, game, analysis);
 
@@ -964,11 +994,15 @@ export async function runAnalysis() {
 
       if (mlbScheduleGame) {
         const pitchers = getProbablePitchers(mlbScheduleGame);
+        const pitOptions = {
+          cutoffDate: mlbScheduleGame.officialDate ?? null,
+          excludeGamePk: mlbScheduleGame.gamePk ?? null,
+        };
         homePitcherName = pitchers.home?.name;
         awayPitcherName = pitchers.away?.name;
         [homePitcherStats, awayPitcherStats] = await Promise.all([
-          getPitcherSeasonStats(pitchers.home?.id),
-          getPitcherSeasonStats(pitchers.away?.id),
+          getMlbPitcherPregameFeatures(pitchers.home?.id, game.commence_time, pitOptions),
+          getMlbPitcherPregameFeatures(pitchers.away?.id, game.commence_time, pitOptions),
         ]);
       }
 
@@ -982,9 +1016,13 @@ export async function runAnalysis() {
       };
     } else if (game.league === 'MLB' && mlbScheduleGame) {
       const pitchers = getProbablePitchers(mlbScheduleGame);
+      const pitOptions = {
+        cutoffDate: mlbScheduleGame.officialDate ?? null,
+        excludeGamePk: mlbScheduleGame.gamePk ?? null,
+      };
       const [homePitcherStats, awayPitcherStats] = await Promise.all([
-        getPitcherSeasonStats(pitchers.home?.id),
-        getPitcherSeasonStats(pitchers.away?.id),
+        getMlbPitcherPregameFeatures(pitchers.home?.id, game.commence_time, pitOptions),
+        getMlbPitcherPregameFeatures(pitchers.away?.id, game.commence_time, pitOptions),
       ]);
       propsContext = { ...propsContext, homePitcherStats, awayPitcherStats };
     }
@@ -1491,11 +1529,13 @@ function findClosingMarket(entry, game) {
     SELECT bookmakers_json
     FROM odds_snapshots
     WHERE game_id = ?
-      AND datetime(captured_at) <= datetime(?)
+      AND datetime(captured_at) < datetime(?)
+      AND source NOT LIKE '%_post_start'
     ORDER BY datetime(captured_at) DESC
     LIMIT 1
   `).get(entry.game_id, game.commence_time);
-  const oddsJson = closingSnapshot?.bookmakers_json ?? game.raw_odds;
+  const oddsJson = closingSnapshot?.bookmakers_json ??
+    (game.league === 'MLB' ? null : game.raw_odds);
   if (!oddsJson) return null;
   let bookmakers;
   try {
@@ -1708,15 +1748,17 @@ export function getAppStatus() {
 
 /**
  * 同步 → 分析，帶防重入鎖
- * @param {{ includeLive?: boolean }} [options] includeLive 預設 false（初盤頁不順帶跑滾球）
+ * @param {{ includeLive?: boolean, forceHeavy?: boolean, leagueCodes?: string[] }} [options]
+ * includeLive 預設 false（初盤頁不順帶跑滾球）；排程以 leagueCodes=['MLB'] 控制額度。
  */
 export async function fullRefresh(options = {}) {
   if (refreshPromise) return refreshPromise;
   const includeLive = options.includeLive === true;
   const forceHeavy = options.forceHeavy === true;
+  const leagueCodes = Array.isArray(options.leagueCodes) ? options.leagueCodes : null;
 
   refreshPromise = (async () => {
-    const sync = await syncAllData({ forceHeavy });
+    const sync = await syncAllData({ forceHeavy, leagueCodes });
     setMeta('last_sync_at', new Date().toISOString());
     if (sync.oddsQuota?.remaining != null) {
       setMeta('odds_quota_remaining', parseInt(sync.oddsQuota.remaining, 10) || 0);
@@ -1724,7 +1766,10 @@ export async function fullRefresh(options = {}) {
 
     const settledBets = autoSettlePendingBets();
     const settledSnapshots = autoSettleRecommendationSnapshots();
+    const settledMlbPaperBets = autoSettleMlbPaperBets();
     const analysis = await runAnalysis();
+    const mlbTruth = await runMlbPrematchTruthPipeline();
+    const createdMlbPaperBets = autoCreateEligiblePaperBets();
     setMeta('last_analysis_at', new Date().toISOString());
 
     let liveAnalysis = null;
@@ -1755,6 +1800,9 @@ export async function fullRefresh(options = {}) {
       liveRecommendationCount,
       settledBets,
       settledSnapshots,
+      settledMlbPaperBets,
+      mlbTruth,
+      createdMlbPaperBets,
     };
   })();
 

@@ -26,13 +26,16 @@
  * - PickScorer：排序分可作 UI，硬決策以 EV 與最低校準勝率為準
  */
 
-export const MODEL_PIPELINE_VERSION = 'baseball-v2.9.0';
+export const MODEL_PIPELINE_VERSION = 'baseball-v2.9.1';
 
 /**
- * SSOT 硬約束（v2.8.1：高球場/preferTotals/過信機率均注閘）：
+ * SSOT 硬約束（v2.9.1：KBO 當日先發入 λ；v2.9.0：校準護欄／均注收緊）：
  * 1. 有 λ 時獨贏以泊松為主（Elo/Log5 權重受 ssotPoissonMinWeight 限制）
  * 2. 讓分/大小共用同一 ρ
  * 3. 滾球 prior λ 鎖定 feature_snapshots，不用滾球盤重估
+ * 4. modelProb>72% 不得 primary；−1.5 均注需蓋盤≥70%
+ * 5. 獨贏均注 modelProb≥64%（砍軟熱門噪音帶）
+ * 6. 可靠度校準表須同 modelVersion 且切片達最低樣本
  */
 
 export const MODEL_STAGES = [

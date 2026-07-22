@@ -5,6 +5,7 @@ import apiRouter from './routes/api.js';
 import footballRouter from './routes/football.js';
 import basketballRouter from './routes/basketball.js';
 import tennisRouter from './routes/tennis.js';
+import { startMlbPrematchScheduler } from './services/MlbPrematchScheduler.js';
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.listen(config.port, () => {
   } else {
     console.log('API_FOOTBALL_KEY 已載入（陣容/傷病/戰術）');
   }
+  startMlbPrematchScheduler();
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${config.port} 已被佔用，請修改 backend/.env 的 PORT 或關閉佔用進程`);

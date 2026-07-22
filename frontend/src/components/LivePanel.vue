@@ -23,7 +23,7 @@
     <el-alert type="info" :closable="false" show-icon class="live-alert">
       <template #title>
         v1.3：開局前 3 局不推 · 0-0 需更晚 · 平手不推獨贏 · 小球加嚴 · 早段禁止翻初盤結論。
-        MLB 用官方 linescore；NPB 用 Yahoo 補比分。無比分不推 · 獨贏勝率&lt;60%不推 · &lt;65% 禁主推。
+        MLB 用官方 linescore；NPB 用 Yahoo 補比分。無比分不推 · 獨贏勝率&lt;60%不推 · &lt;65% 不掛關注。
         「同步滾球」更新比分+賠率後重算。
         <span v-if="pollMinutes > 0">列表每 {{ pollMinutes }} 分鐘自動重載（不耗 API）；更新盤口請按「同步滾球」。</span>
       </template>

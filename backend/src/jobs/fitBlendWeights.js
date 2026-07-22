@@ -100,7 +100,7 @@ async function evaluate(marketW, scoreW, totalsW) {
         game.home_team,
         game.away_team,
         bookmakers,
-        { eloOverride: walkers[game.league] }
+        { eloOverride: walkers[game.league], commenceTime: game.commence_time }
       );
       const hs = Number(game.home_score);
       const as = Number(game.away_score);

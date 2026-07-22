@@ -1,7 +1,6 @@
 import { config } from '../config.js';
 import {
   decimalToImpliedProb,
-  calibrateModelProb,
   calcEV,
   calcEVWithPush,
   decimalToNetOdds,
@@ -42,6 +41,7 @@ export function calcDataQuality(analysis, league) {
     } else q = Math.min(q, 0.3);
     if (analysis.marketHomeProb != null) q += 0.15;
     if (analysis.factors?.some((f) => f.includes('泊松') || f.includes('得失分'))) q += 0.1;
+    if (analysis.homePitcherEra != null && analysis.awayPitcherEra != null) q += 0.12;
   } else if (analysis.factors?.length >= 2) {
     q += 0.35;
   }
@@ -103,6 +103,12 @@ export function scorePick({
     tier = 'watch';
   }
 
+  // 過信降級：74% 大分等不得掛「主推」，避免幻覺信心（均注另有上限閘）
+  const maxPrimary = config.primaryMaxModelProb ?? 0.72;
+  if (tier === 'primary' && modelProb > maxPrimary) {
+    tier = 'watch';
+  }
+
   return {
     score: Math.round(score * 10) / 10,
     tier,
@@ -116,22 +122,13 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
   const impliedProb = decimalToImpliedProb(candidate.oddsDecimal ?? candidate.odds?.price);
   const oddsDecimal = candidate.oddsDecimal ?? candidate.odds?.price;
   const rawModelProb = candidate.rawModelProb ?? candidate.modelProb;
-  const maxEdge =
-    marketType === 'spreads'
-      ? (config.spreadsMaxModelEdgePct ?? config.maxModelEdgePct)
-      : config.maxModelEdgePct;
-  const probabilityCalibrated = candidate.probabilityCalibrated === true;
-  let modelProb = probabilityCalibrated
-    ? candidate.modelProb
-    : calibrateModelProb(rawModelProb, impliedProb, maxEdge);
+  let modelProb = rawModelProb;
 
   // 可靠度分箱校準（若有歷史表）
   modelProb = applyReliabilityCalibration(modelProb, league, marketType);
-  // 最終 trust-region 必須在所有校準之後套用；不能因上游已市場混合而繞過。
-  const fairReference = candidate.marketProb ?? impliedProb;
+  // 市場只作比較基準，禁止以「市場 + 固定百分比」改寫模型機率或製造 EV。
   const preCapProb = modelProb;
-  modelProb = calibrateModelProb(modelProb, fairReference, maxEdge);
-  const finalEdgeCapped = Math.abs(modelProb - preCapProb) > 1e-9;
+  const finalEdgeCapped = false;
 
   const pushProb = candidate.pushProb ?? 0;
   const ev =
@@ -162,7 +159,7 @@ export function enrichCandidate(candidate, analysis, league, marketType) {
     preCapProb,
     finalEdgeCapped,
     probabilityCalibrated: true,
-    calibrationCount: (candidate.calibrationCount ?? 0) + (probabilityCalibrated ? 0 : 1),
+    calibrationCount: (candidate.calibrationCount ?? 0) + 1,
     modelProb,
     ev,
     impliedProb,

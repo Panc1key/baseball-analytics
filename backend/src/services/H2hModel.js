@@ -145,6 +145,10 @@ export function computeH2hProbabilities({
   awayPitcherStats = null,
   homeInjuryCount = 0,
   awayInjuryCount = 0,
+  homeStarPenalty = 0,
+  awayStarPenalty = 0,
+  homeStarHits = null,
+  awayStarHits = null,
   homeFallbackRating = 0.5,
   awayFallbackRating = 0.5,
   venueName = null,
@@ -159,6 +163,8 @@ export function computeH2hProbabilities({
   let hasMlbCore = false;
   let hasPitchers = false;
   let pitcherEdge = 0;
+  const starHome = Math.max(0, Number(homeStarPenalty) || 0);
+  const starAway = Math.max(0, Number(awayStarPenalty) || 0);
   let eloHome = null;
   let eloAway = null;
   const useEloFamily =
@@ -176,6 +182,10 @@ export function computeH2hProbabilities({
           ` Pyth ${pyth != null ? (pyth * 100).toFixed(1) : 'N/A'}% 近10 ${homeMlb.last10 || 'N/A'}`
       );
       if (homeInjuryCount > 0) factors.push(`${homeTeam} 傷兵 ${homeInjuryCount} 人`);
+      if (starHome > 0) {
+        const names = (homeStarHits || []).map((h) => h.name).join('、') || '明星';
+        factors.push(`${homeTeam} 明星缺陣標記 −${(starHome * 100).toFixed(1)}%（${names}）`);
+      }
     }
     if (awayMlb) {
       awayStrength = buildMlbTeamStrength(awayMlb);
@@ -186,6 +196,10 @@ export function computeH2hProbabilities({
           ` Pyth ${pyth != null ? (pyth * 100).toFixed(1) : 'N/A'}% 近10 ${awayMlb.last10 || 'N/A'}`
       );
       if (awayInjuryCount > 0) factors.push(`${awayTeam} 傷兵 ${awayInjuryCount} 人`);
+      if (starAway > 0) {
+        const names = (awayStarHits || []).map((h) => h.name).join('、') || '明星';
+        factors.push(`${awayTeam} 明星缺陣標記 −${(starAway * 100).toFixed(1)}%（${names}）`);
+      }
     }
 
     if (homePitcherStats && awayPitcherStats) {
@@ -212,6 +226,15 @@ export function computeH2hProbabilities({
       `${awayTeam} Elo ${eloAway.toFixed(0)} · 實力 ${(awayStrength * 100).toFixed(1)}%`
     );
     factors.push(`${league} 隊力：滾動 Elo + 得失分泊松`);
+    // 先發已進 λ，此處只暴露 pitcherEdge 給門控／UI，不加 strength（避免雙計）
+    if (homePitcherStats?.era != null && awayPitcherStats?.era != null) {
+      hasPitchers = true;
+      pitcherEdge = estimatePitcherEdge(homePitcherStats, awayPitcherStats);
+      factors.push(
+        `先發質量差 ${(pitcherEdge * 100).toFixed(1)}%（主 ERA ${(homePitcherStats.era || 0).toFixed(2)} WHIP ${(homePitcherStats.whip || 0).toFixed(2)}` +
+          ` vs 客 ERA ${(awayPitcherStats.era || 0).toFixed(2)} WHIP ${(awayPitcherStats.whip || 0).toFixed(2)}）·已入λ`
+      );
+    }
   } else {
     factors.push(`${homeTeam} 近期實力 ${(homeStrength * 100).toFixed(1)}%`);
     factors.push(`${awayTeam} 近期實力 ${(awayStrength * 100).toFixed(1)}%`);
@@ -254,6 +277,16 @@ export function computeH2hProbabilities({
   } else {
     modelHomeProb = priorHomeProb;
     factors.push('無得分λ · 退回 Elo/Log5 先驗（非完整 SSOT）');
+  }
+
+  // 明星缺陣：在泊松混合後、貼市前直接調整勝率（否則 SSOT λ 路徑會沖掉 strength 懲罰）
+  if (starHome > 0 || starAway > 0) {
+    const before = modelHomeProb;
+    modelHomeProb = clampProb(modelHomeProb - starHome + starAway);
+    factors.push(
+      `明星缺陣調勝率 ${(before * 100).toFixed(1)}%→${(modelHomeProb * 100).toFixed(1)}%` +
+        `（主−${(starHome * 100).toFixed(1)} / 客−${(starAway * 100).toFixed(1)}）`
+    );
   }
 
   // 純模型概率：泊松(+輕量先驗)，不含市場

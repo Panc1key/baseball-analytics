@@ -109,7 +109,7 @@ const formatTime = formatGameTime;
 const legFilter = ref('');
 
 const GROUP_LABELS = {
-  lottery_full_slate: '當日全場彩券（主推）',
+  lottery_full_slate: '當日全場彩券（關注盤）',
   anchor_full_slate: '錨腿全場',
   anchor_short: '高命中短串',
   anchor_slate: '錨腿全場',

@@ -19,7 +19,17 @@ const fittedWeights = loadJsonSafe(path.join(__dirname, '../data/fitted-weights.
 const dixonColesFit = loadJsonSafe(path.join(__dirname, '../data/dixon-coles.json'));
 
 export const config = {
-  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.9.0',
+  modelVersion: process.env.MODEL_VERSION || 'baseball-v2.9.1',
+  /**
+   * 新 MLB 真實資料／紙上研究管線的安全開關。
+   * 預設禁止舊 recommendations、flat_bet、串關與建議注碼產生新訊號。
+   */
+  // MLB 舊推薦尚未通過 PIT 驗證，禁止以環境變數繞過研究模式。
+  mlbTruthResearchOnly: true,
+  /** 近月回放失準，舊 MLB totals 管線一律停用。 */
+  enableMlbLegacyTotals: process.env.ENABLE_MLB_LEGACY_TOTALS === 'true',
+  /** 研究基準模型與去水市場差距不足時，明確輸出無訊號。 */
+  mlbBaselineMinMarketGap: parseFloat(process.env.MLB_BASELINE_MIN_MARKET_GAP || '0.03'),
   /** SSOT：泊松獨贏權重下限（Elo/Log5 不得反客為主） */
   ssotPoissonMinWeight: parseFloat(process.env.SSOT_POISSON_MIN_WEIGHT || '0.72'),
   /** NPB/KBO 滾動 Elo */
@@ -78,6 +88,22 @@ export const config = {
   parlayAnchorStakeRatio: parseFloat(process.env.PARLAY_ANCHOR_STAKE_RATIO || '0.35'),
   parlayBetUsd: parseFloat(process.env.PARLAY_BET_USD || '1'),
   syncCron: process.env.SYNC_CRON || '0 8,14,20 * * *',
+  /**
+   * MLB 賽前快照排程。排程只由後端執行；前端重新載入只讀 SQLite。
+   * 固定時段用於全日掃描，開賽前窗口由每 5 分鐘檢查器補足。
+   */
+  prematchSchedulerEnabled: process.env.PREMATCH_SCHEDULER_ENABLED !== 'false',
+  prematchSnapshotTimezone: process.env.PREMATCH_SNAPSHOT_TIMEZONE || 'Asia/Taipei',
+  prematchFixedSnapshotHours: process.env.PREMATCH_FIXED_SNAPSHOT_HOURS || '1,3,5,13,15,17',
+  prematchWindowCheckCron: process.env.PREMATCH_WINDOW_CHECK_CRON || '*/5 * * * *',
+  prematchSnapshotWindowsMinutes: (process.env.PREMATCH_SNAPSHOT_WINDOWS_MINUTES || '1440,360,180,90,30,5')
+    .split(',')
+    .map((value) => parseInt(value.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0),
+  prematchSchedulerGraceMinutes: parseInt(
+    process.env.PREMATCH_SCHEDULER_GRACE_MINUTES || '12',
+    10
+  ),
   staleDataHours: parseFloat(process.env.STALE_DATA_HOURS || '3'),
   /** 已開賽但仍可推薦的滾球窗口（小時，MLB 一場約 3h） */
   liveGameGraceHours: parseFloat(process.env.LIVE_GAME_GRACE_HOURS || '6'),
@@ -112,7 +138,7 @@ export const config = {
   enablePlayerProps: process.env.ENABLE_PLAYER_PROPS === 'true',
   maxPropGames: parseInt(process.env.MAX_PROP_GAMES || '6', 10),
   minParlayLegOdds: parseFloat(process.env.MIN_PARLAY_LEG_ODDS || '1.4'),
-  /** 模型勝率最多可高於市場隱含的概率點數（0.06 = 6%） */
+  /** 舊管線相容設定；MLB 新研究管線不允許用固定市場加幅產生機率。 */
   maxModelEdgePct: Math.min(
     0.06,
     parseFloat(process.env.MAX_MODEL_EDGE_PCT || '0.06')
@@ -194,6 +220,21 @@ export const config = {
   kboRollingLeagueWhip: parseFloat(process.env.KBO_ROLLING_LEAGUE_WHIP || '1.46'),
   /** 是否用 eng.koreabaseball.com 隊級 OPS/WHIP 調 KBO λ */
   enableKboOfficialForm: process.env.ENABLE_KBO_OFFICIAL_FORM !== 'false',
+  /** KBO 當日先發（官網 GetKboGameList + PitcherDetail）調 λ；預設開 */
+  enableKboPitchers: process.env.ENABLE_KBO_PITCHERS !== 'false',
+  /** KBO 先發對對手得分影響相對 MLB 的縮放（避免與隊級 WHIP 雙重） */
+  kboPitcherSuppressionScale: parseFloat(process.env.KBO_PITCHER_SUPPRESSION_SCALE || '0.65'),
+  /** NPB 先發縮放（接上先發資料後生效） */
+  npbPitcherSuppressionScale: parseFloat(process.env.NPB_PITCHER_SUPPRESSION_SCALE || '0.55'),
+  /** 有當日先發時，隊級投手群 WHIP 權重（0–1） */
+  asianStaffWhipWhenPitcher: parseFloat(process.env.ASIAN_STAFF_WHIP_WHEN_PITCHER || '0.4'),
+  /**
+   * MLB 明星打者缺陣加權（實驗開關，預設關）
+   * 初盤：傷兵名單姓名；回測：當日 boxscore 是否出場
+   */
+  enableStarImpact: process.env.ENABLE_STAR_IMPACT === 'true',
+  /** 單隊明星缺陣對勝率懲罰上限 */
+  starImpactMaxPenalty: parseFloat(process.env.STAR_IMPACT_MAX_PENALTY || '0.04'),
   /**
    * 高球場係數主場獨贏：≥此值禁止進均注（Coors=1.18；防洛磯類過信）
    */
@@ -202,6 +243,12 @@ export const config = {
   ),
   /** 均注模型勝率上限（超過視為過信，洛磯/大分 74% 類） */
   flatBetMaxModelProb: parseFloat(process.env.FLAT_BET_MAX_MODEL_PROB || '0.72'),
+  /** 主推上限：超過則降為觀察（避免 74% 主推造成幻覺信心） */
+  primaryMaxModelProb: parseFloat(process.env.PRIMARY_MAX_MODEL_PROB || '0.72'),
+  /** −1.5 讓分均注最低蓋盤率（韓華 68% 類偏鬆） */
+  flatBetMinus15MinCover: parseFloat(process.env.FLAT_BET_MINUS15_MIN_COVER || '0.70'),
+  /** 獨贏均注最低模型勝率（整季 A/B：0.64 命中/ROI 優於關閉） */
+  flatBetMinProbH2h: parseFloat(process.env.FLAT_BET_MIN_PROB_H2H || '0.64'),
   /** preferTotals 時獨贏不得進均注（推理已寫優先大小卻仍推獨贏均注） */
   flatBetBlockH2hWhenPreferTotals: process.env.FLAT_BET_BLOCK_H2H_PREFER_TOTALS !== 'false',
   /** 無得分模型時禁止用 +1.5（NPB/KBO） */

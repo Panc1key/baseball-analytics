@@ -31,6 +31,36 @@ export async function getSlateStatus() {
   return data;
 }
 
+export async function getMlbPrematchTruth(params = {}) {
+  const { data } = await api.get('/mlb/prematch-truth', { params });
+  return data;
+}
+
+export async function getMlbPaperLedger() {
+  const { data } = await api.get('/mlb/paper-ledger');
+  return data;
+}
+
+export async function getMlbResearchWalkforward(params = {}) {
+  const { data } = await api.get('/mlb/research-walkforward', { params });
+  return data;
+}
+
+export async function getMlbModelValidation() {
+  const { data } = await api.get('/mlb/model-validation');
+  return data;
+}
+
+export async function getMlbExpectedRunsValidation() {
+  const { data } = await api.get('/mlb/expected-runs-validation');
+  return data;
+}
+
+export async function getMlbSourceHealth() {
+  const { data } = await api.get('/mlb/source-health');
+  return data;
+}
+
 export async function getLiveRecommendations(params = {}) {
   const { data } = await api.get('/live', { params });
   return data;

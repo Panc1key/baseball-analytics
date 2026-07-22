@@ -4,7 +4,7 @@
       <div class="toolbar-left">
         <el-radio-group v-model="viewFilter" size="small">
           <el-radio-button label="all">全部初盤</el-radio-button>
-          <el-radio-button label="actionable">主推/均注</el-radio-button>
+          <el-radio-button label="actionable">關注/均注</el-radio-button>
           <el-radio-button label="flat_bet">僅均注</el-radio-button>
         </el-radio-group>
         <el-select v-model="days" size="small" style="width: 96px" @change="loadSlate">
@@ -99,7 +99,7 @@ const props = defineProps({
 
 const loading = ref(false);
 const slate = ref(null);
-/** all | actionable | flat_bet — 預設主推／均注，避免樣本／觀察淹沒可下單層 */
+/** all | actionable | flat_bet — 預設關注／均注，避免樣本／觀察淹沒可下單層 */
 const viewFilter = ref('actionable');
 const days = ref(2);
 
@@ -138,7 +138,7 @@ const visibleDays = computed(() => {
       const games = (day.games || [])
         .map((g) => {
           const picks = sortPicks(filterPicks(g.picks));
-          // 「全部」時：無推薦的場次也要顯示；篩均注/主推時只留有命中的
+          // 「全部」時：無推薦的場次也要顯示；篩均注/關注時只留有命中的
           if (!picks.length) {
             if (viewFilter.value === 'all') return { ...g, picks: [] };
             return null;
@@ -158,7 +158,7 @@ const visibleGameCount = computed(() =>
 const emptyText = computed(() => {
   if (viewFilter.value === 'flat_bet') return '目前沒有均注精選';
   if (viewFilter.value === 'actionable')
-    return '目前沒有主推／均注（觀察／樣本不算可下單；可切「全部初盤」看觀察）';
+    return '目前沒有關注／均注（觀察／樣本不算可下單；可切「全部初盤」看觀察）';
   return '暫無初盤推薦 — 請點擊上方「同步」按鈕';
 });
 

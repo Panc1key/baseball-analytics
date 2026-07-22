@@ -24,6 +24,7 @@ import {
   fetchNaverKboScores,
   matchKboScoreToGame,
 } from '../services/KboNaverScores.js';
+import { recordOddsSnapshot } from '../services/PitOddsService.js';
 
 function argValue(name) {
   const prefix = `--${name}=`;
@@ -103,12 +104,14 @@ function upsertOddsGame(league, event, snapshotAt) {
     }
   }
 
-  db.prepare(
-    `
-    INSERT OR IGNORE INTO odds_snapshots (game_id, league, captured_at, bookmakers_json, source)
-    VALUES (?, ?, ?, ?, 'historical_api')
-  `
-  ).run(event.id, league, snapshotAt || new Date().toISOString(), json);
+  recordOddsSnapshot({
+    gameId: event.id,
+    league,
+    commenceTime: event.commence_time,
+    capturedAt: snapshotAt || new Date().toISOString(),
+    bookmakers: event.bookmakers,
+    source: 'historical_api',
+  });
   return true;
 }
 

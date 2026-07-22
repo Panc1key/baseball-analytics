@@ -24,11 +24,39 @@ import {
 } from '../services/LiveAnalysisEngine.js';
 import { getSlateCoverage } from '../services/ParlayBuilder.js';
 import { config, LEAGUES } from '../config.js';
+import {
+  getMlbPrematchTruthSlate,
+  runMlbPrematchTruthPipeline,
+} from '../services/MlbPrematchTruthPipeline.js';
+import { getMlbPaperLedgerSummary } from '../services/MlbPaperLedger.js';
+import { runMlbTruthPitBacktest } from '../services/MlbTruthPitBacktest.js';
+import { getMlbPrematchSchedulerStatus } from '../services/MlbPrematchScheduler.js';
+import { runMlbDailyTopWalkForward } from '../services/MlbResearchRanker.js';
+import {
+  getLatestMlbModelValidation,
+  runMlbModelValidation,
+} from '../services/MlbModelValidation.js';
+import {
+  getLatestMlbExpectedRunsValidation,
+  runMlbExpectedRunsValidation,
+} from '../services/MlbExpectedRunsModel.js';
+import {
+  getLatestMlbDataSourceHealth,
+  runMlbDataSourceHealthAudit,
+} from '../services/MlbDataSourceHealth.js';
+import {
+  backfillMlbProbableStarterSnapshotsFromTruth,
+  getMlbProbableStarterCoverage,
+} from '../services/MlbProbableStarterService.js';
 
 const router = express.Router();
 
 router.get('/leagues', (_req, res) => {
   res.json({ success: true, data: LEAGUES });
+});
+
+router.get('/mlb/prematch-scheduler/status', (_req, res) => {
+  res.json({ success: true, data: getMlbPrematchSchedulerStatus() });
 });
 
 router.post('/sync', async (_req, res) => {
@@ -42,7 +70,9 @@ router.post('/sync', async (_req, res) => {
 
 router.post('/analyze', async (_req, res) => {
   try {
-    const result = await runAnalysis();
+    const result = config.mlbTruthResearchOnly
+      ? await runMlbPrematchTruthPipeline()
+      : await runAnalysis();
     res.json({ success: true, data: result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -77,6 +107,7 @@ router.get('/games', (req, res) => {
 });
 
 router.get('/recommendations', (req, res) => {
+  const requestedLeague = req.query.league;
   const recs = getRecommendations({
     league: req.query.league,
     minEv: parseFloat(req.query.minEv || '0'),
@@ -86,11 +117,16 @@ router.get('/recommendations', (req, res) => {
     betStrategy: req.query.betStrategy || undefined,
     gamePicks: req.query.gamePicks === 'true',
     limit: parseInt(req.query.limit || '80', 10),
-  });
+  }).filter((row) => !config.mlbTruthResearchOnly || row.league !== 'MLB');
   res.json({
     success: true,
     data: recs,
-    meta: getBettingStrategyMeta(),
+    meta: {
+      ...getBettingStrategyMeta(),
+      mlbResearchOnly: config.mlbTruthResearchOnly,
+      mlbSuppressed: config.mlbTruthResearchOnly &&
+        (!requestedLeague || requestedLeague === 'MLB'),
+    },
   });
 });
 
@@ -112,6 +148,125 @@ router.get('/slate', (req, res) => {
 
 router.get('/slate/status', (_req, res) => {
   res.json({ success: true, data: getSlateStatus() });
+});
+
+/**
+ * 獨立 MLB 賽前事實資料頁。
+ * 不讀取舊 recommendations / flat_bet，且永遠回傳 research_only 語意。
+ */
+router.get('/mlb/prematch-truth', (req, res) => {
+  res.json({
+    success: true,
+    data: getMlbPrematchTruthSlate({
+      from: req.query.from || undefined,
+      to: req.query.to || undefined,
+    }),
+  });
+});
+
+router.get('/mlb/paper-ledger', (_req, res) => {
+  res.json({
+    success: true,
+    data: getMlbPaperLedgerSummary(),
+    meta: {
+      mode: 'research_only',
+      note: '紙上帳本不等於實際下注，且目前只有通過資料與策略資格的候選可建立帳本。',
+    },
+  });
+});
+
+router.get('/mlb/pit-backtest', (req, res) => {
+  res.json({
+    success: true,
+    data: runMlbTruthPitBacktest({
+      from: req.query.from || undefined,
+      to: req.query.to || undefined,
+    }),
+  });
+});
+
+router.get('/mlb/research-walkforward', (req, res) => {
+  const days = Number(req.query.days || 60);
+  res.json({
+    success: true,
+    data: runMlbDailyTopWalkForward({
+      days: Number.isFinite(days) ? days : 60,
+      minTrainGames: Number(req.query.minTrainGames || 120),
+      topN: Number(req.query.topN || 3),
+    }),
+    meta: {
+      mode: 'research_only',
+      note: 'Walk-forward 紙上驗證僅評估研究方向排序，不是正式推薦或盈利證明。',
+    },
+  });
+});
+
+router.get('/mlb/model-validation', (_req, res) => {
+  res.json({
+    success: true,
+    data: getLatestMlbModelValidation(),
+    meta: {
+      mode: 'research_only',
+      note: '此報告以 final test 與 PIT 市場決定模型是否應繼續封鎖。',
+    },
+  });
+});
+
+router.post('/mlb/model-validation/run', (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: runMlbModelValidation({ persist: true }),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/mlb/expected-runs-validation', (_req, res) => {
+  res.json({
+    success: true,
+    data: getLatestMlbExpectedRunsValidation(),
+  });
+});
+
+router.post('/mlb/expected-runs-validation/run', (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: runMlbExpectedRunsValidation({ persist: true }),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/mlb/probable-starter-coverage', (_req, res) => {
+  res.json({
+    success: true,
+    data: getMlbProbableStarterCoverage(),
+  });
+});
+
+router.post('/mlb/probable-starter-backfill', (_req, res) => {
+  res.json({
+    success: true,
+    data: backfillMlbProbableStarterSnapshotsFromTruth(),
+  });
+});
+
+router.get('/mlb/source-health', (_req, res) => {
+  res.json({
+    success: true,
+    data: getLatestMlbDataSourceHealth(),
+  });
+});
+
+router.post('/mlb/source-health/run', (_req, res) => {
+  res.json({
+    success: true,
+    data: runMlbDataSourceHealthAudit({ persist: true }),
+  });
 });
 
 router.post('/slate/refresh', async (req, res) => {
@@ -173,7 +328,9 @@ router.post('/live/refresh', async (_req, res) => {
 });
 
 router.get('/parlays', (req, res) => {
-  const parlays = getParlayRecommendations(parseInt(req.query.limit || '40', 10));
+  const parlays = config.mlbTruthResearchOnly
+    ? []
+    : getParlayRecommendations(parseInt(req.query.limit || '40', 10));
   const coverage = getSlateCoverage();
   const fullSlate = parlays.find((p) => p.category === 'lottery_full_slate');
   res.json({

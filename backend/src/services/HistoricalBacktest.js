@@ -12,6 +12,7 @@ import { getMlbStandings } from './MlbStatsService.js';
 import { qualifiesFlatBet } from './BetStrategy.js';
 import { createWalkForwardElo } from './BaseballElo.js';
 import { buildPointInTimeTeamStatsOverride } from './TeamRollingStats.js';
+import { resolveStarAbsenceForGame } from './StarPlayerImpact.js';
 import {
   brierScore,
   logLoss,
@@ -121,7 +122,18 @@ function gradePick(pick, game) {
  * pointInTimeForm：開賽前近窗形態（MLB 用免費 Stats API，不耗 Odds 額度）
  */
 export async function runHistoricalBacktest(options = {}) {
-  const leagues = options.leagues ?? ['MLB', 'NPB', 'KBO'];
+  const requestedLeagues = options.leagues ?? ['MLB', 'NPB', 'KBO'];
+  const leagues = config.mlbTruthResearchOnly
+    ? requestedLeagues.filter((league) => league !== 'MLB')
+    : requestedLeagues;
+  if (!leagues.length) {
+    return {
+      disabled: true,
+      mode: 'research_only',
+      reason: 'legacy_mlb_backtest_uses_non_pit_current_data',
+      useInstead: 'MlbModelValidation / MlbResearchRanker / MlbTruthPitBacktest',
+    };
+  }
   const leagueSql = leagues.map((c) => `'${c}'`).join(',');
   const primaryOnly = options.primaryOnly ?? false;
   const flatBetOnly = options.flatBetOnly ?? false;
@@ -241,12 +253,28 @@ export async function runHistoricalBacktest(options = {}) {
         );
       }
 
+      let starAbsence = null;
+      if (config.enableStarImpact && game.league === 'MLB') {
+        starAbsence = await resolveStarAbsenceForGame(
+          game.home_team,
+          game.away_team,
+          game.commence_time
+        );
+      }
+
       const analysis = await analyzeMatchup(
         game.league,
         game.home_team,
         game.away_team,
         bookmakers,
-        { mlbStandings, mlbScheduleGame: null, eloOverride, teamStatsOverride }
+        {
+          mlbStandings,
+          mlbScheduleGame: null,
+          eloOverride,
+          teamStatsOverride,
+          starAbsence,
+          commenceTime: game.commence_time,
+        }
       );
 
       const markets = extractMarkets(bookmakers);

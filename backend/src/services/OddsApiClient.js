@@ -113,11 +113,13 @@ export class OddsApiClient {
   }
 }
 
-export async function fetchAllLeagueOdds() {
+export async function fetchAllLeagueOdds(leagueCodes = null) {
   const client = new OddsApiClient();
   const results = {};
+  const requested = Array.isArray(leagueCodes) ? new Set(leagueCodes) : null;
 
   for (const [code, league] of Object.entries(LEAGUES)) {
+    if (requested && !requested.has(code)) continue;
     try {
       const games = await client.getUpcomingOdds(league.key, {
         regions: league.region,
@@ -176,11 +178,13 @@ export async function fetchMlbPlayerProps(games, maxGames = 6) {
   return { propsByGameId, quota: client.getQuota(), aborted };
 }
 
-export async function fetchAllLeagueScores() {
+export async function fetchAllLeagueScores(leagueCodes = null) {
   const client = new OddsApiClient();
   const results = {};
+  const requested = Array.isArray(leagueCodes) ? new Set(leagueCodes) : null;
 
   for (const [code, league] of Object.entries(LEAGUES)) {
+    if (requested && !requested.has(code)) continue;
     try {
       const scores = await client.getScores(league.key, 3);
       results[code] = { league, scores, error: null };

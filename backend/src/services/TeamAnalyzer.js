@@ -2,15 +2,18 @@ import db from '../db/database.js';
 import {
   matchMlbTeam,
   getProbablePitchers,
-  getPitcherSeasonStats,
+  getMlbPitcherPregameFeatures,
   getTeamInjurySummary,
   getVenueName,
 } from './MlbStatsService.js';
+import { starPenaltyFromInjuryNames } from './StarPlayerImpact.js';
+import { config } from '../config.js';
 import { computeH2hProbabilities, pythagoreanWinPct } from './H2hModel.js';
 import { buildMatchupAnalysis, applyCalibratedProbabilities } from './MatchupCore.js';
 import { computeTotalsProjection } from './TotalsModel.js';
 import { fetchYahooNpbStandings } from './NpbYahooScores.js';
 import { resolveNpbTeamStrength } from './NpbStrength.js';
+import { resolveKboPitchersForGame } from './KboPitcherService.js';
 
 function teamStatsUpsertStmt() {
   return db.prepare(`
@@ -216,6 +219,8 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
   let awayMlb = null;
   let homePitcherStats = null;
   let awayPitcherStats = null;
+  let homePitcherName = null;
+  let awayPitcherName = null;
   let homeInjurySummary = { count: 0, names: [] };
   let awayInjurySummary = { count: 0, names: [] };
   let homeFallbackRating = 0.5;
@@ -225,6 +230,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
   let homePitcherEra = null;
   let awayPitcherEra = null;
   const venueName = getVenueName(mlbScheduleGame);
+  const commenceTime = options.commenceTime ?? options.commence_time ?? null;
 
   if (league === 'MLB' && mlbStandings.length > 0) {
     homeMlb = matchMlbTeam(homeTeam, mlbStandings);
@@ -241,12 +247,18 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
 
     if (mlbScheduleGame) {
       const pitchers = getProbablePitchers(mlbScheduleGame);
+      const pitOptions = {
+        cutoffDate: mlbScheduleGame.officialDate ?? null,
+        excludeGamePk: mlbScheduleGame.gamePk ?? null,
+      };
       const [homeStats, awayStats] = await Promise.all([
-        getPitcherSeasonStats(pitchers.home?.id),
-        getPitcherSeasonStats(pitchers.away?.id),
+        getMlbPitcherPregameFeatures(pitchers.home?.id, commenceTime, pitOptions),
+        getMlbPitcherPregameFeatures(pitchers.away?.id, commenceTime, pitOptions),
       ]);
       homePitcherStats = homeStats;
       awayPitcherStats = awayStats;
+      homePitcherName = pitchers.home?.name || null;
+      awayPitcherName = pitchers.away?.name || null;
       homePitcherEra = homeStats?.era ?? null;
       awayPitcherEra = awayStats?.era ?? null;
     }
@@ -261,6 +273,27 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     if (awayStats) {
       awayFallbackRating = awayStats.rating;
       awayL10 = `${awayStats.wins}-${awayStats.losses}`;
+    }
+
+    // KBO：官網當日先發 → 與 MLB 同形 homePitcherStats
+    if (league === 'KBO' && config.enableKboPitchers !== false) {
+      if (options.homePitcherStats || options.awayPitcherStats) {
+        homePitcherStats = options.homePitcherStats ?? null;
+        awayPitcherStats = options.awayPitcherStats ?? null;
+        homePitcherName = options.homePitcherName ?? null;
+        awayPitcherName = options.awayPitcherName ?? null;
+      } else {
+        const kboP = await resolveKboPitchersForGame(homeTeam, awayTeam, commenceTime, {
+          dateYmd: options.kboDateYmd,
+          scheduleRows: options.kboScheduleRows,
+        });
+        homePitcherStats = kboP.homePitcherStats;
+        awayPitcherStats = kboP.awayPitcherStats;
+        homePitcherName = kboP.homePitcherName;
+        awayPitcherName = kboP.awayPitcherName;
+      }
+      homePitcherEra = homePitcherStats?.era ?? null;
+      awayPitcherEra = awayPitcherStats?.era ?? null;
     }
   }
 
@@ -279,12 +312,27 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     awayMlb,
     homePitcherStats,
     awayPitcherStats,
+    homePitcherName,
+    awayPitcherName,
     venueName,
     bookmakers,
     homeTeamStats: homeStatsRow,
     awayTeamStats: awayStatsRow,
     eloOverride,
   });
+
+  // 明星缺陣：回測可傳 starAbsence（boxscore）；否則用傷兵名單姓名（初盤）
+  let homeStar = { penalty: 0, hits: [] };
+  let awayStar = { penalty: 0, hits: [] };
+  if (config.enableStarImpact && league === 'MLB') {
+    if (options.starAbsence) {
+      homeStar = options.starAbsence.home || homeStar;
+      awayStar = options.starAbsence.away || awayStar;
+    } else {
+      homeStar = starPenaltyFromInjuryNames(homeTeam, homeInjurySummary.names);
+      awayStar = starPenaltyFromInjuryNames(awayTeam, awayInjurySummary.names);
+    }
+  }
 
   let matchupCore = null;
   let h2h;
@@ -318,6 +366,10 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       awayPitcherStats,
       homeInjuryCount: homeInjurySummary.count,
       awayInjuryCount: awayInjurySummary.count,
+      homeStarPenalty: homeStar.penalty,
+      awayStarPenalty: awayStar.penalty,
+      homeStarHits: homeStar.hits,
+      awayStarHits: awayStar.hits,
       homeFallbackRating,
       awayFallbackRating,
       venueName,
@@ -346,6 +398,10 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
       awayPitcherStats,
       homeInjuryCount: homeInjurySummary.count,
       awayInjuryCount: awayInjurySummary.count,
+      homeStarPenalty: homeStar.penalty,
+      awayStarPenalty: awayStar.penalty,
+      homeStarHits: homeStar.hits,
+      awayStarHits: awayStar.hits,
       homeFallbackRating,
       awayFallbackRating,
       venueName,
@@ -381,6 +437,8 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     marketAwayProb: h2h.marketAwayProb,
     homePitcherEra,
     awayPitcherEra,
+    homePitcherName,
+    awayPitcherName,
     pitcherEdge: h2h.pitcherEdge ?? h2h.components?.pitcherEdge ?? 0,
     homeRuns: totalsProjection.homeRuns,
     awayRuns: totalsProjection.awayRuns,
@@ -393,6 +451,7 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
     awayPitcherStats,
     homeInjurySummary,
     awayInjurySummary,
+    starImpact: { home: homeStar, away: awayStar },
     venueName,
     parkFactor: totalsProjection.parkFactor ?? 1,
     totalsProjection,
