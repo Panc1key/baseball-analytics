@@ -2,8 +2,8 @@
  * MLB 研究方向排序與紙上驗證。
  *
  * 正式推薦已停用。本模組只做：
- * 1. 獨立模型概率 vs 去水市場 → 錯價（edge）
- * 2. 每日 Top1 / Top3 研究方向排序
+ * 1. 預期得分勝率／分差定方向，EV 只判斷價格
+ * 2. 每日嚴格方向排序；不足場次不湊數
  * 3. Walk-forward 紙上結算（命中、ROI、相對市場）
  */
 import db from '../db/database.js';
@@ -15,8 +15,13 @@ import {
   MLB_BASELINE_FEATURE_VERSION,
 } from './MlbHistoricalBaseline.js';
 import { resolvePitOdds } from './PitOddsService.js';
+import {
+  MLB_MONEYLINE_RECOMMENDATION_RULES,
+  compareMlbMoneylineDailyRank,
+  scoreMlbMoneylineDailyRank,
+} from './MlbExpectedRunsModel.js';
 
-const RESEARCH_STRATEGY = 'mlb-research-rank-v1';
+const RESEARCH_STRATEGY = 'mlb-expected-runs-rank-v3-p2';
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -48,8 +53,8 @@ export function bestFairH2h(bookmakers, homeTeam, awayTeam) {
 }
 
 /**
- * 模型概率與市場比較後，選出正 edge 最大的一方。
- * 不可用「模型 > 50%」當選邊規則。
+ * 舊版 baseline 研究方向：正 edge 最大邊。
+ * 保留給相容測試；正式研究方向改用預期得分分類。
  */
 export function selectResearchDirection({
   homeTeam,
@@ -76,6 +81,32 @@ export function selectResearchDirection({
     oddsDecimal: odds,
     edge,
     ev,
+    bookmaker: market.bookmaker,
+  };
+}
+
+/**
+ * 預期得分研究方向：勝率與分差定方向，EV 只作價格評估。
+ */
+export function selectExpectedRunsResearchDirection({
+  homeTeam,
+  awayTeam,
+  classification,
+  market,
+}) {
+  if (!classification?.side || !market) return null;
+  const pickHome = classification.side === 'home';
+  return {
+    pick: pickHome ? homeTeam : awayTeam,
+    side: classification.side,
+    modelProb: classification.modelProbability,
+    marketProb: classification.marketProbability,
+    oddsDecimal: classification.odds,
+    edge: classification.edge,
+    ev: classification.expectedValue,
+    expectedRunMargin: classification.expectedRunMargin,
+    tier: classification.tier,
+    reasons: classification.reasons || [],
     bookmaker: market.bookmaker,
   };
 }
@@ -145,10 +176,15 @@ function marketFavoriteDirection(game, market) {
 }
 
 /**
- * 依香港日曆日分組，按 edge 降序標註 dailyRank。
- * 正式推薦語意禁止出現；此處只產生研究排序。
+ * 依香港日曆日分組。
+ * 嚴格方向（recommendation）才進入 Top 排序；價值觀察獨立標記；不足不湊數。
+ * 排序對齊 B 線：penalized EV（高 EV 毒區扣 λ），平手再用分差。
  */
-export function attachDailyResearchRanks(gameRows) {
+export function attachDailyResearchRanks(
+  gameRows,
+  rules = MLB_MONEYLINE_RECOMMENDATION_RULES
+) {
+  const dailyTopK = Math.max(1, Number(rules.dailyTopK) || 3);
   const byDay = new Map();
   for (const row of gameRows) {
     const key = localDateKey(row.commenceTime || row.commence_time);
@@ -158,27 +194,75 @@ export function attachDailyResearchRanks(gameRows) {
 
   const ranked = [];
   for (const [day, rows] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const sortable = rows
-      .map((row) => ({
+    const decorated = rows.map((row) => {
+      const classification = row.expectedRuns?.moneylineClassification || null;
+      const tier = classification?.tier || null;
+      const modelProbability = Number(classification?.modelProbability);
+      const expectedRunMargin = Number(classification?.expectedRunMargin);
+      const expectedValue = Number(classification?.expectedValue);
+      return {
         ...row,
-        _sortEdge: Number(row.research?.edge ?? row.edge ?? Number.NEGATIVE_INFINITY),
-      }))
-      .sort((a, b) => b._sortEdge - a._sortEdge || String(a.gameId).localeCompare(String(b.gameId)));
+        _tier: tier,
+        _modelProbability: modelProbability,
+        _expectedRunMargin: expectedRunMargin,
+        _expectedValue: expectedValue,
+        _dailyRankScore: scoreMlbMoneylineDailyRank(
+          { expectedValue, modelProbability },
+          rules
+        ),
+      };
+    });
+    const recommendations = decorated
+      .filter((row) => row._tier === 'recommendation')
+      .sort(
+        (a, b) =>
+          compareMlbMoneylineDailyRank(
+            {
+              expectedValue: a._expectedValue,
+              modelProbability: a._modelProbability,
+              expectedRunMargin: a._expectedRunMargin,
+            },
+            {
+              expectedValue: b._expectedValue,
+              modelProbability: b._modelProbability,
+              expectedRunMargin: b._expectedRunMargin,
+            },
+            rules
+          ) || String(a.gameId).localeCompare(String(b.gameId))
+      );
+    const recommendationRank = new Map(
+      recommendations.map((row, index) => [row.gameId, index + 1])
+    );
 
-    sortable.forEach((row, index) => {
-      const { _sortEdge, ...rest } = row;
+    decorated.forEach((row) => {
+      const {
+        _tier,
+        _modelProbability,
+        _expectedRunMargin,
+        _expectedValue,
+        _dailyRankScore,
+        ...rest
+      } = row;
+      const dailyRank = recommendationRank.get(row.gameId) || null;
       ranked.push({
         ...rest,
         researchDay: day,
-        dailyRank: Number.isFinite(_sortEdge) ? index + 1 : null,
+        dailyRank,
+        dailyRankScore: Number.isFinite(_dailyRankScore) ? _dailyRankScore : null,
         researchTier:
-          !Number.isFinite(_sortEdge)
-            ? 'unranked'
-            : index === 0
+          _tier === 'recommendation'
+            ? dailyRank === 1
               ? 'top1_observation'
-              : index < 3
+              : dailyRank <= dailyTopK
                 ? 'top3_observation'
-                : 'watchlist',
+                : 'strict_observation'
+            : _tier === 'value_watch'
+              ? 'value_watch'
+              : _tier === 'blocked'
+                ? 'blocked'
+                : Number.isFinite(Number(rest.research?.edge))
+                  ? 'legacy_watchlist'
+                  : 'unranked',
       });
     });
   }

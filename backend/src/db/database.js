@@ -495,6 +495,73 @@ function migrateSchema() {
       ON mlb_expected_runs_models(created_at DESC);
 
     /*
+     * 比賽時段天氣快取（Open-Meteo archive/forecast）。
+     * 預期得分訓練只讀此表，不在 fit 時打外網。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_game_weather_cache (
+      cache_key TEXT PRIMARY KEY,
+      game_id TEXT,
+      commence_time TEXT NOT NULL,
+      venue_name TEXT,
+      latitude REAL,
+      longitude REAL,
+      temperature_c REAL,
+      precipitation_probability REAL,
+      wind_speed_kph REAL,
+      wind_direction REAL,
+      outdoor_exposure REAL NOT NULL DEFAULT 1,
+      source TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_weather_game
+      ON mlb_game_weather_cache(game_id);
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_weather_commence
+      ON mlb_game_weather_cache(commence_time);
+
+    /*
+     * 投打左右對決（platoon）快取：前一完整球季 statSplits。
+     * 用前季避免歷史回放前視；live 亦可用前季作穩定 skill 訊號。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_platoon_splits_cache (
+      cache_key TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('pitcher', 'team_hitting', 'person')),
+      entity_id INTEGER NOT NULL,
+      season INTEGER NOT NULL,
+      payload_json TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_platoon_entity
+      ON mlb_platoon_splits_cache(entity_type, entity_id, season);
+
+    /*
+     * 先發投手傷病／恢復期情報快取（新聞檢索 + DeepSeek 結構化旗標）。
+     * 僅作研究證據；預設 usedInModel=false，不自動改預測權重。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_pitcher_injury_intel_cache (
+      cache_key TEXT PRIMARY KEY,
+      game_id TEXT,
+      pitcher_id INTEGER,
+      pitcher_name TEXT NOT NULL,
+      league TEXT,
+      commence_time TEXT,
+      materials_json TEXT NOT NULL,
+      flags_json TEXT NOT NULL,
+      model TEXT,
+      status TEXT NOT NULL,
+      error TEXT,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_pitcher_intel_game
+      ON mlb_pitcher_injury_intel_cache(game_id, pitcher_name);
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_pitcher_intel_fetched
+      ON mlb_pitcher_injury_intel_cache(fetched_at DESC);
+
+    /*
      * 外部資料源健康與事故帳。
      * 已發布的 truth snapshot 保持不可變；錯誤版本透過 incident 作廢。
      */

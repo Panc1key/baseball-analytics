@@ -14,8 +14,15 @@
 
     <header class="toolbar">
       <div>
-        <strong>賽前事實 → 概率 → 錯價排序</strong>
-        <span v-if="truth" class="version">{{ truth.modelVersion }} · {{ truth.strategyVersion }}</span>
+        <strong>賽前事實 → 預期得分 → 研究方向</strong>
+        <span v-if="truth" class="version">
+          {{ truth.modelVersion }} · {{ truth.strategyVersion }}
+          <template v-if="truth.inferenceSkeleton"> · {{ truth.inferenceSkeleton }}</template>
+        </span>
+        <small v-if="truth" class="freeze-note">
+          正式輸出僅 ExpectedRuns；Baseline shadow
+          {{ truth.baselineShadowEnabled ? '開啟' : '關閉' }}
+        </small>
       </div>
       <el-button size="small" :loading="loading" @click="loadTruth">重新載入</el-button>
     </header>
@@ -31,15 +38,31 @@
     </div>
 
     <div v-if="dailyTop.length" class="daily-top">
-      <strong>今日／近期研究方向 Top</strong>
-      <article v-for="item in dailyTop" :key="`${item.researchDay}-${item.gameId}`" class="top-row">
-        <el-tag size="small" :type="item.dailyRank === 1 ? 'warning' : 'info'">
-          {{ item.researchDay }} · #{{ item.dailyRank }}
+      <strong>預期得分嚴格方向（不足不補）</strong>
+      <article v-for="item in dailyTop" :key="item.gameId" class="top-row">
+        <el-tag size="small" :type="item.rank === 1 ? 'warning' : 'info'">
+          #{{ item.rank }}
         </el-tag>
         <span class="matchup">{{ item.matchup }}</span>
         <span>{{ item.pick || '—' }}</span>
-        <span>edge {{ percent(item.edge) }}</span>
-        <span>模型 {{ percent(item.modelProb) }} / 市場 {{ percent(item.marketProb) }}</span>
+        <span>預期分差 {{ score(item.expectedRunMargin) }}</span>
+        <span>
+          模型 {{ percent(item.modelProbability) }}
+          / 市場 {{ percent(item.marketProbability) }}
+        </span>
+        <span>EV {{ percent(item.expectedValue) }}</span>
+        <span>@{{ formatOdds(item.oddsDecimal) }}</span>
+      </article>
+    </div>
+
+    <div v-if="valueWatch.length" class="daily-top">
+      <strong>高賠價值觀察（非嚴格方向）</strong>
+      <article v-for="item in valueWatch" :key="`watch-${item.gameId}`" class="top-row">
+        <el-tag size="small" type="info">觀察</el-tag>
+        <span class="matchup">{{ item.matchup }}</span>
+        <span>{{ item.pick || '—' }}</span>
+        <span>模型 {{ percent(item.modelProbability) }}</span>
+        <span>EV {{ percent(item.expectedValue) }}</span>
         <span>@{{ formatOdds(item.oddsDecimal) }}</span>
       </article>
     </div>
@@ -87,13 +110,10 @@
         </template>
         <span v-else>缺少完整雙邊盤或模型輸出，未產生錯價排序</span>
       </div>
-      <div v-if="game.expectedRuns?.prediction" class="model-output">
-        <span class="output-label">預期得分（研究）</span>
-        <span>客 {{ score(game.expectedRuns.prediction.awayExpectedRuns) }}</span>
-        <span>主 {{ score(game.expectedRuns.prediction.homeExpectedRuns) }}</span>
-        <span>總分 {{ score(game.expectedRuns.prediction.expectedTotal) }}</span>
-        <span>主勝 {{ percent(game.expectedRuns.prediction.markets?.homeWinProbability) }}</span>
-      </div>
+      <MlbExpectedRunsOutput
+        v-if="game.expectedRuns?.prediction"
+        :expected-runs="game.expectedRuns"
+      />
     </article>
   </section>
 </template>
@@ -105,6 +125,7 @@ import {
 } from '../api/index.js';
 import MlbModelValidationPanel from './MlbModelValidationPanel.vue';
 import MlbExpectedRunsValidationPanel from './MlbExpectedRunsValidationPanel.vue';
+import MlbExpectedRunsOutput from './MlbExpectedRunsOutput.vue';
 import MlbSourceHealthPanel from './MlbSourceHealthPanel.vue';
 
 const loading = ref(false);
@@ -112,7 +133,8 @@ const truth = ref(null);
 const walkforward = ref(null);
 
 const games = computed(() => truth.value?.games || []);
-const dailyTop = computed(() => truth.value?.dailyTop || []);
+const dailyTop = computed(() => truth.value?.expectedRunsTop || []);
+const valueWatch = computed(() => truth.value?.valueWatch || []);
 const rankedGames = computed(() =>
   [...games.value].sort((a, b) => {
     const day = String(a.researchDay || '').localeCompare(String(b.researchDay || ''));
@@ -131,6 +153,7 @@ const labels = {
   bullpen: '牛棚',
   lineup: '先發打線',
   injuries: '傷停／可出賽',
+  pitcher_injury_intel: '先發傷病情報(AI)',
   park: '球場環境',
   weather: '天氣',
   travel_rest: '旅行／休息',
@@ -141,16 +164,25 @@ const reasons = {
   bullpen_usage_data_missing: '無法取得近期牛棚使用量，未納入模型。',
   confirmed_lineup_missing: '官方確認打線尚未公布，未納入模型。',
   injury_list_missing: '無法取得完整傷兵名單，未納入模型。',
-  park_factor_dataset_not_implemented: '球場係數資料集尚未建立，未納入模型。',
-  weather_forecast_missing: '無法取得比賽時段天氣預報，未納入模型。',
+  pitcher_recovery_or_injury_flagged: '新聞／官方材料顯示先發有傷病或恢復期風險（研究旗標，未改權重）。',
+  pitcher_injury_intel_scanned: '已掃描先發相關新聞，未發現明確傷病／恢復期旗標。',
+  pitcher_injury_intel_unavailable: '先發傷病情報暫不可用（缺新聞、缺 API 或先發未公布）。',
+  park_factor_dataset_not_implemented: '舊快照：球場係數當時尚未接入；現行模型已使用靜態球場係數。',
+  weather_forecast_missing: '無法取得比賽時段天氣，模型將使用中性天氣 fallback。',
   previous_game_end_time_not_available: '已取得賽程與旅行距離，但前一戰實際結束時間尚未驗證。',
   team_schedule_history_missing: '無法取得完整隊伍賽程歷史，未納入模型。',
   official_probable_pitchers_are_not_confirmed_lineup_cards: '官方僅標示預定先發，尚非確認名單。',
   both_probable_pitchers_required: '雙方預定先發尚未完整公布。',
   official_historical_features_missing: '無法取得截至比賽日前的官方球隊歷史特徵。',
   paired_h2h_market_missing: '沒有可去水的同 bookmaker 雙邊盤。',
-  baseline_model_or_features_missing: '基準模型或特徵不足，暫無獨立概率。',
+  baseline_model_or_features_missing: '（舊快照）Baseline shadow 不足；現行閘門已改以 ExpectedRuns 為準。',
+  'baseline_features:missing': '（舊快照）Baseline 特徵不足；不定邊。',
+  'baseline_model:missing': '（舊快照）Baseline 模型缺失；不定邊。',
   baseline_market_gap_below_threshold: '模型相對市場的錯價低於研究門檻。',
+  expected_runs_model_or_features_missing: '預期得分模型或特徵不足，無法定邊。',
+  expected_run_margin_below_threshold: '預期分差低於嚴格門檻。',
+  model_probability_below_threshold: '模型勝率低於嚴格門檻。',
+  expected_value_below_threshold: 'EV 低於門檻（現行規則可能未啟用硬 EV 過濾）。',
   strategy_not_validated_for_real_or_paper_selection: '策略未經樣本外驗證，禁止正式選邊。',
 };
 
@@ -170,15 +202,19 @@ function stateSymbol(state) {
 
 function tierType(tier) {
   if (tier === 'top1_observation') return 'warning';
-  if (tier === 'top3_observation') return 'success';
-  if (tier === 'watchlist') return 'info';
+  if (tier === 'top3_observation' || tier === 'strict_observation') return 'success';
+  if (tier === 'value_watch') return 'info';
+  if (tier === 'blocked') return 'danger';
   return 'info';
 }
 
 function tierLabel(tier) {
-  if (tier === 'top1_observation') return '研究方向 Top1';
-  if (tier === 'top3_observation') return '研究方向 Top3';
-  if (tier === 'watchlist') return '觀察名單';
+  if (tier === 'top1_observation') return '嚴格方向 Top1';
+  if (tier === 'top3_observation') return '嚴格方向 Top3';
+  if (tier === 'strict_observation') return '嚴格方向';
+  if (tier === 'value_watch') return '高賠價值觀察';
+  if (tier === 'blocked') return '不列入';
+  if (tier === 'legacy_watchlist') return '舊版觀察';
   return '未排序';
 }
 
@@ -230,6 +266,7 @@ defineExpose({ loadTruth });
 .truth-panel { display: grid; gap: 12px; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .version { margin-left: 8px; color: #86909c; font-size: 12px; }
+.freeze-note { display: block; margin-top: 4px; color: #86909c; font-size: 12px; font-weight: 400; }
 .ledger, .daily-top {
   display: grid;
   gap: 8px;

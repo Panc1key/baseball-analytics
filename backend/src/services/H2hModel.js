@@ -108,6 +108,8 @@ export function extractFairH2hProb(bookmakers, homeTeam, awayTeam) {
 /** 依數據完整度決定市場權重（數據越弱，越依賴市場） */
 export function resolveMarketBlend(league, hasMlbCore, hasPitchers, hasMarket, hasNpbStrength = false) {
   if (!hasMarket) return 0;
+  // 實驗：MLB 不貼去水獨贏市場
+  if (league === 'MLB' && config.mlbDisableMarketAnchorExperiment) return 0;
   if (league === 'MLB') {
     if (hasMlbCore && hasPitchers) return config.h2hMarketBlendMlbFull ?? 0.4;
     if (hasMlbCore) return config.h2hMarketBlendMlb ?? 0.45;
@@ -127,6 +129,11 @@ export function blendWithMarket(modelProb, marketProb, marketWeight) {
 }
 
 export function clampProb(prob, min = 0.22, max = 0.78) {
+  // 實驗：放寬截斷，避免 0.22–0.78 再把生肉邊削平
+  if (config.mlbDisableMarketAnchorExperiment) {
+    min = 0.05;
+    max = 0.95;
+  }
   return Math.max(min, Math.min(max, prob));
 }
 

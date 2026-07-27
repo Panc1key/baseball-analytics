@@ -158,6 +158,10 @@ export function poissonTotalDistribution(
 }
 
 export function clampGameProb(prob, min = 0.22, max = 0.78) {
+  if (config.mlbDisableMarketAnchorExperiment) {
+    min = 0.05;
+    max = 0.95;
+  }
   return Math.max(min, Math.min(max, prob));
 }
 

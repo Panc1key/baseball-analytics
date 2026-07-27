@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 
 import {
   attachDailyResearchRanks,
+  selectExpectedRunsResearchDirection,
   selectResearchDirection,
   runMlbDailyTopWalkForward,
 } from '../src/services/MlbResearchRanker.js';
 import { fitMlbBaseline } from '../src/services/MlbHistoricalBaseline.js';
 
-test('研究方向必須選正 edge 最大邊，不可用模型>50%', () => {
+test('舊版研究方向必須選正 edge 最大邊，不可用模型>50%', () => {
   const direction = selectResearchDirection({
     homeTeam: 'Home',
     awayTeam: 'Away',
@@ -28,28 +29,127 @@ test('研究方向必須選正 edge 最大邊，不可用模型>50%', () => {
   assert.ok(direction.ev > 0);
 });
 
-test('每日研究方向依 edge 標註 Top1/Top3', () => {
+test('預期得分研究方向使用勝率分類，不再用 edge 選邊', () => {
+  const direction = selectExpectedRunsResearchDirection({
+    homeTeam: 'Home',
+    awayTeam: 'Away',
+    classification: {
+      side: 'home',
+      modelProbability: 0.58,
+      marketProbability: 0.52,
+      odds: 1.85,
+      edge: 0.06,
+      expectedValue: 0.073,
+      expectedRunMargin: 0.8,
+      tier: 'recommendation',
+      reasons: [],
+    },
+    market: {
+      homeProb: 0.52,
+      awayProb: 0.48,
+      homeOdds: 1.85,
+      awayOdds: 2.05,
+      bookmaker: 'Test',
+    },
+  });
+  assert.equal(direction.pick, 'Home');
+  assert.equal(direction.tier, 'recommendation');
+  assert.equal(direction.expectedRunMargin, 0.8);
+});
+
+test('每日嚴格方向才進 Top；價值觀察與無訊號不湊數', () => {
   const ranked = attachDailyResearchRanks([
     {
       gameId: 'a',
       commenceTime: '2026-07-20T04:00:00.000Z',
-      research: { edge: 0.02 },
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'value_watch',
+          modelProbability: 0.51,
+          expectedRunMargin: 0.1,
+          expectedValue: 0.2,
+        },
+      },
     },
     {
       gameId: 'b',
       commenceTime: '2026-07-20T07:00:00.000Z',
-      research: { edge: 0.11 },
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.61,
+          expectedRunMargin: 1.2,
+          expectedValue: 0.08,
+        },
+      },
     },
     {
       gameId: 'c',
       commenceTime: '2026-07-20T10:00:00.000Z',
-      research: { edge: 0.05 },
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.57,
+          expectedRunMargin: 0.7,
+          expectedValue: 0.05,
+        },
+      },
+    },
+    {
+      gameId: 'd',
+      commenceTime: '2026-07-20T12:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'blocked',
+          modelProbability: 0.53,
+          expectedRunMargin: 0.2,
+          expectedValue: -0.01,
+        },
+      },
     },
   ]);
   assert.equal(ranked.find((row) => row.gameId === 'b').dailyRank, 1);
   assert.equal(ranked.find((row) => row.gameId === 'b').researchTier, 'top1_observation');
+  assert.equal(ranked.find((row) => row.gameId === 'c').dailyRank, 2);
   assert.equal(ranked.find((row) => row.gameId === 'c').researchTier, 'top3_observation');
-  assert.equal(ranked.find((row) => row.gameId === 'a').researchTier, 'top3_observation');
+  assert.equal(ranked.find((row) => row.gameId === 'a').dailyRank, null);
+  assert.equal(ranked.find((row) => row.gameId === 'a').researchTier, 'value_watch');
+  assert.equal(ranked.find((row) => row.gameId === 'd').researchTier, 'blocked');
+});
+
+test('日內 Top 對高 EV 毒區罰分後改由較健康 EV 領先', () => {
+  const ranked = attachDailyResearchRanks([
+    {
+      gameId: 'toxic',
+      commenceTime: '2026-07-21T04:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.545,
+          expectedRunMargin: 0.6,
+          expectedValue: 0.16,
+        },
+      },
+    },
+    {
+      gameId: 'healthy',
+      commenceTime: '2026-07-21T07:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.55,
+          expectedRunMargin: 0.4,
+          expectedValue: 0.08,
+        },
+      },
+    },
+  ]);
+  assert.equal(ranked.find((row) => row.gameId === 'healthy').dailyRank, 1);
+  assert.equal(ranked.find((row) => row.gameId === 'toxic').dailyRank, 2);
+  assert.ok(
+    ranked.find((row) => row.gameId === 'healthy').dailyRankScore >
+      ranked.find((row) => row.gameId === 'toxic').dailyRankScore
+  );
 });
 
 test('walk-forward 訓練可關閉 holdout', () => {

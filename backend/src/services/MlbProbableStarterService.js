@@ -145,11 +145,38 @@ export function getMlbProbableStarterCoverage() {
     FROM mlb_probable_starter_snapshots
     WHERE datetime(captured_at) < datetime(commence_time)
   `).get();
+  const bySeason = db.prepare(`
+    SELECT
+      substr(g.commence_time, 1, 4) AS season,
+      COUNT(DISTINCT g.id) AS completedGames,
+      COUNT(DISTINCT CASE
+        WHEN s.status = 'complete'
+          AND datetime(s.captured_at) < datetime(g.commence_time)
+        THEN g.id
+      END) AS completePitGames
+    FROM games g
+    LEFT JOIN mlb_probable_starter_snapshots s ON s.game_id = g.id
+    WHERE g.league = 'MLB'
+      AND g.completed = 1
+      AND datetime(g.commence_time) >= datetime('2025-01-01')
+    GROUP BY 1
+    ORDER BY 1
+  `).all().map((row) => ({
+    season: row.season,
+    completedGames: Number(row.completedGames || 0),
+    completePitGames: Number(row.completePitGames || 0),
+    rate: row.completedGames
+      ? Number(row.completePitGames || 0) / Number(row.completedGames)
+      : 0,
+  }));
   return {
     snapshots: Number(result.snapshots || 0),
     games: Number(result.games || 0),
     completeSnapshots: Number(result.completeSnapshots || 0),
     fromCapturedAt: result.fromCapturedAt ?? null,
     toCapturedAt: result.toCapturedAt ?? null,
+    bySeason,
+    note:
+      '2025 以前若未跑賽前 scheduler，無法回溯補 probable；歷史訓練仍可能使用 postgame_actual_oracle。',
   };
 }

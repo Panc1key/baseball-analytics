@@ -21,11 +21,28 @@ const dixonColesFit = loadJsonSafe(path.join(__dirname, '../data/dixon-coles.jso
 export const config = {
   modelVersion: process.env.MODEL_VERSION || 'baseball-v2.9.1',
   /**
-   * 新 MLB 真實資料／紙上研究管線的安全開關。
-   * 預設禁止舊 recommendations、flat_bet、串關與建議注碼產生新訊號。
+   * MLB 真實資料／紙上研究管線安全開關（凍結：不可用 env 繞過）。
+   * true 時：禁止舊 recommendations／flat_bet／串關對 MLB 產生新訊號；
+   * MLB 只走 MlbPrematchTruthPipeline（ExpectedRuns 骨架）。
+   * NPB／KBO 不受影響，仍走 AnalysisEngine 舊泊松路徑。
    */
-  // MLB 舊推薦尚未通過 PIT 驗證，禁止以環境變數繞過研究模式。
   mlbTruthResearchOnly: true,
+  /**
+   * MLB 正式推理骨架標識（凍結契約，見 MlbInferenceFreeze.js）。
+   * 禁止在未更新凍結文件前改接第二套平行預測。
+   */
+  mlbInferenceSkeleton: 'expected-runs-score-distribution',
+  /**
+   * 是否計算 HistoricalBaseline shadow（不定邊、不進正式閘門）。
+   * 預設關閉以減輕負載；需要對照時設 MLB_BASELINE_SHADOW=true。
+   */
+  mlbBaselineShadowEnabled: process.env.MLB_BASELINE_SHADOW === 'true',
+  /**
+   * 實驗開關：關閉 MLB「貼市場」錨定（僅 legacy TeamAnalyzer 路徑）。
+   * 正式 MLB 推理不走此路徑；預設關閉（維持貼市）。
+   */
+  mlbDisableMarketAnchorExperiment:
+    process.env.MLB_DISABLE_MARKET_ANCHOR === 'true',
   /** 近月回放失準，舊 MLB totals 管線一律停用。 */
   enableMlbLegacyTotals: process.env.ENABLE_MLB_LEGACY_TOTALS === 'true',
   /** 研究基準模型與去水市場差距不足時，明確輸出無訊號。 */
@@ -66,6 +83,19 @@ export const config = {
   ),
   port: parseInt(process.env.PORT || '3101', 10),
   oddsApiKey: process.env.ODDS_API_KEY || '',
+  /** DeepSeek：投手傷病／恢復期結構化旗標（研究用，不直接改推薦） */
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || '',
+  deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+  deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  /** 賽前先發新聞 → AI 傷病旗標（研究證據，不進正式權重） */
+  enablePitcherInjuryIntel: process.env.ENABLE_PITCHER_INJURY_INTEL !== 'false',
+  pitcherInjuryIntelMaxMaterials: parseInt(
+    process.env.PITCHER_INJURY_INTEL_MAX_MATERIALS || '6',
+    10
+  ),
+  pitcherInjuryIntelCacheHours: parseFloat(
+    process.env.PITCHER_INJURY_INTEL_CACHE_HOURS || '12'
+  ),
   minEvThreshold: parseFloat(process.env.MIN_EV_THRESHOLD || '0.03'),
   minConfidence: parseFloat(process.env.MIN_CONFIDENCE || '0.55'),
   maxParlayLegs: parseInt(process.env.MAX_PARLAY_LEGS || '20', 10),
@@ -76,6 +106,16 @@ export const config = {
   /** 大串補腿最高賠率（允許略高水以涵蓋全場） */
   parlayLotteryMaxLegOdds: parseFloat(process.env.PARLAY_LOTTERY_MAX_LEG_ODDS || '2.25'),
   flatBetUsd: parseFloat(process.env.FLAT_BET_USD || process.env.BASE_STAKE_UNIT || '10'),
+  /**
+   * MLB 紙上 B 線均注（美元）。不接 Kelly；勝率僅監控。
+   * 建議 75～100；與舊 flatBetUsd（可能偏小）分開，避免誤用。
+   */
+  mlbPaperFlatStakeUsd: parseFloat(process.env.MLB_PAPER_FLAT_STAKE_USD || '75'),
+  /**
+   * MLB 紙上選注 profile：frozen_v1／min185=可回滾正式；其餘實驗用。
+   * 改壞時設回 frozen_v1 即可還原。
+   */
+  mlbPaperRuleProfile: process.env.MLB_PAPER_RULE_PROFILE || 'frozen_v1',
   /** 基準均注單位（建議投注額計算基數） */
   baseStakeUnit: parseFloat(process.env.BASE_STAKE_UNIT || process.env.FLAT_BET_USD || '10'),
   stakeCurrencyLabel: process.env.STAKE_CURRENCY_LABEL || '元',

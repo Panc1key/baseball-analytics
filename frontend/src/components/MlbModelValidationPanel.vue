@@ -1,7 +1,8 @@
 <template>
   <section v-if="report" class="validation-card">
     <header>
-      <strong>模型驗證狀態</strong>
+      <strong>Baseline Shadow 驗證（不定邊）</strong>
+      <el-tag type="info" size="small">shadow</el-tag>
       <el-tag :type="decision.eligible ? 'success' : 'danger'" size="small">
         {{ decision.eligible ? '通過研究驗收' : '禁止部署' }}
       </el-tag>

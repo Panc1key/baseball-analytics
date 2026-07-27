@@ -26,8 +26,6 @@ const highConfidenceRows = [];
 for (const year of ['2024', '2025', '2026']) {
   const seasonRows = rows.filter((row) => row.commenceTime.startsWith(year));
   const examples = buildMlbExpectedRunsExamples(seasonRows);
-  const averageFeature = (key) =>
-    examples.reduce((sum, row) => sum + row.vector[key], 0) / examples.length;
   let predictedHome = 0;
   let actualHome = 0;
   let predictedAway = 0;
@@ -63,7 +61,11 @@ for (const year of ['2024', '2025', '2026']) {
           away: gameExamples[1].vector,
         });
       }
-      if (gameExamples.every((entry) => entry.vector.starterKnown)) {
+      if (['home', 'away'].every((side) =>
+        ['era', 'whip', 'strikeoutsPer9', 'walksPer9'].every((key) =>
+          Number.isFinite(Number(row.features?.pitchers?.[side]?.[key]))
+        )
+      )) {
         highConfidenceBothStartersKnown += 1;
       }
     }
@@ -74,8 +76,7 @@ for (const year of ['2024', '2025', '2026']) {
     predictedHomeRuns: predictedHome / seasonRows.length,
     actualAwayRuns: actualAway / seasonRows.length,
     predictedAwayRuns: predictedAway / seasonRows.length,
-    starterCoverage: averageFeature('starterKnown'),
-    bullpenCoverage: averageFeature('bullpenKnown'),
+    featureKeys: Object.keys(examples[0]?.vector || {}),
     highConfidence,
     highConfidenceBothStartersKnown,
   };

@@ -5,6 +5,7 @@
  * 這是用來檢驗隊級歷史資訊是否優於 50/50 的研究基準，不是下注策略。
  */
 import db from '../db/database.js';
+import { resolveMlbVenueName } from '../data/venueMeta.js';
 import {
   getMlbGameBoxscore,
   getMlbPitcherPregameFeaturesFromGameLog,
@@ -67,6 +68,7 @@ export const MLB_BULLPEN_QUALITY_FEATURE_KEYS = [
 ];
 
 function finite(value, fallback = 0) {
+  if (value == null || value === '') return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
@@ -320,6 +322,83 @@ function bullpenQualitySummary(history) {
     whip: ((totals.hits + totals.walks) * 3) / totals.outs,
     kMinusBbRate: (totals.strikeouts - totals.walks) / battersFaced,
     hr9: (totals.homeRuns * 27) / totals.outs,
+  };
+}
+
+export async function buildMlbRecentBoxscoreFeaturesAt({
+  homeTeam,
+  awayTeam,
+  commenceTime,
+}, { concurrency = 6 } = {}) {
+  const season = String(commenceTime).slice(0, 4);
+  const targetTeams = new Set([homeTeam, awayTeam]);
+  const eligibleGames = completedMlbGames({ to: commenceTime }).filter((game) =>
+    String(game.commence_time).slice(0, 4) === season &&
+    Date.parse(game.commence_time) < Date.parse(commenceTime) &&
+    (targetTeams.has(game.home_team) || targetTeams.has(game.away_team))
+  );
+  const gamesById = new Map();
+  for (const team of targetTeams) {
+    eligibleGames
+      .filter((game) => game.home_team === team || game.away_team === team)
+      .slice(-20)
+      .forEach((game) => gamesById.set(game.id, game));
+  }
+  const games = [...gamesById.values()].sort((a, b) =>
+    String(a.commence_time).localeCompare(String(b.commence_time))
+  );
+  const scheduleByDay = new Map();
+  const contexts = await mapWithConcurrency(games, concurrency, async (game) => {
+    try {
+      let officialGamePk = null;
+      if (String(game.id).startsWith('mlb-official-')) {
+        officialGamePk = Number(String(game.id).slice('mlb-official-'.length));
+      } else {
+        const day = game.commence_time.slice(0, 10);
+        if (!scheduleByDay.has(day)) {
+          scheduleByDay.set(day, getMlbScheduleAround(game.commence_time));
+        }
+        const schedule = await scheduleByDay.get(day);
+        officialGamePk = matchMlbOfficialGame(game, schedule)?.gamePk ?? null;
+      }
+      return {
+        game,
+        boxscore: await getMlbGameBoxscore(officialGamePk),
+      };
+    } catch {
+      return { game, boxscore: null };
+    }
+  });
+  const battingHistory = new Map();
+  const bullpenHistory = new Map();
+  for (const { game, boxscore } of contexts) {
+    for (const side of ['home', 'away']) {
+      const team = side === 'home' ? game.home_team : game.away_team;
+      if (!targetTeams.has(team)) continue;
+      const batting = battingUsageFromBoxscore(boxscore, side);
+      const bullpen = bullpenUsageFromBoxscore(boxscore, side);
+      if (batting) {
+        const history = battingHistory.get(team) || [];
+        history.push(batting);
+        battingHistory.set(team, history);
+      }
+      if (bullpen) {
+        const history = bullpenHistory.get(team) || [];
+        history.push(bullpen);
+        bullpenHistory.set(team, history);
+      }
+    }
+  }
+  const side = (team) => ({
+    batting: recentBattingSummary(battingHistory.get(team) || []),
+    bullpen: bullpenQualitySummary(bullpenHistory.get(team) || []),
+  });
+  return {
+    source:
+      'MLB Stats API prior final boxscores; same-season batting last-14 and bullpen last-7',
+    asOf: commenceTime,
+    home: side(homeTeam),
+    away: side(awayTeam),
   };
 }
 
@@ -613,6 +692,9 @@ export async function enrichRowsWithHistoricalPitchers(rows, { concurrency = 6 }
       ...row,
       features: {
         ...row.features,
+        homeTeam: row.homeTeam,
+        awayTeam: row.awayTeam,
+        venueName: resolveMlbVenueName({ homeTeam: row.homeTeam }),
         pitchers: {
           source: usesPitProbable
             ? 'MLB Stats API schedule probable starter snapshot; strict pregame identity'

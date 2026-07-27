@@ -1,7 +1,7 @@
 <template>
   <section v-if="report" class="score-card">
     <header>
-      <strong>預期得分模型 v1</strong>
+      <strong>預期得分模型 {{ report.modelVersion || '—' }}</strong>
       <el-tag :type="decision.eligible ? 'success' : 'danger'" size="small">
         {{ decision.eligible ? '通過市場外測' : '研究中・禁止推薦' }}
       </el-tag>
@@ -18,6 +18,11 @@
       <span>
         正EV ROI {{ percent(effectiveFinal.moneylineBetDiagnostics?.positiveEv?.roi) }}
         (n={{ effectiveFinal.moneylineBetDiagnostics?.positiveEv?.samples || 0 }})
+      </span>
+      <span>
+        嚴格方向 ROI
+        {{ percent(effectiveFinal.strictMoneylineRecommendations?.positiveEv?.roi) }}
+        (n={{ effectiveFinal.strictMoneylineRecommendations?.positiveEv?.samples || 0 }})
       </span>
       <span>歷史先發 PIT {{ percent(summary.starterIdentityCoverage?.finalObserved?.rate) }}</span>
     </div>

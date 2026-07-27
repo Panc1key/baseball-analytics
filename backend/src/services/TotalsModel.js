@@ -199,6 +199,8 @@ export function probOverAtLine(projectedTotal, line, steepness = 2.0) {
 
 export function resolveTotalsMarketBlend(league, hasMlbCore, hasPitchers, hasMarket, hasNpbStrength = false) {
   if (!hasMarket) return 0;
+  // 實驗：MLB 不貼市場總分線，保留純模型 λ
+  if (league === 'MLB' && config.mlbDisableMarketAnchorExperiment) return 0;
   if (league === 'MLB') {
     if (hasMlbCore && hasPitchers) return config.totalsMarketBlendMlbFull ?? 0.6;
     if (hasMlbCore) return config.totalsMarketBlendMlb ?? 0.65;

@@ -9,6 +9,10 @@ const MLB_BASE = 'https://statsapi.mlb.com/api/v1';
 const teamStatsCache = new Map();
 const teamRecordCache = new Map();
 const pitcherGameLogCache = new Map();
+const personHandCache = new Map();
+const pitcherPlatoonCache = new Map();
+const teamHittingPlatoonCache = new Map();
+let mlbTeamsCache = null;
 
 async function mlbFetch(path, params = {}) {
   const url = new URL(`${MLB_BASE}${path}`);
@@ -670,6 +674,7 @@ export async function getMlbPitcherRecentStartFeatures(
     const latestStart = new Date(starts[0].date);
     const asOf = new Date(`${gameLocalDate}T00:00:00.000Z`);
     asOf.setUTCDate(asOf.getUTCDate() - 1);
+    const volatility = summarizeRecentStartLines(starts);
     return {
       asOfDate: asOf.toISOString().slice(0, 10),
       startsObserved: starts.length,
@@ -679,12 +684,303 @@ export async function getMlbPitcherRecentStartFeatures(
       recent3Pitches: pitches,
       recent3PitchesPerStart: pitches / starts.length,
       recent3Era: innings > 0 ? earnedRuns * 9 / innings : null,
+      recent3Whip: innings > 0 ? (walks + total('hits')) / innings : null,
+      recent3Hr9: innings > 0 ? total('homeRuns') * 9 / innings : null,
       recent3K9: innings > 0 ? strikeouts * 9 / innings : null,
       recent3BB9: innings > 0 ? walks * 9 / innings : null,
+      earlyExitsLast3: volatility.earlyExitsLast3,
+      blowupStartsLast3: volatility.blowupStartsLast3,
+      minIpLast3: volatility.minIpLast3,
+      maxErLast3: volatility.maxErLast3,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * 從近 3 場先發逐場線計算波動（提早退場／爆分）。
+ * 提早退場：IP < 4；爆分：ER≥5，或 IP<5 且 ER≥4。
+ */
+export function summarizeRecentStartLines(starts) {
+  const lines = Array.isArray(starts) ? starts : [];
+  let earlyExitsLast3 = 0;
+  let blowupStartsLast3 = 0;
+  let minIpLast3 = null;
+  let maxErLast3 = null;
+  for (const entry of lines) {
+    const outs = inningsToOuts(entry?.stat?.inningsPitched ?? entry?.inningsPitched);
+    const ip = outs == null ? null : outs / 3;
+    const er = numberOrNull(entry?.stat?.earnedRuns ?? entry?.earnedRuns) ?? 0;
+    if (ip != null && Number.isFinite(ip)) {
+      if (minIpLast3 == null || ip < minIpLast3) minIpLast3 = ip;
+      if (ip > 0 && ip < 4) earlyExitsLast3 += 1;
+      if (er >= 5 || (ip < 5 && er >= 4)) blowupStartsLast3 += 1;
+    } else if (er >= 5) {
+      blowupStartsLast3 += 1;
+    }
+    if (maxErLast3 == null || er > maxErLast3) maxErLast3 = er;
+  }
+  return {
+    earlyExitsLast3,
+    blowupStartsLast3,
+    minIpLast3: minIpLast3 == null ? null : Number(minIpLast3.toFixed(3)),
+    maxErLast3,
+  };
+}
+
+function readPlatoonCache(cacheKey) {
+  const row = db.prepare(`
+    SELECT payload_json
+    FROM mlb_platoon_splits_cache
+    WHERE cache_key = ?
+  `).get(cacheKey);
+  if (!row?.payload_json) return null;
+  try {
+    return JSON.parse(row.payload_json);
+  } catch {
+    return null;
+  }
+}
+
+function writePlatoonCache(cacheKey, entityType, entityId, season, payload) {
+  db.prepare(`
+    INSERT INTO mlb_platoon_splits_cache
+      (cache_key, entity_type, entity_id, season, payload_json, fetched_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(cache_key) DO UPDATE SET
+      payload_json = excluded.payload_json,
+      fetched_at = datetime('now')
+  `).run(cacheKey, entityType, entityId, season, JSON.stringify(payload));
+}
+
+function parseOps(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function summarizePitcherSplit(stat) {
+  if (!stat) return null;
+  const outs = inningsToOuts(stat.inningsPitched);
+  const inningsPitched = outs == null ? null : outs / 3;
+  const battersFaced = numberOrNull(stat.battersFaced);
+  const strikeouts = numberOrNull(stat.strikeOuts);
+  const walks = numberOrNull(stat.baseOnBalls);
+  return {
+    ops: parseOps(stat.ops),
+    avg: parseOps(stat.avg),
+    battersFaced,
+    strikeouts,
+    walks,
+    homeRuns: numberOrNull(stat.homeRuns),
+    inningsPitched,
+    strikeoutRate: battersFaced > 0 && strikeouts != null
+      ? strikeouts / battersFaced
+      : null,
+    walkRate: battersFaced > 0 && walks != null ? walks / battersFaced : null,
+  };
+}
+
+function summarizeHittingSplit(stat) {
+  if (!stat) return null;
+  const plateAppearances = numberOrNull(stat.plateAppearances);
+  const gamesPlayed = numberOrNull(stat.gamesPlayed);
+  const runs = numberOrNull(stat.runs);
+  return {
+    ops: parseOps(stat.ops),
+    obp: parseOps(stat.obp),
+    slg: parseOps(stat.slg),
+    avg: parseOps(stat.avg),
+    plateAppearances,
+    gamesPlayed,
+    runs,
+    runsPerGame: gamesPlayed > 0 && runs != null ? runs / gamesPlayed : null,
+  };
+}
+
+/** MLB 球隊清單（含 id／名稱），供隊名對 id。 */
+export async function getMlbTeams(season = new Date().getUTCFullYear()) {
+  if (mlbTeamsCache?.season === season) return mlbTeamsCache.teams;
+  const data = await mlbFetch('/teams', { sportId: 1, season });
+  const teams = data.teams || [];
+  mlbTeamsCache = { season, teams };
+  return teams;
+}
+
+export async function resolveMlbTeamId(teamName, season = new Date().getUTCFullYear()) {
+  if (!teamName) return null;
+  const teams = await getMlbTeams(season);
+  return matchMlbTeam(teamName, teams)?.id ?? null;
+}
+
+/** 投手慣用手（L/R）；結果快取於記憶體與 SQLite。 */
+export async function getMlbPitcherHand(pitcherId) {
+  if (!pitcherId) return null;
+  const cacheKey = `person:${pitcherId}:hand`;
+  if (personHandCache.has(cacheKey)) return personHandCache.get(cacheKey);
+  const cached = readPlatoonCache(cacheKey);
+  if (cached) {
+    personHandCache.set(cacheKey, cached);
+    return cached;
+  }
+  try {
+    const data = await mlbFetch(`/people/${pitcherId}`);
+    const person = data.people?.[0];
+    const payload = {
+      id: Number(pitcherId),
+      name: person?.fullName || null,
+      pitchHand: person?.pitchHand?.code || null,
+      batSide: person?.batSide?.code || null,
+    };
+    writePlatoonCache(cacheKey, 'person', Number(pitcherId), 0, payload);
+    personHandCache.set(cacheKey, payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 投手對左右打（vl/vr）statSplits。
+ * 歷史回放請傳「前一完整球季」以避免同季前視；byDateRange+sitCodes 目前不可靠。
+ */
+export async function getMlbPitcherPlatoonSplits(pitcherId, season) {
+  if (!pitcherId || !season) return null;
+  const cacheKey = `pitcher:${pitcherId}:${season}:vlvr`;
+  if (pitcherPlatoonCache.has(cacheKey)) return pitcherPlatoonCache.get(cacheKey);
+  const cached = readPlatoonCache(cacheKey);
+  if (cached) {
+    pitcherPlatoonCache.set(cacheKey, cached);
+    return cached;
+  }
+  try {
+    const data = await mlbFetch(`/people/${pitcherId}/stats`, {
+      stats: 'statSplits',
+      group: 'pitching',
+      season,
+      sitCodes: 'vl,vr',
+      sportId: 1,
+    });
+    const splits = data.stats?.[0]?.splits || [];
+    const vsLhb = summarizePitcherSplit(
+      splits.find((entry) => entry.split?.code === 'vl')?.stat
+    );
+    const vsRhb = summarizePitcherSplit(
+      splits.find((entry) => entry.split?.code === 'vr')?.stat
+    );
+    if (!vsLhb && !vsRhb) return null;
+    const payload = {
+      pitcherId: Number(pitcherId),
+      season: Number(season),
+      source: 'MLB Stats API people stats=statSplits sitCodes=vl,vr',
+      vsLhb,
+      vsRhb,
+    };
+    writePlatoonCache(cacheKey, 'pitcher', Number(pitcherId), Number(season), payload);
+    pitcherPlatoonCache.set(cacheKey, payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/** 球隊打擊對左右投（vl=對左投、vr=對右投）。 */
+export async function getMlbTeamHittingPlatoonSplits(teamId, season) {
+  if (!teamId || !season) return null;
+  const cacheKey = `team_hitting:${teamId}:${season}:vlvr`;
+  if (teamHittingPlatoonCache.has(cacheKey)) {
+    return teamHittingPlatoonCache.get(cacheKey);
+  }
+  const cached = readPlatoonCache(cacheKey);
+  if (cached) {
+    teamHittingPlatoonCache.set(cacheKey, cached);
+    return cached;
+  }
+  try {
+    const data = await mlbFetch(`/teams/${teamId}/stats`, {
+      stats: 'statSplits',
+      group: 'hitting',
+      season,
+      sitCodes: 'vl,vr',
+      sportId: 1,
+    });
+    const splits = data.stats?.[0]?.splits || [];
+    const vsLhp = summarizeHittingSplit(
+      splits.find((entry) => entry.split?.code === 'vl')?.stat
+    );
+    const vsRhp = summarizeHittingSplit(
+      splits.find((entry) => entry.split?.code === 'vr')?.stat
+    );
+    if (!vsLhp && !vsRhp) return null;
+    const payload = {
+      teamId: Number(teamId),
+      season: Number(season),
+      source: 'MLB Stats API teams stats=statSplits hitting sitCodes=vl,vr',
+      vsLhp,
+      vsRhp,
+    };
+    writePlatoonCache(
+      cacheKey,
+      'team_hitting',
+      Number(teamId),
+      Number(season),
+      payload
+    );
+    teamHittingPlatoonCache.set(cacheKey, payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 組合賽前 platoon 區塊：一律用前一完整球季，避免同季前視。
+ */
+export async function buildMlbPregamePlatoonBlock({
+  homePitcherId,
+  awayPitcherId,
+  homeTeamId,
+  awayTeamId,
+  commenceTime,
+}) {
+  const commence = new Date(commenceTime);
+  if (Number.isNaN(commence.getTime())) return null;
+  const season = commence.getUTCFullYear();
+  const priorSeason = season - 1;
+  const [
+    homeHand,
+    awayHand,
+    homePitcherSplits,
+    awayPitcherSplits,
+    homeOffenseSplits,
+    awayOffenseSplits,
+  ] = await Promise.all([
+    getMlbPitcherHand(homePitcherId),
+    getMlbPitcherHand(awayPitcherId),
+    getMlbPitcherPlatoonSplits(homePitcherId, priorSeason),
+    getMlbPitcherPlatoonSplits(awayPitcherId, priorSeason),
+    getMlbTeamHittingPlatoonSplits(homeTeamId, priorSeason),
+    getMlbTeamHittingPlatoonSplits(awayTeamId, priorSeason),
+  ]);
+  return {
+    source:
+      'MLB Stats API prior-season platoon splits (pitcher vs LHB/RHB; offense vs LHP/RHP)',
+    asOfSeason: priorSeason,
+    gameSeason: season,
+    home: {
+      pitcherId: homePitcherId ? Number(homePitcherId) : null,
+      pitchHand: homeHand?.pitchHand || null,
+      pitcher: homePitcherSplits,
+      offense: homeOffenseSplits,
+    },
+    away: {
+      pitcherId: awayPitcherId ? Number(awayPitcherId) : null,
+      pitchHand: awayHand?.pitchHand || null,
+      pitcher: awayPitcherSplits,
+      offense: awayOffenseSplits,
+    },
+  };
 }
 
 /** 從賽程取得場地 */

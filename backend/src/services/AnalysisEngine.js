@@ -826,18 +826,8 @@ export async function syncAllData(options = {}) {
   };
 }
 
-/** 對所有初盤場次跑分析並產生推薦 */
+/** 對初盤場次跑分析並產生推薦（MLB 在 research-only 下跳過，改走 PrematchTruth） */
 export async function runAnalysis() {
-  if (config.mlbTruthResearchOnly) {
-    return {
-      disabled: true,
-      mode: 'research_only',
-      reason: 'legacy_recommendation_pipeline_disabled',
-      singles: 0,
-      parlays: 0,
-      modelVersion: config.modelVersion,
-    };
-  }
   clearOldRecommendations();
   try {
     const oddsFix = restorePrematchOddsFromSnapshots();
@@ -848,6 +838,7 @@ export async function runAnalysis() {
     console.warn('[analysis] 還原初盤盤口失敗:', err.message);
   }
   const analysisRunId = startAnalysisRun('prematch');
+  const mlbSkippedResearchOnly = Boolean(config.mlbTruthResearchOnly);
 
   // 分析前確保隊力可用；近窗若 sync 剛刷過則沿用，避免連打兩次 MLB Stats API
   try {
@@ -937,6 +928,9 @@ export async function runAnalysis() {
 
   for (const game of upcoming) {
     try {
+    if (mlbSkippedResearchOnly && game.league === 'MLB') {
+      continue;
+    }
     const started = isGameStarted(game.commence_time, game.completed);
     if (started && hasCurrentPrematchRec.get(game.id, config.modelVersion)) continue;
 
@@ -1098,6 +1092,11 @@ export async function runAnalysis() {
     parlays: parlays.length,
     analysisRunId,
     modelVersion: config.modelVersion,
+    mlbSkippedResearchOnly,
+    mlbInferenceSkeleton: config.mlbInferenceSkeleton,
+    note: mlbSkippedResearchOnly
+      ? 'MLB skipped: use MlbPrematchTruthPipeline (expected-runs freeze)'
+      : null,
   };
 }
 
@@ -1795,13 +1794,15 @@ export async function fullRefresh(options = {}) {
     return {
       sync,
       analysis,
+      mlbTruth,
+      mlbInferenceSkeleton: config.mlbInferenceSkeleton,
+      baselineShadowEnabled: config.mlbBaselineShadowEnabled,
       liveAnalysis,
       recommendationCount,
       liveRecommendationCount,
       settledBets,
       settledSnapshots,
       settledMlbPaperBets,
-      mlbTruth,
       createdMlbPaperBets,
     };
   })();

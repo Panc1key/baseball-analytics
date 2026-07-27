@@ -1,5 +1,13 @@
 /**
- * 棒球初盤模型契約（單一真相來源）
+ * 棒球初盤模型契約
+ *
+ * ## MLB（已凍結，見 MlbInferenceFreeze.js / docs/expansion/MLB-INFERENCE-FREEZE.md）
+ * 唯一正式推理骨架：
+ *   兩隊預期得分 → 負二項比分分布 → 獨贏／大小／讓分
+ *   （MlbExpectedRunsModel.predictMlbGameRuns → MlbPrematchTruthPipeline）
+ * 禁止再以本檔的泊松 λ 路徑作為 MLB 正式勝率／推薦來源。
+ *
+ * ## NPB / KBO（本檔 SSOT 仍適用）
  *
  * 資料流（禁止旁路另算一套勝率）：
  *
@@ -21,7 +29,7 @@
  *
  * 模組職責：
  * - BaseballElo：滾動 Elo；回測必須用 walk-forward（開賽前狀態）
- * - GameScoreModel：唯一計分引擎（泊松 / DC）
+ * - GameScoreModel：NPB/KBO 計分引擎（泊松 / DC）；MLB 正式路徑不使用
  * - ProbabilityCalibration：Brier/LogLoss + 分箱校準表
  * - PickScorer：排序分可作 UI，硬決策以 EV 與最低校準勝率為準
  */

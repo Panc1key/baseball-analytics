@@ -48,6 +48,18 @@ import {
   backfillMlbProbableStarterSnapshotsFromTruth,
   getMlbProbableStarterCoverage,
 } from '../services/MlbProbableStarterService.js';
+import {
+  backfillVenueNameOnFeatureRows,
+  getHighWeightFeatureCoverage,
+  labelLegacyOracleStarterIdentity,
+  syncPitProbableIntoFeatureRows,
+} from '../services/MlbHighWeightFeatureSync.js';
+import {
+  analyzePitcherInjuryIntel,
+  isDeepseekConfigured,
+  listRecentPitcherInjuryIntel,
+} from '../services/PitcherInjuryIntelService.js';
+import { describeMlbInferenceFreeze } from '../services/MlbInferenceFreeze.js';
 
 const router = express.Router();
 
@@ -70,10 +82,19 @@ router.post('/sync', async (_req, res) => {
 
 router.post('/analyze', async (_req, res) => {
   try {
-    const result = config.mlbTruthResearchOnly
+    // MLB 凍結：ExpectedRuns／PrematchTruth；NPB／KBO 仍走舊分析。
+    const analysis = await runAnalysis();
+    const mlbTruth = config.mlbTruthResearchOnly
       ? await runMlbPrematchTruthPipeline()
-      : await runAnalysis();
-    res.json({ success: true, data: result });
+      : null;
+    res.json({
+      success: true,
+      data: {
+        analysis,
+        mlbTruth,
+        mlbInferenceFreeze: describeMlbInferenceFreeze(),
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -97,6 +118,9 @@ router.get('/status', (_req, res) => {
       recommendPrimaryScore: config.recommendPrimaryScore,
       recommendWatchScore: config.recommendWatchScore,
       enablePlayerProps: config.enablePlayerProps,
+      mlbTruthResearchOnly: config.mlbTruthResearchOnly,
+      mlbInferenceSkeleton: config.mlbInferenceSkeleton,
+      mlbInferenceFreeze: describeMlbInferenceFreeze(),
     },
   });
 });
@@ -255,6 +279,27 @@ router.post('/mlb/probable-starter-backfill', (_req, res) => {
   });
 });
 
+router.get('/mlb/high-weight-feature-coverage', (_req, res) => {
+  res.json({
+    success: true,
+    data: getHighWeightFeatureCoverage(),
+  });
+});
+
+router.post('/mlb/high-weight-feature-sync', async (_req, res) => {
+  try {
+    const venue = backfillVenueNameOnFeatureRows();
+    const oracle = labelLegacyOracleStarterIdentity();
+    const pit = await syncPitProbableIntoFeatureRows();
+    res.json({
+      success: true,
+      data: { venue, oracle, pit },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/mlb/source-health', (_req, res) => {
   res.json({
     success: true,
@@ -267,6 +312,41 @@ router.post('/mlb/source-health/run', (_req, res) => {
     success: true,
     data: runMlbDataSourceHealthAudit({ persist: true }),
   });
+});
+
+router.get('/mlb/pitcher-injury-intel', (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      configured: isDeepseekConfigured(),
+      enabled: config.enablePitcherInjuryIntel,
+      recent: listRecentPitcherInjuryIntel({
+        limit: Math.min(50, parseInt(req.query.limit || '20', 10) || 20),
+      }),
+    },
+  });
+});
+
+router.post('/mlb/pitcher-injury-intel', async (req, res) => {
+  try {
+    const pitcherName = req.body?.pitcherName || req.body?.name;
+    if (!pitcherName) {
+      res.status(400).json({ success: false, error: 'pitcherName_required' });
+      return;
+    }
+    const data = await analyzePitcherInjuryIntel({
+      pitcherName,
+      pitcherId: req.body?.pitcherId ?? null,
+      teamName: req.body?.teamName || null,
+      league: req.body?.league || 'MLB',
+      gameId: req.body?.gameId || null,
+      commenceTime: req.body?.commenceTime || new Date().toISOString(),
+      force: req.body?.force === true,
+    });
+    res.json({ success: data.ok, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 router.post('/slate/refresh', async (req, res) => {
