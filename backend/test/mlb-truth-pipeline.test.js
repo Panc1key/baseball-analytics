@@ -116,6 +116,7 @@ test('市場基準只使用同一 bookmaker 的雙邊盤去水', () => {
   );
 
   assert.equal(market.bookmaker, '低水莊');
+  assert.equal(market.h2hBookCount, 2);
   assert.equal(Math.round(market.homeProb * 1000) / 1000, 0.5);
   assert.equal(Math.round(market.awayProb * 1000) / 1000, 0.5);
 });

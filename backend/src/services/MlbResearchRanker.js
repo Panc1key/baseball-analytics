@@ -176,6 +176,47 @@ function marketFavoriteDirection(game, market) {
 }
 
 /**
+ * 日內紙上名額：先取 TopK，再套 dropR3（margin）／dropR2（低賠帶）。
+ * WF：auditMlbDailyDropR3MarginWf.mjs、auditMlbDailyDropR2LowOddsWf.mjs
+ */
+export function selectDailyPaperSlots(recommendations, rules = {}) {
+  const dailyTopK = Math.max(1, Number(rules.dailyTopK) || 3);
+  let slots = Array.isArray(recommendations) ? recommendations.slice(0, dailyTopK) : [];
+
+  const dropThird = Number(rules.dropThirdIfMarginBelow);
+  if (Number.isFinite(dropThird) && slots.length >= 3) {
+    const thirdMargin = Number(
+      slots[2]?._expectedRunMargin ?? slots[2]?.expectedRunMargin
+    );
+    if (Number.isFinite(thirdMargin) && thirdMargin < dropThird) {
+      slots = slots.slice(0, 2);
+    }
+  }
+
+  const dropSecondBelow = Number(rules.dropSecondIfOddsBelow);
+  const dropSecondMin = Number(rules.dropSecondIfOddsMin);
+  const minOdds = Number.isFinite(dropSecondMin) ? dropSecondMin : 1.85;
+  if (Number.isFinite(dropSecondBelow) && slots.length >= 2) {
+    const odds = Number(slots[1]?._odds ?? slots[1]?.odds);
+    if (Number.isFinite(odds) && odds >= minOdds && odds < dropSecondBelow) {
+      slots = [slots[0], ...slots.slice(2)];
+    }
+  }
+
+  return {
+    acceptedIds: new Set(slots.map((row) => row.gameId)),
+    slotCount: slots.length,
+  };
+}
+
+/**
+ * @deprecated 僅相容舊呼叫；新邏輯請用 selectDailyPaperSlots
+ */
+export function resolveDailyTopKForRecommendations(recommendations, rules = {}) {
+  return selectDailyPaperSlots(recommendations, rules).slotCount;
+}
+
+/**
  * 依香港日曆日分組。
  * 嚴格方向（recommendation）才進入 Top 排序；價值觀察獨立標記；不足不湊數。
  * 排序對齊 B 線：penalized EV（高 EV 毒區扣 λ），平手再用分差。
@@ -184,7 +225,6 @@ export function attachDailyResearchRanks(
   gameRows,
   rules = MLB_MONEYLINE_RECOMMENDATION_RULES
 ) {
-  const dailyTopK = Math.max(1, Number(rules.dailyTopK) || 3);
   const byDay = new Map();
   for (const row of gameRows) {
     const key = localDateKey(row.commenceTime || row.commence_time);
@@ -200,12 +240,14 @@ export function attachDailyResearchRanks(
       const modelProbability = Number(classification?.modelProbability);
       const expectedRunMargin = Number(classification?.expectedRunMargin);
       const expectedValue = Number(classification?.expectedValue);
+      const odds = Number(classification?.odds);
       return {
         ...row,
         _tier: tier,
         _modelProbability: modelProbability,
         _expectedRunMargin: expectedRunMargin,
         _expectedValue: expectedValue,
+        _odds: odds,
         _dailyRankScore: scoreMlbMoneylineDailyRank(
           { expectedValue, modelProbability },
           rules
@@ -230,6 +272,7 @@ export function attachDailyResearchRanks(
             rules
           ) || String(a.gameId).localeCompare(String(b.gameId))
       );
+    const { acceptedIds, slotCount } = selectDailyPaperSlots(recommendations, rules);
     const recommendationRank = new Map(
       recommendations.map((row, index) => [row.gameId, index + 1])
     );
@@ -240,20 +283,23 @@ export function attachDailyResearchRanks(
         _modelProbability,
         _expectedRunMargin,
         _expectedValue,
+        _odds,
         _dailyRankScore,
         ...rest
       } = row;
       const dailyRank = recommendationRank.get(row.gameId) || null;
+      const inPaperSlots = acceptedIds.has(row.gameId);
       ranked.push({
         ...rest,
         researchDay: day,
         dailyRank,
         dailyRankScore: Number.isFinite(_dailyRankScore) ? _dailyRankScore : null,
+        dailyTopKApplied: slotCount,
         researchTier:
           _tier === 'recommendation'
-            ? dailyRank === 1
+            ? dailyRank === 1 && inPaperSlots
               ? 'top1_observation'
-              : dailyRank <= dailyTopK
+              : inPaperSlots
                 ? 'top3_observation'
                 : 'strict_observation'
             : _tier === 'value_watch'

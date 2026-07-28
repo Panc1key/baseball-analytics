@@ -152,6 +152,121 @@ test('日內 Top 對高 EV 毒區罰分後改由較健康 EV 領先', () => {
   );
 });
 
+test('第3名 margin 低於 dropThirdIfMarginBelow 時當日只取 Top2', () => {
+  const rows = [
+    {
+      gameId: 'r1',
+      commenceTime: '2026-07-22T04:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.58,
+          expectedRunMargin: 0.9,
+          expectedValue: 0.1,
+          odds: 2.05,
+        },
+      },
+    },
+    {
+      gameId: 'r2',
+      commenceTime: '2026-07-22T07:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.56,
+          expectedRunMargin: 0.7,
+          expectedValue: 0.07,
+          odds: 2.1,
+        },
+      },
+    },
+    {
+      gameId: 'r3',
+      commenceTime: '2026-07-22T10:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.54,
+          expectedRunMargin: 0.3,
+          expectedValue: 0.05,
+          odds: 2.0,
+        },
+      },
+    },
+  ];
+  const withDrop = attachDailyResearchRanks(rows, {
+    dailyTopK: 3,
+    dropThirdIfMarginBelow: 0.5,
+    highEvRankPenaltyLambda: 0,
+  });
+  assert.equal(withDrop.find((r) => r.gameId === 'r1').researchTier, 'top1_observation');
+  assert.equal(withDrop.find((r) => r.gameId === 'r2').researchTier, 'top3_observation');
+  assert.equal(withDrop.find((r) => r.gameId === 'r3').researchTier, 'strict_observation');
+  assert.equal(withDrop.find((r) => r.gameId === 'r3').dailyTopKApplied, 2);
+
+  const noDrop = attachDailyResearchRanks(rows, {
+    dailyTopK: 3,
+    dropThirdIfMarginBelow: null,
+    highEvRankPenaltyLambda: 0,
+  });
+  assert.equal(noDrop.find((r) => r.gameId === 'r3').researchTier, 'top3_observation');
+  assert.equal(noDrop.find((r) => r.gameId === 'r3').dailyTopKApplied, 3);
+});
+
+test('第2名賠率落在低賠帶時去掉 R2（可保留 R3）', () => {
+  const rows = [
+    {
+      gameId: 'r1',
+      commenceTime: '2026-07-23T04:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.58,
+          expectedRunMargin: 0.9,
+          expectedValue: 0.1,
+          odds: 2.1,
+        },
+      },
+    },
+    {
+      gameId: 'r2',
+      commenceTime: '2026-07-23T07:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.56,
+          expectedRunMargin: 0.7,
+          expectedValue: 0.07,
+          odds: 1.9,
+        },
+      },
+    },
+    {
+      gameId: 'r3',
+      commenceTime: '2026-07-23T10:00:00.000Z',
+      expectedRuns: {
+        moneylineClassification: {
+          tier: 'recommendation',
+          modelProbability: 0.54,
+          expectedRunMargin: 0.8,
+          expectedValue: 0.05,
+          odds: 2.05,
+        },
+      },
+    },
+  ];
+  const ranked = attachDailyResearchRanks(rows, {
+    dailyTopK: 3,
+    dropThirdIfMarginBelow: 0.5,
+    dropSecondIfOddsBelow: 1.95,
+    dropSecondIfOddsMin: 1.85,
+    highEvRankPenaltyLambda: 0,
+  });
+  assert.equal(ranked.find((r) => r.gameId === 'r1').researchTier, 'top1_observation');
+  assert.equal(ranked.find((r) => r.gameId === 'r2').researchTier, 'strict_observation');
+  assert.equal(ranked.find((r) => r.gameId === 'r3').researchTier, 'top3_observation');
+});
+
 test('walk-forward 訓練可關閉 holdout', () => {
   const rows = Array.from({ length: 80 }, (_, index) => ({
     gameId: `g${index}`,

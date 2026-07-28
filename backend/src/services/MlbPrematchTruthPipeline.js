@@ -169,9 +169,11 @@ export function calculateCompleteness(items) {
 
 /**
  * 從同一 bookmaker 取得雙邊 h2h，避免把不同莊家的最佳價格拼成假去水概率。
+ * 回傳另附 h2hBookCount（完整雙邊 h2h 的庄數），供多莊共識閘使用。
  */
 export function bestFairH2h(bookmakers, homeTeam, awayTeam) {
   let selected = null;
+  let h2hBookCount = 0;
   for (const book of bookmakers) {
     const market = book.markets?.find((m) => m.key === 'h2h');
     const home = market?.outcomes?.find((o) => o.name === homeTeam);
@@ -180,6 +182,7 @@ export function bestFairH2h(bookmakers, homeTeam, awayTeam) {
     const homeImplied = decimalToImpliedProb(home.price);
     const awayImplied = decimalToImpliedProb(away.price);
     if (!homeImplied || !awayImplied) continue;
+    h2hBookCount += 1;
     const margin = homeImplied + awayImplied - 1;
     if (!selected || margin < selected.margin) {
       const fair = removeVig(homeImplied, awayImplied);
@@ -193,7 +196,8 @@ export function bestFairH2h(bookmakers, homeTeam, awayTeam) {
       };
     }
   }
-  return selected;
+  if (!selected) return null;
+  return { ...selected, h2hBookCount };
 }
 
 function dateOffset(iso, days) {

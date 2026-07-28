@@ -24,16 +24,72 @@ import {
 import { MLB_PAPER_RULE_FREEZE } from '../src/services/MlbPaperRuleFreeze.js';
 
 test('正式獨贏規則鎖定凍結點 frozen_v1／min185', () => {
-  assert.ok(['frozen_v1', 'min185'].includes(MLB_MONEYLINE_RECOMMENDATION_RULES.id));
+  assert.ok(
+    ['frozen_v1', 'min185', 'ev02_max230'].includes(MLB_MONEYLINE_RECOMMENDATION_RULES.id)
+  );
   assert.equal(MLB_MONEYLINE_RECOMMENDATION_RULES.minimumPickOdds, 1.85);
   assert.equal(MLB_MONEYLINE_RECOMMENDATION_RULES.dailyTopK, 3);
   assert.equal(MLB_MONEYLINE_RECOMMENDATION_RULES.requireBothPitcherIdentities, true);
+  assert.equal(MLB_MONEYLINE_RECOMMENDATION_RULES.minimumEitherSideOdds, 1.2);
+  assert.equal(MLB_MONEYLINE_RECOMMENDATION_RULES.minimumH2hBookmakers, 2);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.frozen_v1.freezeId, MLB_PAPER_RULE_FREEZE.freezeId);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.frozen_v1.minimumPickOdds, 1.85);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.min185.minimumPickOdds, 1.85);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.base_p2.minimumPickOdds, null);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.base_p2.requireBothPitcherIdentities, false);
   assert.equal(MLB_MONEYLINE_RULE_PROFILES.sweet_195_220.minimumPickOdds, 1.95);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.ev02_max230.minimumExpectedValue, 0.02);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.ev02_max230.maximumPickOdds, 2.3);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.ev02_max230.minimumPickOdds, 1.85);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.ev02_max230.requireBothPitcherIdentities, true);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.ev02_max230.minimumH2hBookmakers, 2);
+  assert.equal(MLB_MONEYLINE_RULE_PROFILES.frozen_v1.minimumH2hBookmakers, 2);
+});
+
+test('髒獨贏盤（如 1.01/34）必須被 either-side 地板擋下', () => {
+  const dirty = classifyMlbMoneylineCandidate({
+    prediction: {
+      homeExpectedRuns: 4.2,
+      awayExpectedRuns: 5.3,
+      dataQuality: { maximumAbsoluteZScore: 1 },
+      markets: { homeWinProbability: 0.4, awayWinProbability: 0.6 },
+    },
+    market: {
+      homeOdds: 1.01,
+      awayOdds: 34,
+      homeProb: 0.97,
+      awayProb: 0.03,
+      h2hBookCount: 2,
+    },
+    pitcherIdentity: { homeId: 1, awayId: 2 },
+    rules: MLB_MONEYLINE_RULE_PROFILES.ev02_max230,
+  });
+  assert.equal(dirty.side, 'away');
+  assert.notEqual(dirty.tier, 'recommendation');
+  assert.ok(dirty.reasons.includes('moneyline_either_side_odds_too_short'));
+});
+
+test('單莊 h2h 快照必須被多莊共識閘擋下', () => {
+  const single = classifyMlbMoneylineCandidate({
+    prediction: {
+      homeExpectedRuns: 5.2,
+      awayExpectedRuns: 4.1,
+      dataQuality: { maximumAbsoluteZScore: 1 },
+      markets: { homeWinProbability: 0.61, awayWinProbability: 0.39 },
+    },
+    market: {
+      homeOdds: 1.95,
+      awayOdds: 1.9,
+      homeProb: 0.5,
+      awayProb: 0.5,
+      h2hBookCount: 1,
+    },
+    pitcherIdentity: { homeId: 1, awayId: 2 },
+    regimeSignals: { homeEarlyExitsLast3: 0, awayEarlyExitsLast3: 1 },
+    rules: MLB_MONEYLINE_RULE_PROFILES.ev02_max230,
+  });
+  assert.notEqual(single.tier, 'recommendation');
+  assert.ok(single.reasons.includes('h2h_bookmakers_below_minimum'));
 });
 
 test('MLB 預期得分 v4.5 使用高權重特徵契約且不含市場', () => {

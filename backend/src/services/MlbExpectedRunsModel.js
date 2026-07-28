@@ -106,11 +106,16 @@ export const MLB_EXPECTED_RUNS_FALLBACK_FEATURE_KEYS = [
  * B 基線 + 軟過濾：maxOdds≤2.2、選邊 earlyExits 不高於對手。
  * 日內排序：按 EV，並對高 EV 毒區做條件罰分（P2）：
  *   EV≥0.12 且 modelProb∈[0.53,0.56) → score = EV - 0.15
- * 選注：正式接 minOdds≥1.85 + requireBothPitcherIdentities；dailyTopK 維持 3。
+ * 選注：凍結點 minOdds≥1.85 + 雙先發 ID + dailyTopK=3；
+ *       實驗候選 ev02_max230（EV≥2% + maxOdds≤2.30 + dropR3 margin<0.50）。
  * 複驗：auditMlbStrictRuleWalkForward.mjs / auditMlbMinOddsAb.mjs /
  *       auditMlbIdentityScanOnMin185.mjs /
+ *       auditMlbThresholdRelaxOnFrozen.mjs /
+ *       auditMlbDailyDropR3MarginWf.mjs /
  *       tmp-lineb-p2-strict-wf.json / tmp-mlb-minodds-ab.json /
- *       tmp-identity-scan-on-min185.json
+ *       tmp-identity-scan-on-min185.json /
+ *       tmp-threshold-relax-on-frozen.json /
+ *       tmp-daily-drop-r3-margin-wf.json
  */
 const MLB_MONEYLINE_RULES_BASE = Object.freeze({
   minimumModelProbability: 0.5,
@@ -118,6 +123,27 @@ const MLB_MONEYLINE_RULES_BASE = Object.freeze({
   minimumExpectedValue: 0.03,
   minimumPickOdds: null,
   maximumPickOdds: 2.2,
+  /**
+   * 日內第 3 名分差低於此則當日只取 Top2（null=關閉）。
+   * 僅實驗 profile 覆寫；凍結點保持 null。
+   */
+  dropThirdIfMarginBelow: null,
+  /**
+   * 日內第 2 名賠率 ∈[dropSecondIfOddsMin, dropSecondIfOddsBelow) 則去掉 R2（可保留 R3）。
+   * null=關閉。第三刀 WF：固定 1.95 過閘。
+   */
+  dropSecondIfOddsBelow: null,
+  dropSecondIfOddsMin: 1.85,
+  /**
+   * 兩邊獨贏價都不得低於此（擋 1.01/34 這類歷史髒盤）。
+   * null = 不檢查。
+   */
+  minimumEitherSideOdds: 1.2,
+  /**
+   * PIT 快照內完整雙邊 h2h 最少庄數（擋單莊畸形盤）。
+   * null = 不檢查。多莊掃描 2026-07-27：≥2 過嚴格閘。
+   */
+  minimumH2hBookmakers: null,
   requirePickEarlyExitsNotHigher: true,
   /** 雙方先發身份 ID 皆需可解析（資料品質閘；identity 掃描 2026-07-27 通過） */
   requireBothPitcherIdentities: false,
@@ -144,6 +170,7 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
     label: 'B+P2 + minOdds≥1.85 + 雙先發 ID',
     minimumPickOdds: 1.85,
     requireBothPitcherIdentities: true,
+    minimumH2hBookmakers: 2,
   }),
   /** 與 min185 數值鎖定一致；改實驗時勿覆蓋此物件 */
   frozen_v1: Object.freeze({
@@ -153,6 +180,31 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
     label: `凍結 ${MLB_PAPER_RULE_FREEZE.freezeId}`,
     freezeId: MLB_PAPER_RULE_FREEZE.freezeId,
   }),
+  /**
+   * 門檻放寬掃描過嚴格閘（2026-07-27）：
+   * EV≥2% + maxOdds≤2.30；其餘同 frozen_v1。
+   * 2026-07-28：日內第3名 margin<0.50 → 當日只取 Top2（WF 過閘）。
+   * 2026-07-28：日內第2名賠率∈[1.85,1.95) → 去掉 R2（WF 過閘）。
+   * 複跑：auditMlbThresholdRelaxOnFrozen.mjs /
+   *       auditMlbDailyDropR3MarginWf.mjs /
+   *       auditMlbDailyDropR2LowOddsWf.mjs → ev02_max230
+   */
+  ev02_max230: Object.freeze({
+    ...MLB_MONEYLINE_RULES_BASE,
+    ...MLB_PAPER_RULE_FREEZE.rules,
+    id: 'ev02_max230',
+    label: '實驗：EV≥2% + maxOdds≤2.30 + dropR3/R2',
+    minimumExpectedValue: 0.02,
+    maximumPickOdds: 2.3,
+    minimumPickOdds: 1.85,
+    requireBothPitcherIdentities: true,
+    minimumH2hBookmakers: 2,
+    /** 第3名 expectedRunMargin 低於此則當日有效 TopK=2（不補第4） */
+    dropThirdIfMarginBelow: 0.5,
+    /** 第2名賠率∈[1.85,1.95) 則去掉 R2（可保留已過 dropR3 的 R3） */
+    dropSecondIfOddsBelow: 1.95,
+    dropSecondIfOddsMin: 1.85,
+  }),
   sweet_195_220: Object.freeze({
     ...MLB_MONEYLINE_RULES_BASE,
     id: 'sweet_195_220',
@@ -160,6 +212,7 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
     minimumPickOdds: 1.95,
     maximumPickOdds: 2.2,
     requireBothPitcherIdentities: true,
+    minimumH2hBookmakers: 2,
   }),
 });
 
@@ -907,7 +960,9 @@ export function classifyMlbMoneylineCandidate({
     ? prediction.markets.homeWinProbability
     : prediction.markets.awayWinProbability;
   const marketProbability = pickHome ? market.homeProb : market.awayProb;
-  const odds = pickHome ? Number(market.homeOdds) : Number(market.awayOdds);
+  const homeOdds = Number(market.homeOdds);
+  const awayOdds = Number(market.awayOdds);
+  const odds = pickHome ? homeOdds : awayOdds;
   const expectedRunMargin = Math.abs(
     prediction.homeExpectedRuns - prediction.awayExpectedRuns
   );
@@ -917,6 +972,19 @@ export function classifyMlbMoneylineCandidate({
     prediction.dataQuality?.maximumAbsoluteZScore,
     Infinity
   );
+  const eitherSideTooShort =
+    rules.minimumEitherSideOdds != null &&
+    (homeOdds < rules.minimumEitherSideOdds ||
+      awayOdds < rules.minimumEitherSideOdds);
+  const rawBookCount =
+    market.h2hBookCount ?? market.bookmakerCount ?? market.bookCount;
+  const hasBookCount =
+    rawBookCount != null && Number.isFinite(Number(rawBookCount));
+  const h2hBookCount = hasBookCount ? Number(rawBookCount) : null;
+  const tooFewBookmakers =
+    rules.minimumH2hBookmakers != null &&
+    hasBookCount &&
+    h2hBookCount < rules.minimumH2hBookmakers;
 
   let pickEarlyExitsHigher = false;
   if (rules.requirePickEarlyExitsNotHigher && regimeSignals) {
@@ -965,6 +1033,8 @@ export function classifyMlbMoneylineCandidate({
     ...(rules.maximumPickOdds == null || odds <= rules.maximumPickOdds
       ? []
       : ['pick_odds_above_maximum']),
+    ...(eitherSideTooShort ? ['moneyline_either_side_odds_too_short'] : []),
+    ...(tooFewBookmakers ? ['h2h_bookmakers_below_minimum'] : []),
     ...(rules.requirePickEarlyExitsNotHigher && pickEarlyExitsHigher
       ? ['pick_early_exits_higher_than_opponent']
       : []),
@@ -1084,6 +1154,7 @@ function marketProbability(row, key) {
   const pit = resolvePitOdds(row.gameId, row.commenceTime);
   if (!pit.ok) return null;
   let best = null;
+  let h2hBookCount = 0;
   for (const book of pit.bookmakers) {
     const market = book.markets?.find((entry) => entry.key === key);
     if (!market) continue;
@@ -1091,6 +1162,7 @@ function marketProbability(row, key) {
       const home = market.outcomes?.find((outcome) => outcome.name === row.homeTeam);
       const away = market.outcomes?.find((outcome) => outcome.name === row.awayTeam);
       if (!home?.price || !away?.price) continue;
+      h2hBookCount += 1;
       const fair = removeVig(
         decimalToImpliedProb(home.price),
         decimalToImpliedProb(away.price)
@@ -1122,6 +1194,8 @@ function marketProbability(row, key) {
       }
     }
   }
+  if (!best) return null;
+  if (key === 'h2h') return { ...best, h2hBookCount };
   return best;
 }
 
@@ -1298,6 +1372,7 @@ function scoreMetrics(rows, model, { modelForRow = null } = {}) {
           awayOdds: h2h.awayOdds,
           homeProb: h2h.probability,
           awayProb: 1 - h2h.probability,
+          h2hBookCount: h2h.h2hBookCount,
         },
       });
       if (candidate.tier === 'recommendation') {

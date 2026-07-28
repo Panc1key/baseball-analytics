@@ -30,6 +30,10 @@ export const MLB_PAPER_RULE_FREEZE = Object.freeze({
     minimumExpectedValue: 0.03,
     minimumPickOdds: 1.85,
     maximumPickOdds: 2.2,
+    /** 盤口 sanity：兩邊都不得低於此（與 BASE 一致；擋 1.01/34 髒盤） */
+    minimumEitherSideOdds: 1.2,
+    /** 多莊共識：完整雙邊 h2h ≥2（auditMlbMultibookOnEv02 過嚴格閘） */
+    minimumH2hBookmakers: 2,
     requirePickEarlyExitsNotHigher: true,
     requireBothPitcherIdentities: true,
     maximumAbsoluteZScore: 3.5,

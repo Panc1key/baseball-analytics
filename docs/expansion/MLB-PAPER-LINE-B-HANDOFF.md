@@ -1,20 +1,22 @@
 # MLB 紙上選場交接：主線跟 B，不跟 A
 
 > 交接日：2026-07-25（P2：2026-07-27；minOdds≥1.85 正式：2026-07-27）  
-> 給下一位 agent／開發者：在 **B 線** 上繼續優化選場規則；**不要**把舊勝率線 A（margin≥1）當正式方向。  
+> **2026-07-28：B 基準包鎖定，停選注／權重微調** → 見 `MLB-B-BASELINE-LOCK.md`  
+> 給下一位 agent／開發者：**不要再為抬勝率改 B 選注常數**；進化改走 A′ 增量或重訓。  
+> **禁止**把舊勝率線 A（margin≥1）原樣當正式方向。  
 > 預測骨架仍凍結：`docs/expansion/MLB-INFERENCE-FREEZE.md`。  
-> 正式底座：B + P2 + **`minimumPickOdds: 1.85`** + **`requireBothPitcherIdentities`**；`dailyTopK` **維持 3**。  
-> 均注：`config.mlbPaperFlatStakeUsd`（預設 75）；**不接 Kelly**（模型 p 未校準）。  
+> 紙上主基準：`ev02_max230` + dropR3/R2 + ≥2庄（鎖定說明見 BASELINE-LOCK）。  
+> 均注：`config.mlbPaperFlatStakeUsd`（預設 75）；**不接 Kelly**。  
 > **實驗台帳（勿重複掃描）**：`docs/expansion/MLB-B-LINE-EXPERIMENT-LEDGER.md`  
-> **規則凍結／回滾**：`docs/expansion/MLB-PAPER-RULE-FREEZE.md`（`frozen_v1` / `MLB_PAPER_RULE_PROFILE`）
+> **規則凍結／回滾**：`docs/expansion/MLB-PAPER-RULE-FREEZE.md`
+
 
 ---
 
 ## 0. 一句話
 
-> 賺錢主線是 **B（長賠 / EV / ROI）**；A 只是「高勝率短賠」對照實驗，歷史上過不了自身損益平衡。  
-> 使用者已明確拒絕再花時間做 A+B 均賠≈1.8 合體；請在 **B 基礎上** 抬條件勝率、控場次、保均賠不要塌回短熱門。
-
+> 賺錢主線是 **B（長賠 / EV / ROI）**，且 **2026-07-28 起基準包凍結**。  
+> 舊 A（高勝率短賠）歷史上過不了自身損益平衡；若要加場／抬體感勝率，只能開 **獨立 A′ 增量模組**，禁止與 B 門檻揉成一鍋。
 ---
 
 ## 1. 兩種情況（必讀）
@@ -95,8 +97,11 @@ highEvRankPenaltyLambda: 0.15
 ...
 ```
 
-對照 profile（審計用，非正式）：`base_p2`（無 minOdds／不卡 ID）、`sweet_195_220`（1.95–2.20）。  
-複跑：`node scripts/auditMlbMinOddsAb.mjs`、`node scripts/auditMlbIdentityScanOnMin185.mjs`。
+對照 profile（審計用，非正式）：`base_p2`（無 minOdds／不卡 ID）、`sweet_195_220`（1.95–2.20）、**`ev02_max230`**（EV≥2% + maxOdds≤2.30，門檻放寬掃描過嚴格閘）。  
+紙上切換：`.env` → `MLB_PAPER_RULE_PROFILE=ev02_max230`；改虧回 `frozen_v1`。  
+盤口 sanity：`minimumEitherSideOdds: 1.2`（擋 1.01/34 類髒獨贏）。  
+多莊共識：`minimumH2hBookmakers: 2`（相對 ev02 基線合併 +$204；中位偏離過濾等價、不另加）。  
+複跑：`node scripts/auditMlbMinOddsAb.mjs`、`node scripts/auditMlbIdentityScanOnMin185.mjs`、`node scripts/auditMlbThresholdRelaxOnFrozen.mjs`、`node scripts/auditMlbMultibookOnEv02.mjs`。
 
 日內 TopK：`score = EV - λ`（僅當 `EV≥0.12` 且 `P∈[0.53,0.56)`）；其餘仍按 EV。  
 分類入口：`classifyMlbMoneylineCandidate`；排序入口：`attachDailyResearchRanks`／`scoreMlbMoneylineDailyRank`。
