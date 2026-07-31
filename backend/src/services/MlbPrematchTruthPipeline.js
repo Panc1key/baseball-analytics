@@ -2,7 +2,7 @@
  * MLB 賽前真實資料管線。
  *
  * 推理骨架已凍結（見 MlbInferenceFreeze.js / docs/expansion/MLB-INFERENCE-FREEZE.md）：
- *   predictMlbGameRuns → 比分分布 → 獨贏／大小；研究方向由 ExpectedRuns 分類定邊。
+ *   predictMlbGameRuns →（鎖定 B 疊加 residual+shrink）→ 比分分布市場 → 獨贏分類。
  * 禁止改接 predictMlbGameRunsWithRegime 或 legacy TeamAnalyzer 作為正式輸出。
  *
  * 此模組刻意不讀取舊 recommendations、tier、flat_bet 或建議注碼。
@@ -46,6 +46,7 @@ import {
   MLB_EXPECTED_RUNS_MODEL_VERSION,
   predictMlbGameRuns,
 } from './MlbExpectedRunsModel.js';
+import { applyFormalLockedBResidual } from './MlbFrozenBShadow.js';
 import {
   analyzeGamePitcherInjuryIntel,
   summarizePitcherInjuryIntelEvidence,
@@ -67,6 +68,11 @@ import {
 } from './MlbResearchRanker.js';
 import { resolvePitOdds } from './PitOddsService.js';
 import { buildPregameRegimeSignals } from './MlbGameRegimeService.js';
+import {
+  buildDataReadiness,
+  getMandatoryEvidenceKeys,
+  isEvidenceReadyForRecommend,
+} from './MlbEvidenceCatalog.js';
 
 const STRATEGY_VERSION = 'mlb-expected-runs-rank-v2';
 const EVIDENCE_VERSION = 'mlb-prematch-evidence-v5';
@@ -143,28 +149,7 @@ export function detectStarterInjuryConflicts(pitchers, homeInjuries, awayInjurie
 }
 
 export function calculateCompleteness(items) {
-  const weights = {
-    fixture: 1,
-    odds: 2,
-    venue: 1,
-    starting_pitchers: 2,
-    official_history: 2,
-    model_history: 2,
-    bullpen: 2,
-    lineup: 2,
-    injuries: 1,
-    park: 1,
-    weather: 1,
-    travel_rest: 1,
-  };
-  let weight = 0;
-  let covered = 0;
-  for (const item of items) {
-    const w = weights[item.key] ?? 1;
-    weight += w;
-    covered += w * stateScore(item.status);
-  }
-  return weight ? Math.round((covered / weight) * 1000) / 1000 : 0;
+  return buildDataReadiness(items).score01;
 }
 
 /**
@@ -621,6 +606,11 @@ async function collectEvidence(game) {
                     capturedAt: starterIdentitySnapshot.capturedAt,
                     source: starterIdentitySnapshot.source,
                     status: starterIdentitySnapshot.status,
+                    preferredCompleteOverLaterPartial: Boolean(
+                      starterIdentitySnapshot.preferredCompleteOverLaterPartial
+                    ),
+                    laterPartialCapturedAt:
+                      starterIdentitySnapshot.laterPartialCapturedAt || null,
                   }
                 : null,
               conflicts: starterInjuryConflicts,
@@ -839,11 +829,15 @@ async function collectEvidence(game) {
     String(key).toLowerCase().includes('bullpen')
   );
 
-  const mandatory = ['fixture', 'odds', 'model_history'];
-  const mandatoryFailures = items
-    .filter((item) => mandatory.includes(item.key) && item.status !== 'verified')
-    .map((item) => `${item.key}:${item.status}`);
-  // ExpectedRuns 有 fallback；先發／牛棚不足不擋資料閘門，只影響 featureMode。
+  // critical 證據未就緒不得推薦／紙上晉升
+  // 先發：雙方 official probable（status=partial）即可，不必等確認打線
+  const mandatory = getMandatoryEvidenceKeys();
+  const mandatoryFailures = mandatory.flatMap((key) => {
+    const item = items.find((row) => row.key === key);
+    if (!item) return [`${key}:missing`];
+    if (!isEvidenceReadyForRecommend(item, key)) return [`${key}:${item.status}`];
+    return [];
+  });
   const pitcherEvidence = items.find((item) => item.key === 'starting_pitchers');
   if (pitcherEvidence) pitcherEvidence.usedInModel = usesStarterFeatures;
   const bullpenEvidence = items.find((item) => item.key === 'bullpen');
@@ -952,6 +946,16 @@ async function collectEvidence(game) {
       identitySnapshotId: starterIdentitySnapshot.ok
         ? starterIdentitySnapshot.snapshotId
         : null,
+      homeIdentity: strictStarterIdentity
+        ? starterIdentitySnapshot.home
+        : pitchers.home
+          ? { id: pitchers.home.id, name: pitchers.home.name }
+          : null,
+      awayIdentity: strictStarterIdentity
+        ? starterIdentitySnapshot.away
+        : pitchers.away
+          ? { id: pitchers.away.id, name: pitchers.away.name }
+          : null,
       home: homePitcherHistory,
       away: awayPitcherHistory,
       homeRecent: homePitcherRecent,
@@ -965,13 +969,22 @@ async function collectEvidence(game) {
   const selectedExpectedRunsModel = strictStarterIdentity
     ? expectedRunsModel?.model
     : expectedRunsModel?.model?.fallbackModel;
-  const expectedRunsPrediction = selectedExpectedRunsModel
+  const expectedRunsPredictionRaw = selectedExpectedRunsModel
     ? predictMlbGameRuns(selectedExpectedRunsModel, expectedRunsFeatures)
     : null;
+  const marketOptionsForOverlay = {
+    totalLine: Number(market?.totalsLine ?? market?.totalLine ?? 8.5),
+  };
+  const expectedRunsPrediction = expectedRunsPredictionRaw
+    ? applyFormalLockedBResidual(
+        selectedExpectedRunsModel,
+        expectedRunsPredictionRaw,
+        expectedRunsFeatures,
+        marketOptionsForOverlay
+      )
+    : null;
   const expectedRunsPredictionRouted = expectedRunsPrediction
-    ? attachMlbRegimeMarketPlan(expectedRunsPrediction, expectedRunsFeatures, {
-      totalLine: Number(market?.totalsLine ?? market?.totalLine ?? 8.5),
-    })
+    ? attachMlbRegimeMarketPlan(expectedRunsPrediction, expectedRunsFeatures, marketOptionsForOverlay)
     : null;
   const marketPlan = expectedRunsPredictionRouted?.marketPlan || null;
   const regimeSignals = expectedRunsPredictionRouted?.marketPlan
@@ -986,6 +999,16 @@ async function collectEvidence(game) {
         : 'research_scored_fallback',
       regimeSignals,
       features: expectedRunsFeatures,
+      pitcherIdentity: {
+        homeId:
+          expectedRunsFeatures.pitchers.homeIdentity?.id ??
+          pitchers.home?.id ??
+          null,
+        awayId:
+          expectedRunsFeatures.pitchers.awayIdentity?.id ??
+          pitchers.away?.id ??
+          null,
+      },
     })
     : null;
   if (
@@ -1126,17 +1149,17 @@ function insertTruthSnapshot(runId, game, truth) {
         status: truth.expectedRuns?.status ?? 'blocked_model_missing',
       },
     }),
-    truth.baseline
-      ? JSON.stringify({
-          featureVersion: truth.baseline.featureVersion,
-          trainedAt: truth.baseline.trainedAt,
-          featureVector: truth.baseline.featureVector,
-          homeProb: truth.baseline.homeProb,
-          awayProb: truth.baseline.awayProb,
-          shadowModels: truth.baseline.shadowModels,
-          expectedRuns: truth.expectedRuns,
-        })
-      : null
+    // 正式路徑必須持久化 expectedRuns（含 moneylineClassification），
+    // 不可依賴 baseline shadow；否則讀取 slate 時無法排 Top／出選邊。
+    JSON.stringify({
+      featureVersion: truth.baseline?.featureVersion ?? null,
+      trainedAt: truth.baseline?.trainedAt ?? null,
+      featureVector: truth.baseline?.featureVector ?? null,
+      homeProb: truth.baseline?.homeProb ?? null,
+      awayProb: truth.baseline?.awayProb ?? null,
+      shadowModels: truth.baseline?.shadowModels ?? null,
+      expectedRuns: truth.expectedRuns,
+    })
   ).lastInsertRowid;
 }
 
@@ -1291,6 +1314,8 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const rows = latestTruthRows({ from, to });
   const mapped = rows.map((row) => {
     const modelInput = JSON.parse(row.model_input_json || '{}');
+    const evidence = JSON.parse(row.evidence_json || '[]');
+    const dataReadiness = buildDataReadiness(evidence);
     const modelProb = Number(row.model_prob);
     const marketProb = Number(row.market_prob);
     const edge = Number.isFinite(modelProb) && Number.isFinite(marketProb)
@@ -1301,15 +1326,17 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       : null;
     return {
       truthSnapshotId: row.id,
+      candidateId: row.candidate_id ?? null,
       gameId: row.game_id,
       commenceTime: row.commence_time,
       homeTeam: row.home_team,
       awayTeam: row.away_team,
-      completeness: row.completeness,
-      mandatoryComplete: Boolean(row.mandatory_complete),
+      completeness: dataReadiness.score01,
+      mandatoryComplete: Boolean(row.mandatory_complete) && dataReadiness.recommendationAllowed,
+      dataReadiness,
       gateStatus: row.candidate_status || row.gate_status,
       gateReasons: JSON.parse(row.gate_reasons_json || '[]'),
-      evidence: JSON.parse(row.evidence_json || '[]'),
+      evidence,
       research: {
         market: row.market,
         pick: row.pick,
@@ -1349,6 +1376,8 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       String(a.researchDay).localeCompare(String(b.researchDay)) ||
       a.dailyRank - b.dailyRank
     );
+  const readyTop = topDirections.filter((game) => game.dataReadiness?.recommendationAllowed);
+  const blockedByData = topDirections.filter((game) => !game.dataReadiness?.recommendationAllowed);
   const valueWatch = ranked
     .filter((game) => game.researchTier === 'value_watch')
     .sort((a, b) => {
@@ -1358,6 +1387,141 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         String(a.commenceTime).localeCompare(String(b.commenceTime));
     });
 
+  function summarizeTopPick(game, index) {
+    const pick = game.expectedRuns?.moneylineClassification;
+    const readiness = game.dataReadiness;
+    return {
+      researchDay: game.researchDay,
+      dailyRank: game.dailyRank,
+      researchTier: game.researchTier,
+      rank: game.dailyRank || index + 1,
+      gameId: game.gameId,
+      matchup: `${game.awayTeam} @ ${game.homeTeam}`,
+      commenceTime: game.commenceTime,
+      pick: pick?.side === 'home'
+        ? game.homeTeam
+        : pick?.side === 'away'
+          ? game.awayTeam
+          : game.research?.pick,
+      edge: pick?.edge ?? game.research?.edge ?? null,
+      ev: pick?.expectedValue ?? game.research?.ev ?? null,
+      modelProb: pick?.modelProbability ?? game.research?.modelProb ?? null,
+      marketProb: pick?.marketProbability ?? game.research?.marketProb ?? null,
+      modelProbability: pick?.modelProbability ?? game.research?.modelProb ?? null,
+      marketProbability: pick?.marketProbability ?? game.research?.marketProb ?? null,
+      expectedRunMargin: pick?.expectedRunMargin ?? null,
+      expectedValue: pick?.expectedValue ?? game.research?.ev ?? null,
+      oddsDecimal: pick?.odds ?? game.research?.oddsDecimal ?? null,
+      status: game.research?.status || null,
+      recommendationAllowed: Boolean(readiness?.recommendationAllowed),
+      dataScorePct: readiness?.scorePct ?? null,
+      missingCritical: readiness?.missingCritical || [],
+      dataReadiness: readiness || null,
+    };
+  }
+
+  const topSummaries = readyTop.map((game, index) => summarizeTopPick(game, index));
+
+  /** 同日 2 串衛星：從可看選邊取賠率≤2.10、按排名，至少 2 腿才提示（不改選場） */
+  const PARLAY_LEG_MAX_ODDS = 2.1;
+  const parlayLegs = topSummaries
+    .filter((row) => Number.isFinite(Number(row.oddsDecimal)) && Number(row.oddsDecimal) <= PARLAY_LEG_MAX_ODDS)
+    .sort((a, b) => (a.rank || 99) - (b.rank || 99))
+    .slice(0, 2);
+  const sameDayParlay =
+    parlayLegs.length >= 2
+      ? {
+          available: true,
+          legCount: 2,
+          maxLegOdds: PARLAY_LEG_MAX_ODDS,
+          suggestedStakeNote: '衛星小注（建議遠低於單場均注）',
+          combinedOdds: Number(
+            (parlayLegs[0].oddsDecimal * parlayLegs[1].oddsDecimal).toFixed(3)
+          ),
+          legs: parlayLegs.map((leg) => ({
+            rank: leg.rank,
+            gameId: leg.gameId,
+            matchup: leg.matchup,
+            pick: leg.pick,
+            oddsDecimal: leg.oddsDecimal,
+          })),
+        }
+      : {
+          available: false,
+          legCount: parlayLegs.length,
+          maxLegOdds: PARLAY_LEG_MAX_ODDS,
+          reason:
+            topSummaries.length < 2
+              ? '今日可看選邊不足 2 場，無法組同日 2 串'
+              : '可看選邊中賠率 ≤ 2.10 的腿不足 2 條',
+          legs: parlayLegs.map((leg) => ({
+            rank: leg.rank,
+            gameId: leg.gameId,
+            matchup: leg.matchup,
+            pick: leg.pick,
+            oddsDecimal: leg.oddsDecimal,
+          })),
+        };
+
+  /** 今日卡關摘要：幫助理解「為什麼場次少」（不改規則） */
+  const reasonCounts = {};
+  const pitcherGap = {
+    missingCritical: 0,
+    conflictingIl: 0,
+    identityIncomplete: 0,
+    strictPitFallback: 0,
+    preferredCompleteOverPartial: 0,
+  };
+  let analyzedReady = 0;
+  let pendingCount = 0;
+  for (const game of ranked) {
+    const pitcherEv = (game.evidence || []).find((e) => e.key === 'starting_pitchers');
+    if (pitcherEv?.status === 'conflicting') pitcherGap.conflictingIl += 1;
+    if (pitcherEv?.values?.identitySnapshot?.preferredCompleteOverLaterPartial) {
+      pitcherGap.preferredCompleteOverPartial += 1;
+    }
+    const reasons =
+      game.expectedRuns?.moneylineClassification?.reasons ||
+      game.research?.rejectionReasons ||
+      [];
+    if (reasons.includes('pitcher_identity_incomplete')) {
+      pitcherGap.identityIncomplete += 1;
+    }
+    if (reasons.includes('strict_pit_starter_required')) {
+      pitcherGap.strictPitFallback += 1;
+    }
+
+    if (!game.dataReadiness?.recommendationAllowed) {
+      pendingCount += 1;
+      const miss = game.dataReadiness?.missingCritical?.[0]?.key || 'data_incomplete';
+      if (miss === 'starting_pitchers') pitcherGap.missingCritical += 1;
+      reasonCounts[miss] = (reasonCounts[miss] || 0) + 1;
+      continue;
+    }
+    analyzedReady += 1;
+    if (readyTop.some((g) => g.gameId === game.gameId)) continue;
+    const primary = reasons[0] || 'locked_b_excluded';
+    reasonCounts[primary] = (reasonCounts[primary] || 0) + 1;
+  }
+  const todayFunnel = {
+    upcoming: ranked.length,
+    pendingData: pendingCount,
+    analyzedReady,
+    selected: readyTop.length,
+    pitcherGap,
+    topReasons: Object.entries(reasonCounts)
+      .map(([reason, n]) => ({ reason, n }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 8),
+  };
+
+  const snapshotMeta = db.prepare(`
+    SELECT MAX(captured_at) AS lastCapturedAt,
+           MAX(commence_time) AS lastCommenceTime,
+           COUNT(*) AS snapshotCount
+    FROM mlb_prematch_truth_snapshots
+  `).get();
+
   return {
     mode: 'research_only',
     modelVersion: resolveFormalModelVersion(),
@@ -1365,44 +1529,23 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     inferenceSkeleton: MLB_INFERENCE_FREEZE.skeleton,
     baselineShadowEnabled: config.mlbBaselineShadowEnabled,
     inferenceFreeze: describeMlbInferenceFreeze(),
+    dataLag: {
+      lastCapturedAt: snapshotMeta?.lastCapturedAt || null,
+      lastCommenceTime: snapshotMeta?.lastCommenceTime || null,
+      snapshotCount: Number(snapshotMeta?.snapshotCount || 0),
+      upcomingGameCount: ranked.length,
+      stale: ranked.length === 0,
+    },
     disclaimer:
-      '此頁僅呈現 MLB 賽前事實與預期得分研究方向（骨架已凍結：兩隊得分→分布→盤口）。Baseline 僅 shadow 不定邊；嚴格方向以勝率與分差為主，EV 只判斷價格；不足場次不湊數，不是投注建議。',
-    dailyTop: topDirections.map((game) => {
-      const pick = game.expectedRuns?.moneylineClassification;
-      return {
-        researchDay: game.researchDay,
-        dailyRank: game.dailyRank,
-        researchTier: game.researchTier,
-        gameId: game.gameId,
-        matchup: `${game.awayTeam} @ ${game.homeTeam}`,
-        commenceTime: game.commenceTime,
-        pick: pick?.side === 'home' ? game.homeTeam : pick?.side === 'away' ? game.awayTeam : game.research?.pick,
-        edge: pick?.edge ?? game.research?.edge ?? null,
-        ev: pick?.expectedValue ?? game.research?.ev ?? null,
-        modelProb: pick?.modelProbability ?? game.research?.modelProb ?? null,
-        marketProb: pick?.marketProbability ?? game.research?.marketProb ?? null,
-        expectedRunMargin: pick?.expectedRunMargin ?? null,
-        oddsDecimal: pick?.odds ?? game.research?.oddsDecimal ?? null,
-        status: game.research?.status || null,
-      };
-    }),
-    expectedRunsTop: topDirections.map((game, index) => {
-      const pick = game.expectedRuns.moneylineClassification;
-      return {
-        rank: game.dailyRank || index + 1,
-        gameId: game.gameId,
-        matchup: `${game.awayTeam} @ ${game.homeTeam}`,
-        commenceTime: game.commenceTime,
-        pick: pick.side === 'home' ? game.homeTeam : game.awayTeam,
-        modelProbability: pick.modelProbability,
-        marketProbability: pick.marketProbability,
-        expectedRunMargin: pick.expectedRunMargin,
-        expectedValue: pick.expectedValue,
-        oddsDecimal: pick.odds,
-      };
-    }),
+      '此頁僅呈現 MLB 賽前事實與預期得分研究方向（骨架已凍結：兩隊得分→分布→盤口）。Baseline 僅 shadow 不定邊；嚴格方向以勝率與分差為主，EV 只判斷價格；不足場次不湊數，不是投注建議。關鍵資料（賠率／雙方先發／賽程／模型歷史）未齊時不進推薦。',
+    dailyTop: topSummaries,
+    expectedRunsTop: topSummaries,
+    sameDayParlay,
+    todayFunnel,
+    blockedByData: blockedByData.map((game, index) => summarizeTopPick(game, index)),
     valueWatch: valueWatch.map((game) => {
       const pick = game.expectedRuns.moneylineClassification;
+      const readiness = game.dataReadiness;
       return {
         gameId: game.gameId,
         matchup: `${game.awayTeam} @ ${game.homeTeam}`,
@@ -1414,9 +1557,90 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         expectedValue: pick.expectedValue,
         oddsDecimal: pick.odds,
         reasons: pick.reasons || [],
+        recommendationAllowed: Boolean(readiness?.recommendationAllowed),
+        dataScorePct: readiness?.scorePct ?? null,
+        missingCritical: readiness?.missingCritical || [],
       };
     }),
     games: ranked,
+  };
+}
+
+/**
+ * 路徑 γ：把當日鎖定 B 日內名額（TopK+dropR3/R2）從 research_observation
+ * 晉升為 paper_candidate，供 MlbPaperLedger 建注。不改選注常數。
+ *
+ * 僅處理尚未開賽、關鍵資料齊全（含雙方先發）、有 pick/odds 的最新 snapshot 候補。
+ */
+export function promoteDailyLockedBPaperCandidates({ lookbackDays = 1, lookaheadDays = 3 } = {}) {
+  const from = new Date();
+  from.setUTCDate(from.getUTCDate() - Math.max(0, Number(lookbackDays) || 0));
+  const to = new Date();
+  to.setUTCDate(to.getUTCDate() + Math.max(1, Number(lookaheadDays) || 3));
+
+  const slate = getMlbPrematchTruthSlate({
+    from: from.toISOString(),
+    to: to.toISOString(),
+  });
+  const paperTiers = new Set(['top1_observation', 'top3_observation']);
+  const now = Date.now();
+  const update = db.prepare(`
+    UPDATE mlb_paper_candidates
+    SET status = 'paper_candidate',
+        rejection_reasons_json = ?
+    WHERE id = ?
+      AND status IN ('research_observation', 'value_watch', 'no_signal')
+  `);
+
+  let promoted = 0;
+  let skipped = 0;
+  const promotedGameIds = [];
+
+  for (const game of slate.games || []) {
+    if (!paperTiers.has(game.researchTier)) {
+      skipped += 1;
+      continue;
+    }
+    if (
+      !game.candidateId ||
+      !game.mandatoryComplete ||
+      !game.dataReadiness?.recommendationAllowed
+    ) {
+      skipped += 1;
+      continue;
+    }
+    if (!game.research?.pick || !Number.isFinite(Number(game.research?.oddsDecimal))) {
+      skipped += 1;
+      continue;
+    }
+    const commenceMs = Date.parse(game.commenceTime);
+    if (Number.isFinite(commenceMs) && commenceMs <= now) {
+      skipped += 1;
+      continue;
+    }
+    const reasons = [
+      ...(Array.isArray(game.research?.rejectionReasons)
+        ? game.research.rejectionReasons
+        : []),
+      'path_gamma_locked_b_daily_slot',
+      `daily_rank_${game.dailyRank}`,
+    ];
+    const result = update.run(JSON.stringify(reasons), game.candidateId);
+    if (result.changes === 1) {
+      promoted += 1;
+      promotedGameIds.push(game.gameId);
+    } else {
+      skipped += 1;
+    }
+  }
+
+  return {
+    mode: 'path_gamma_promote',
+    profile: config.mlbPaperRuleProfile,
+    scanned: (slate.games || []).length,
+    promoted,
+    skipped,
+    promotedGameIds,
   };
 }
 

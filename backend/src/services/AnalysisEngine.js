@@ -42,7 +42,7 @@ import {
   slateDisplayGameWhere,
 } from '../utils/activeGames.js';
 import { runLiveAnalysis, getLiveRecommendations, getLiveStatus } from './LiveAnalysisEngine.js';
-import { runMlbPrematchTruthPipeline } from './MlbPrematchTruthPipeline.js';
+import { runMlbPrematchTruthPipeline, promoteDailyLockedBPaperCandidates } from './MlbPrematchTruthPipeline.js';
 import {
   autoCreateEligiblePaperBets,
   autoSettleMlbPaperBets,
@@ -1768,6 +1768,7 @@ export async function fullRefresh(options = {}) {
     const settledMlbPaperBets = autoSettleMlbPaperBets();
     const analysis = await runAnalysis();
     const mlbTruth = await runMlbPrematchTruthPipeline();
+    const mlbPaperPromote = promoteDailyLockedBPaperCandidates();
     const createdMlbPaperBets = autoCreateEligiblePaperBets();
     setMeta('last_analysis_at', new Date().toISOString());
 
@@ -1795,6 +1796,7 @@ export async function fullRefresh(options = {}) {
       sync,
       analysis,
       mlbTruth,
+      mlbPaperPromote,
       mlbInferenceSkeleton: config.mlbInferenceSkeleton,
       baselineShadowEnabled: config.mlbBaselineShadowEnabled,
       liveAnalysis,

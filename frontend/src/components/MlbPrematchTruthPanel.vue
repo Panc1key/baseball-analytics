@@ -1,226 +1,367 @@
 <template>
   <section class="truth-panel" v-loading="loading">
-    <el-alert
-      type="warning"
-      :closable="false"
-      show-icon
-      title="MLB 賽前研究模式"
-      :description="truth?.disclaimer || '本頁只做賽前事實、獨立概率與市場錯價排序；不提供投注建議、均注或建議金額。'"
-    />
-
-    <MlbSourceHealthPanel />
-    <MlbModelValidationPanel />
-    <MlbExpectedRunsValidationPanel />
-
     <header class="toolbar">
       <div>
-        <strong>賽前事實 → 預期得分 → 研究方向</strong>
-        <span v-if="truth" class="version">
-          {{ truth.modelVersion }} · {{ truth.strategyVersion }}
-          <template v-if="truth.inferenceSkeleton"> · {{ truth.inferenceSkeleton }}</template>
-        </span>
-        <small v-if="truth" class="freeze-note">
-          正式輸出僅 ExpectedRuns；Baseline shadow
-          {{ truth.baselineShadowEnabled ? '開啟' : '關閉' }}
-        </small>
+        <h2 class="panel-title">今日鎖定 B</h2>
+        <p class="panel-sub">僅 MLB · 雙方預定先發齊即可（不必等確認打線）</p>
       </div>
-      <el-button size="small" :loading="loading" @click="loadTruth">重新載入</el-button>
+      <el-button size="small" plain :loading="loading" @click="loadTruth">重新載入</el-button>
     </header>
 
-    <div v-if="walkforward" class="ledger">
-      <strong>紙上 Walk-forward（近 {{ walkforward.window?.days || '—' }} 日）</strong>
-      <span>可用日 {{ walkforward.coverage?.daysUsed || 0 }}</span>
-      <span>Top1 命中 {{ percent(walkforward.summary?.top1?.hitRate) }}（n={{ walkforward.summary?.top1?.n || 0 }}）</span>
-      <span>Top1 ROI {{ percent(walkforward.summary?.top1?.roi) }}</span>
-      <span>Top3 命中 {{ percent(walkforward.summary?.top3?.hitRate) }}（n={{ walkforward.summary?.top3?.n || 0 }}）</span>
-      <span>市場熱門 Top1 {{ percent(walkforward.summary?.marketFavoriteTop1?.hitRate) }}</span>
-      <small>{{ walkforward.warning }}</small>
-    </div>
+    <div v-if="dailyTop.length" class="picks-block">
+      <div class="block-label">可看選邊</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">賠率</th>
+            <th class="num">模型</th>
+            <th class="num">市場</th>
+            <th class="num">EV</th>
+            <th class="num">分差</th>
+            <th class="num">資料</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in dailyTop" :key="item.gameId" :class="{ 'is-top': item.rank === 1 }">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.modelProbability) }}</td>
+            <td class="num">{{ percent(item.marketProbability) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+            <td class="num">{{ score(item.expectedRunMargin) }}</td>
+            <td class="num data-ok">{{ item.dataScorePct ?? '—' }}%</td>
+          </tr>
+        </tbody>
+      </table>
 
-    <div v-if="dailyTop.length" class="daily-top">
-      <strong>預期得分嚴格方向（不足不補）</strong>
-      <article v-for="item in dailyTop" :key="item.gameId" class="top-row">
-        <el-tag size="small" :type="item.rank === 1 ? 'warning' : 'info'">
-          #{{ item.rank }}
-        </el-tag>
-        <span class="matchup">{{ item.matchup }}</span>
-        <span>{{ item.pick || '—' }}</span>
-        <span>預期分差 {{ score(item.expectedRunMargin) }}</span>
-        <span>
-          模型 {{ percent(item.modelProbability) }}
-          / 市場 {{ percent(item.marketProbability) }}
-        </span>
-        <span>EV {{ percent(item.expectedValue) }}</span>
-        <span>@{{ formatOdds(item.oddsDecimal) }}</span>
-      </article>
-    </div>
-
-    <div v-if="valueWatch.length" class="daily-top">
-      <strong>高賠價值觀察（非嚴格方向）</strong>
-      <article v-for="item in valueWatch" :key="`watch-${item.gameId}`" class="top-row">
-        <el-tag size="small" type="info">觀察</el-tag>
-        <span class="matchup">{{ item.matchup }}</span>
-        <span>{{ item.pick || '—' }}</span>
-        <span>模型 {{ percent(item.modelProbability) }}</span>
-        <span>EV {{ percent(item.expectedValue) }}</span>
-        <span>@{{ formatOdds(item.oddsDecimal) }}</span>
-      </article>
-    </div>
-
-    <el-empty v-if="!loading && !games.length" description="尚無 MLB 賽前資料快照；請先同步棒球。" />
-
-    <article v-for="game in rankedGames" :key="game.truthSnapshotId" class="game-card">
-      <header class="game-head">
-        <div>
-          <div class="matchup">
-            <span v-if="game.dailyRank" class="rank-badge">#{{ game.dailyRank }}</span>
-            {{ game.awayTeam }} @ {{ game.homeTeam }}
-          </div>
-          <div class="time">{{ formatTime(game.commenceTime) }} · 快照 {{ formatTime(game.capturedAt) }}</div>
-        </div>
-        <div class="status">
-          <span class="completeness">資料完整度 {{ Math.round(game.completeness * 100) }}%</span>
-          <el-tag :type="tierType(game.researchTier)" size="small">{{ tierLabel(game.researchTier) }}</el-tag>
-        </div>
-      </header>
-
-      <p class="gate-reason">{{ gateReasonText(game.research?.rejectionReasons || game.gateReasons) }}</p>
-
-      <div class="evidence-grid">
-        <div v-for="item in game.evidence" :key="item.key" class="evidence-item" :class="`state-${item.status}`">
-          <span class="symbol">{{ stateSymbol(item.status) }}</span>
-          <div class="evidence-copy">
-            <strong>{{ labelFor(item.key) }}</strong>
-            <span>{{ item.summary }}</span>
-            <small v-if="item.reason">{{ reasonFor(item.reason) }}</small>
-            <small v-if="item.source">來源：{{ item.source }} · {{ formatTime(item.capturedAt) }}</small>
-          </div>
-        </div>
+      <div v-if="sameDayParlay?.available" class="parlay-hint">
+        <div class="block-label">同日 2 串（衛星）</div>
+        <p class="parlay-line">
+          {{ sameDayParlay.legs[0].pick }}（{{ formatOdds(sameDayParlay.legs[0].oddsDecimal) }}）
+          ×
+          {{ sameDayParlay.legs[1].pick }}（{{ formatOdds(sameDayParlay.legs[1].oddsDecimal) }}）
+          · 合計約 {{ formatOdds(sameDayParlay.combinedOdds) }}
+        </p>
+        <p class="hint">只取可看選邊且賠率 ≤ 2.10；小注即可，勿當主帳。</p>
       </div>
+      <p v-else class="hint">
+        串關：{{ sameDayParlay?.reason || '同日選邊中賠率 ≤ 2.10 優先。' }}
+      </p>
+    </div>
 
-      <div class="model-output">
-        <span class="output-label">研究方向（不是推薦）</span>
-        <template v-if="game.research?.pick || game.modelOutput?.pick">
-          <span>{{ game.research?.pick || game.modelOutput?.pick }}</span>
-          <span>@{{ formatOdds(game.research?.oddsDecimal ?? game.modelOutput?.oddsDecimal) }}</span>
-          <span>模型 {{ percent(game.research?.modelProb ?? game.modelOutput?.modelProb) }}</span>
-          <span>市場 {{ percent(game.research?.marketProb ?? game.modelOutput?.marketProb) }}</span>
-          <span>edge {{ percent(game.research?.edge ?? game.modelOutput?.edge) }}</span>
-          <span>研究 EV {{ percent(game.research?.ev ?? game.modelOutput?.ev) }}</span>
-        </template>
-        <span v-else>缺少完整雙邊盤或模型輸出，未產生錯價排序</span>
-      </div>
-      <MlbExpectedRunsOutput
-        v-if="game.expectedRuns?.prediction"
-        :expected-runs="game.expectedRuns"
-      />
-    </article>
+    <div v-else-if="!loading && dataLag?.stale" class="empty-picks stale">
+      <p class="empty-title">本機沒有今日場次</p>
+      <p class="empty-body">
+        資料已停更，最後快照
+        {{ formatTime(dataLag?.lastCapturedAt) || '未知' }}。
+        請點右上角「同步今日 MLB」拉取賽程與初盤。
+      </p>
+    </div>
+
+    <div v-else-if="!loading" class="empty-picks">
+      <p class="empty-title">現在沒有可下選邊</p>
+      <p class="empty-body">
+        見下方：「分析完成・未入選」是已算完但被鎖定 B 排除；「資料未齊」是還沒辦法正式判斷。
+      </p>
+      <p v-if="todayFunnelText" class="empty-body funnel-line">{{ todayFunnelText }}</p>
+    </div>
+
+    <div v-if="!loading && todayFunnel && (dailyTop.length > 0 || todayFunnel.upcoming > 0)" class="funnel-strip">
+      <span>今日場次 {{ todayFunnel.upcoming }}</span>
+      <span>資料未齊 {{ todayFunnel.pendingData }}</span>
+      <span>已分析 {{ todayFunnel.analyzedReady }}</span>
+      <span>可看選邊 {{ todayFunnel.selected }}</span>
+      <span v-if="topFunnelReason">主因 {{ topFunnelReason }}</span>
+      <span v-if="pitcherGapText">先發 {{ pitcherGapText }}</span>
+    </div>
+
+    <div v-if="analyzedExcluded.length" class="picks-block">
+      <div class="block-label">分析完成・未入選（{{ analyzedExcluded.length }}）</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th>開賽（港）</th>
+            <th>對陣</th>
+            <th class="num">資料</th>
+            <th>結果</th>
+            <th>未入選原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="game in analyzedExcluded" :key="`ex-${game.truthSnapshotId}`">
+            <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
+            <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
+            <td class="num data-ok">
+              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
+            </td>
+            <td class="status-cell">{{ analyzedResultLabel(game) }}</td>
+            <td class="missing">{{ exclusionReasonText(game) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">已完成模型分析；未過鎖定 B（EV／賠率／分差等）故不進可看選邊。</p>
+    </div>
+
+    <div v-if="pendingData.length" class="picks-block blocked">
+      <div class="block-label">資料未齊・暫不入選（{{ pendingData.length }}）</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th>開賽（港）</th>
+            <th>對陣</th>
+            <th class="num">資料</th>
+            <th>還缺</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="game in pendingData" :key="`pend-${game.truthSnapshotId}`">
+            <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
+            <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
+            <td class="num data-bad">
+              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
+            </td>
+            <td class="missing">{{ missingCriticalText(game.dataReadiness?.missingCritical) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">關鍵資料未齊，不做正式入選判斷；齊了之後會進上面兩類之一。</p>
+    </div>
+
+    <details class="meta-fold" v-if="upcomingGames.length">
+      <summary>展開資料清單</summary>
+      <article v-for="game in upcomingGames" :key="`detail-${game.truthSnapshotId}`" class="game-card">
+        <header class="game-head">
+          <div>
+            <div class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</div>
+            <div class="time">{{ formatTime(game.commenceTime) }}</div>
+          </div>
+          <div class="status-plain">
+            <span :class="game.dataReadiness?.recommendationAllowed ? 'data-ok' : 'data-bad'">
+              {{ bucketLabel(game) }}
+              ·
+              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
+            </span>
+          </div>
+        </header>
+
+        <ul class="evidence-list">
+          <li
+            v-for="item in readinessChecklist(game)"
+            :key="item.key"
+            :class="{
+              critical: item.blockRecommend,
+              ok: item.ok,
+              soft: !item.ok && item.softOk,
+              bad: !item.softOk,
+            }"
+          >
+            <span class="ev-weight">w{{ item.weight }}</span>
+            <span class="ev-state">{{ item.statusLabel || stateSymbol(item.status) }}</span>
+            <span>
+              <strong v-if="item.blockRecommend">[關鍵]</strong>
+              {{ item.label || labelFor(item.key) }}
+              <span v-if="item.summary" class="ev-summary">— {{ item.summary }}</span>
+            </span>
+          </li>
+        </ul>
+      </article>
+    </details>
+
+    <el-empty
+      v-if="!loading && !games.length"
+      description="尚無 MLB 賽前快照。點右上角重新載入；若仍空，需後端先同步今日賽程。"
+    />
   </section>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue';
-import {
-  getMlbPrematchTruth,
-} from '../api/index.js';
-import MlbModelValidationPanel from './MlbModelValidationPanel.vue';
-import MlbExpectedRunsValidationPanel from './MlbExpectedRunsValidationPanel.vue';
-import MlbExpectedRunsOutput from './MlbExpectedRunsOutput.vue';
-import MlbSourceHealthPanel from './MlbSourceHealthPanel.vue';
+import { getMlbPrematchTruth } from '../api/index.js';
 
 const loading = ref(false);
 const truth = ref(null);
-const walkforward = ref(null);
 
 const games = computed(() => truth.value?.games || []);
 const dailyTop = computed(() => truth.value?.expectedRunsTop || []);
-const valueWatch = computed(() => truth.value?.valueWatch || []);
-const rankedGames = computed(() =>
-  [...games.value].sort((a, b) => {
-    const day = String(a.researchDay || '').localeCompare(String(b.researchDay || ''));
-    if (day !== 0) return day;
-    return (a.dailyRank || 999) - (b.dailyRank || 999);
+const dataLag = computed(() => truth.value?.dataLag || null);
+const sameDayParlay = computed(() => truth.value?.sameDayParlay || null);
+const todayFunnel = computed(() => truth.value?.todayFunnel || null);
+
+const selectedIds = computed(() => new Set(dailyTop.value.map((row) => row.gameId)));
+
+const upcomingGames = computed(() =>
+  [...games.value].sort((a, b) =>
+    String(a.commenceTime || '').localeCompare(String(b.commenceTime || ''))
+  )
+);
+
+/** 關鍵資料未齊：尚未做正式入選判斷 */
+const pendingData = computed(() =>
+  upcomingGames.value.filter((game) => !game.dataReadiness?.recommendationAllowed)
+);
+
+/**
+ * 分析完成但未入選：資料齊、已有分類結果，且不在可看選邊。
+ * （含嚴格擋下與 value_watch 觀察級）
+ */
+const analyzedExcluded = computed(() =>
+  upcomingGames.value.filter((game) => {
+    if (!game.dataReadiness?.recommendationAllowed) return false;
+    if (selectedIds.value.has(game.gameId)) return false;
+    return Boolean(game.expectedRuns?.moneylineClassification) || Boolean(game.research?.status);
   })
 );
 
 const labels = {
-  fixture: '比賽資訊',
-  odds: '賽前盤口',
-  venue: '場地',
-  starting_pitchers: '先發投手',
-  official_history: '官方歷史特徵',
-  model_history: '模型同口徑歷史特徵',
-  bullpen: '牛棚',
-  lineup: '先發打線',
-  injuries: '傷停／可出賽',
-  pitcher_injury_intel: '先發傷病情報(AI)',
-  park: '球場環境',
+  fixture: '官方賽程匹配',
+  odds: '初盤雙邊賠率',
+  venue: '球場名稱',
+  starting_pitchers: '雙方預定先發',
+  official_history: '官方戰績特徵',
+  model_history: '模型同口徑歷史',
+  bullpen: '牛棚負荷',
+  lineup: '確認打線',
+  injuries: '傷停名單',
+  pitcher_injury_intel: '先發傷病情報',
+  park: '球場係數',
   weather: '天氣',
   travel_rest: '旅行／休息',
 };
 
-const reasons = {
-  bullpen_availability_not_confirmed: '已取得近期負荷，但尚未確認當日可用後援名單。',
-  bullpen_usage_data_missing: '無法取得近期牛棚使用量，未納入模型。',
-  confirmed_lineup_missing: '官方確認打線尚未公布，未納入模型。',
-  injury_list_missing: '無法取得完整傷兵名單，未納入模型。',
-  pitcher_recovery_or_injury_flagged: '新聞／官方材料顯示先發有傷病或恢復期風險（研究旗標，未改權重）。',
-  pitcher_injury_intel_scanned: '已掃描先發相關新聞，未發現明確傷病／恢復期旗標。',
-  pitcher_injury_intel_unavailable: '先發傷病情報暫不可用（缺新聞、缺 API 或先發未公布）。',
-  park_factor_dataset_not_implemented: '舊快照：球場係數當時尚未接入；現行模型已使用靜態球場係數。',
-  weather_forecast_missing: '無法取得比賽時段天氣，模型將使用中性天氣 fallback。',
-  previous_game_end_time_not_available: '已取得賽程與旅行距離，但前一戰實際結束時間尚未驗證。',
-  team_schedule_history_missing: '無法取得完整隊伍賽程歷史，未納入模型。',
-  official_probable_pitchers_are_not_confirmed_lineup_cards: '官方僅標示預定先發，尚非確認名單。',
-  both_probable_pitchers_required: '雙方預定先發尚未完整公布。',
-  official_historical_features_missing: '無法取得截至比賽日前的官方球隊歷史特徵。',
-  paired_h2h_market_missing: '沒有可去水的同 bookmaker 雙邊盤。',
-  baseline_model_or_features_missing: '（舊快照）Baseline shadow 不足；現行閘門已改以 ExpectedRuns 為準。',
-  'baseline_features:missing': '（舊快照）Baseline 特徵不足；不定邊。',
-  'baseline_model:missing': '（舊快照）Baseline 模型缺失；不定邊。',
-  baseline_market_gap_below_threshold: '模型相對市場的錯價低於研究門檻。',
-  expected_runs_model_or_features_missing: '預期得分模型或特徵不足，無法定邊。',
-  expected_run_margin_below_threshold: '預期分差低於嚴格門檻。',
-  model_probability_below_threshold: '模型勝率低於嚴格門檻。',
-  expected_value_below_threshold: 'EV 低於門檻（現行規則可能未啟用硬 EV 過濾）。',
-  strategy_not_validated_for_real_or_paper_selection: '策略未經樣本外驗證，禁止正式選邊。',
+const reasonLabels = {
+  expected_value_below_threshold: 'EV 不足',
+  expected_run_margin_below_threshold: '分差不足',
+  model_probability_below_threshold: '模型勝率不足',
+  pick_odds_below_minimum: '賠率低於下限',
+  pick_odds_above_maximum: '賠率高於上限',
+  pick_early_exits_higher_than_opponent: '選邊先發早退偏多',
+  moneyline_either_side_odds_too_short: '任一邊賠率過低',
+  h2h_bookmakers_below_minimum: '開盤 book 數不足',
+  feature_out_of_distribution: '特徵超出訓練分佈',
+  pitcher_identity_incomplete: '先發身份不完整',
+  strict_pit_starter_required: '先發 PIT 身份未齊',
+  regime_routes_to_totals: '路線改走大小球',
+  both_stable_starters_prefer_totals_under: '雙穩先發偏 unders',
+  regime_totals_primary_moneyline_secondary: '獨贏為次優先',
+  one_sided_collapse_risk_no_auto_totals_lean: '單邊崩盤風險',
 };
+
+const funnelReasonLabels = {
+  ...reasonLabels,
+  starting_pitchers: '雙方預定先發未齊',
+  odds: '初盤未齊',
+  fixture: '賽程未齊',
+  model_history: '模型歷史未齊',
+  data_incomplete: '資料未齊',
+  locked_b_excluded: '未過鎖定 B',
+  baseline_market_gap_below_threshold: '相對市場優勢不足',
+  paper_entry_window_not_due: '尚未到可建帳時點',
+};
+
+const topFunnelReason = computed(() => {
+  const top = todayFunnel.value?.topReasons?.[0];
+  if (!top) return '';
+  return `${funnelReasonLabels[top.reason] || top.reason}×${top.n}`;
+});
+
+const todayFunnelText = computed(() => {
+  if (!todayFunnel.value?.upcoming) return '';
+  const parts = [
+    `今日共 ${todayFunnel.value.upcoming} 場`,
+    `資料未齊 ${todayFunnel.value.pendingData}`,
+    `已分析未入選約 ${Math.max(0, todayFunnel.value.analyzedReady - todayFunnel.value.selected)}`,
+  ];
+  if (topFunnelReason.value) parts.push(`最常見卡點：${topFunnelReason.value}`);
+  return parts.join(' · ');
+});
+
+const pitcherGapText = computed(() => {
+  const g = todayFunnel.value?.pitcherGap;
+  if (!g) return '';
+  const bits = [];
+  if (g.missingCritical) bits.push(`缺先發閘 ${g.missingCritical}`);
+  if (g.conflictingIl) bits.push(`IL衝突 ${g.conflictingIl}`);
+  if (g.identityIncomplete) bits.push(`身份不完整 ${g.identityIncomplete}`);
+  if (g.strictPitFallback) bits.push(`非嚴格PIT ${g.strictPitFallback}`);
+  if (g.preferredCompleteOverPartial) bits.push(`保留完整快照 ${g.preferredCompleteOverPartial}`);
+  return bits.join(' · ');
+});
+
+/** 入選判斷用的主因（略過僅附註的 regime 次要標籤） */
+const PRIMARY_EXCLUDE_REASONS = new Set([
+  'expected_value_below_threshold',
+  'expected_run_margin_below_threshold',
+  'model_probability_below_threshold',
+  'pick_odds_below_minimum',
+  'pick_odds_above_maximum',
+  'pick_early_exits_higher_than_opponent',
+  'moneyline_either_side_odds_too_short',
+  'h2h_bookmakers_below_minimum',
+  'feature_out_of_distribution',
+  'pitcher_identity_incomplete',
+  'strict_pit_starter_required',
+  'regime_routes_to_totals',
+  'both_stable_starters_prefer_totals_under',
+]);
 
 function labelFor(key) {
   return labels[key] || key;
 }
 
-function reasonFor(reason) {
-  return reasons[reason] || reason;
-}
-
 function stateSymbol(state) {
-  if (state === 'verified') return '✓';
-  if (state === 'partial') return '△';
-  return '×';
+  if (state === 'verified') return '齊';
+  if (state === 'partial') return '部分';
+  return '缺';
 }
 
-function tierType(tier) {
-  if (tier === 'top1_observation') return 'warning';
-  if (tier === 'top3_observation' || tier === 'strict_observation') return 'success';
-  if (tier === 'value_watch') return 'info';
-  if (tier === 'blocked') return 'danger';
-  return 'info';
+function missingCriticalText(list = []) {
+  if (!list?.length) return '—';
+  return list.map((row) => row.label || labelFor(row.key)).join('、');
 }
 
-function tierLabel(tier) {
-  if (tier === 'top1_observation') return '嚴格方向 Top1';
-  if (tier === 'top3_observation') return '嚴格方向 Top3';
-  if (tier === 'strict_observation') return '嚴格方向';
-  if (tier === 'value_watch') return '高賠價值觀察';
-  if (tier === 'blocked') return '不列入';
-  if (tier === 'legacy_watchlist') return '舊版觀察';
-  return '未排序';
+function readinessChecklist(game) {
+  if (game.dataReadiness?.checklist?.length) {
+    return game.dataReadiness.checklist;
+  }
+  return (game.evidence || []).map((item) => ({
+    key: item.key,
+    label: labelFor(item.key),
+    weight: '—',
+    status: item.status,
+    statusLabel: stateSymbol(item.status),
+    summary: item.summary,
+    blockRecommend: ['odds', 'starting_pitchers', 'fixture', 'model_history'].includes(item.key),
+    ok: item.status === 'verified',
+    softOk: item.status === 'verified' || item.status === 'partial',
+  }));
 }
 
-function gateReasonText(reasonsList = []) {
-  if (!reasonsList.length) return '資料閘門通過；排序僅供研究觀察。';
-  return reasonsList.map(reasonFor).join(' ');
+function analyzedResultLabel(game) {
+  const tier = game.expectedRuns?.moneylineClassification?.tier || game.researchTier;
+  if (tier === 'value_watch') return '觀察級（未嚴格入選）';
+  return '已分析・排除';
+}
+
+function exclusionReasonText(game) {
+  const reasons =
+    game.expectedRuns?.moneylineClassification?.reasons ||
+    game.research?.rejectionReasons ||
+    [];
+  const primary = reasons.filter((r) => PRIMARY_EXCLUDE_REASONS.has(r));
+  const use = primary.length ? primary : reasons.slice(0, 2);
+  if (!use.length) return '未過鎖定 B 綜合門檻';
+  return use.map((r) => reasonLabels[r] || r).join('、');
+}
+
+function bucketLabel(game) {
+  if (selectedIds.value.has(game.gameId)) return '已入選';
+  if (!game.dataReadiness?.recommendationAllowed) return '資料未齊';
+  return '已分析未入選';
 }
 
 function percent(value) {
@@ -263,54 +404,273 @@ defineExpose({ loadTruth });
 </script>
 
 <style scoped>
-.truth-panel { display: grid; gap: 12px; }
-.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.version { margin-left: 8px; color: #86909c; font-size: 12px; }
-.freeze-note { display: block; margin-top: 4px; color: #86909c; font-size: 12px; font-weight: 400; }
-.ledger, .daily-top {
+.truth-panel {
   display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid #e5e6eb;
-  border-radius: 8px;
+  gap: 16px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #111;
+}
+
+.panel-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #666;
+}
+
+.picks-block {
+  border: 1px solid #ddd;
   background: #fff;
-  color: #4e5969;
+}
+
+.picks-block.blocked {
+  border-color: #bbb;
+  background: #fafafa;
+}
+
+.block-label {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eee;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+}
+
+.picks-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.picks-table th,
+.picks-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.picks-table th {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  background: #fafafa;
+}
+
+.picks-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.picks-table tr.is-top td {
+  background: #f7f7f7;
+  font-weight: 500;
+}
+
+.col-rank {
+  width: 36px;
+  color: #666;
+  font-variant-numeric: tabular-nums;
+}
+
+.num {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.matchup {
+  font-weight: 500;
+  color: #111;
+}
+
+.pick {
+  font-weight: 600;
+  color: #111;
+}
+
+.missing,
+.status-cell {
+  color: #555;
   font-size: 12px;
 }
-.ledger { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.ledger strong, .daily-top strong { color: #1f2329; }
-.ledger small { width: 100%; color: #86909c; }
-.top-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.rank-badge {
-  display: inline-block;
-  margin-right: 6px;
-  padding: 0 6px;
-  border-radius: 4px;
-  background: #fff7e6;
-  color: #d48806;
+
+.time-cell {
   font-size: 12px;
+  color: #555;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
-.game-card { background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 14px; }
-.game-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.matchup { font-size: 16px; font-weight: 700; }
-.time, .gate-reason { color: #86909c; font-size: 12px; }
-.status { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.completeness { font-size: 12px; color: #4e5969; }
-.gate-reason { margin: 10px 0; line-height: 1.5; }
-.evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px; }
-.evidence-item { display: flex; gap: 8px; border: 1px solid #f0f0f0; border-radius: 6px; padding: 8px; min-width: 0; }
-.symbol { width: 16px; font-weight: 700; font-size: 16px; }
-.state-verified .symbol { color: #52c41a; }
-.state-partial .symbol { color: #d48806; }
-.state-missing .symbol, .state-stale .symbol, .state-conflicting .symbol { color: #cf1322; }
-.evidence-copy { display: grid; gap: 2px; min-width: 0; }
-.evidence-copy strong { font-size: 13px; }
-.evidence-copy span, .evidence-copy small { color: #4e5969; font-size: 12px; line-height: 1.4; }
-.evidence-copy small { color: #86909c; }
-.model-output { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #f0f0f0; font-size: 12px; color: #4e5969; }
-.output-label { color: #86909c; }
-@media (max-width: 640px) {
-  .game-head { flex-direction: column; }
-  .status { align-self: flex-start; }
+
+.data-ok {
+  color: #1a1a1a;
+  font-weight: 600;
+}
+
+.data-bad {
+  color: #888;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #777;
+  border-top: 1px solid #eee;
+}
+
+.parlay-hint {
+  border-top: 1px solid #eee;
+  background: #fafafa;
+}
+
+.parlay-hint .block-label {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.parlay-line {
+  margin: 0;
+  padding: 4px 12px 0;
+  font-size: 13px;
+  color: #222;
+}
+
+.funnel-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #555;
+  border: 1px solid #e8e8e8;
+  background: #fcfcfc;
+}
+
+.funnel-line {
+  margin-top: 8px;
+}
+
+.empty-picks {
+  padding: 20px 16px;
+  border: 1px dashed #ccc;
+  background: #fff;
+  text-align: center;
+}
+
+.empty-picks.stale {
+  border-color: #999;
+  background: #fafafa;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #222;
+}
+
+.empty-body {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #666;
+  line-height: 1.5;
+}
+
+.meta-fold {
+  border: 1px solid #e5e5e5;
+  padding: 8px 12px;
+  background: #fff;
+}
+
+.meta-fold > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #555;
+  font-weight: 600;
+}
+
+.game-card {
+  margin-top: 12px;
+  padding: 12px 0;
+  border-top: 1px solid #eee;
+}
+
+.game-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.time {
+  font-size: 12px;
+  color: #777;
+  margin-top: 2px;
+}
+
+.status-plain {
+  font-size: 12px;
+  color: #555;
+  white-space: nowrap;
+}
+
+.evidence-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.evidence-list li {
+  display: grid;
+  grid-template-columns: 42px 36px 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+  color: #444;
+  padding: 4px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.evidence-list li.critical.bad {
+  background: #f5f5f5;
+}
+
+.evidence-list li.ok .ev-state {
+  color: #111;
+  font-weight: 600;
+}
+
+.evidence-list li.bad .ev-state {
+  color: #888;
+}
+
+.ev-weight {
+  font-variant-numeric: tabular-nums;
+  color: #888;
+  font-size: 11px;
+}
+
+.ev-state {
+  font-size: 11px;
+}
+
+.ev-summary {
+  color: #777;
+  font-weight: 400;
 }
 </style>

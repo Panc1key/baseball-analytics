@@ -3,9 +3,12 @@ dist/
 .env
 backend/data/*.db
 backend/data/*.db-*
-backend/tmp-*.js
+backend/tmp-*
+backend/scripts/tmp*
 *.log
 .DS_Store
 .cursor/
+__pycache__/
+collector/data/
 backend/scripts/debug-*.js
 backend/scripts/check-*.js

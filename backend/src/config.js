@@ -115,6 +115,11 @@ export const config = {
    * MLB 紙上選注 profile：frozen_v1／min185=可回滾正式；其餘實驗用。
    * 改壞時設回 frozen_v1 即可還原。
    */
+  /**
+   * 鎖定 B 疊加層（frozen_b+shrink）：殘差 b + 毒客 shrink。
+   * 預設開啟；設 MLB_LOCKED_B_OVERLAY=false 可回滾到升格前純 ev02_max230。
+   */
+  mlbLockedBOverlayEnabled: process.env.MLB_LOCKED_B_OVERLAY !== 'false',
   mlbPaperRuleProfile: process.env.MLB_PAPER_RULE_PROFILE || 'frozen_v1',
   /** 基準均注單位（建議投注額計算基數） */
   baseStakeUnit: parseFloat(process.env.BASE_STAKE_UNIT || process.env.FLAT_BET_USD || '10'),

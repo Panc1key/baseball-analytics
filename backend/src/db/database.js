@@ -631,6 +631,35 @@ function migrateSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_mlb_prematch_scheduler_recent
       ON mlb_prematch_scheduler_runs(started_at DESC);
+
+    /*
+     * 官方交易帳中的 IL 放置／啟用事件（可回放）。
+     * 來源：statsapi.mlb.com /api/v1/transactions
+     * 用於 is_return_pitcher（days_since_last_il_exit），不做滾球。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_il_transaction_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL,
+      pitcher_id INTEGER NOT NULL,
+      pitcher_name TEXT,
+      team_id INTEGER,
+      event_date TEXT NOT NULL,
+      effective_date TEXT,
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('placed', 'activated')),
+      il_days INTEGER,
+      type_code TEXT,
+      type_desc TEXT,
+      description TEXT NOT NULL,
+      payload_json TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(transaction_id, pitcher_id, event_kind)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_il_events_pitcher_date
+      ON mlb_il_transaction_events(pitcher_id, event_date DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_il_events_kind_date
+      ON mlb_il_transaction_events(event_kind, event_date);
   `);
   addCol('ALTER TABLE mlb_prematch_truth_snapshots ADD COLUMN model_input_json TEXT');
   // 統一歷史結果字典，避免 won/lost 與 win/loss 混用。

@@ -68,17 +68,7 @@ export function recordMlbProbableStarterSnapshot({
   };
 }
 
-export function resolveMlbProbableStarterSnapshot(gameId, commenceTime) {
-  const row = db.prepare(`
-    SELECT *
-    FROM mlb_probable_starter_snapshots
-    WHERE game_id = ?
-      AND datetime(captured_at) < datetime(?)
-      AND datetime(captured_at) < datetime(commence_time)
-    ORDER BY datetime(captured_at) DESC, id DESC
-    LIMIT 1
-  `).get(gameId, commenceTime);
-  if (!row) return { ok: false, reason: 'pregame_probable_starter_snapshot_missing' };
+function mapProbableStarterRow(row) {
   return {
     ok: true,
     snapshotId: row.id,
@@ -95,6 +85,64 @@ export function resolveMlbProbableStarterSnapshot(gameId, commenceTime) {
       ? { id: row.away_pitcher_id, name: row.away_pitcher_name }
       : null,
   };
+}
+
+/**
+ * 解析賽前 probable 身份。
+ * 優先「最新 complete」：避免稍後單邊 partial 覆蓋掉先前完整雙先發，
+ * 導致整場掉進 live_fallback／無法進鎖定 B。
+ * 若從未有 complete，再退回最新任一快照（通常為 partial）。
+ */
+export function resolveMlbProbableStarterSnapshot(gameId, commenceTime) {
+  const complete = db
+    .prepare(
+      `SELECT *
+       FROM mlb_probable_starter_snapshots
+       WHERE game_id = ?
+         AND status = 'complete'
+         AND datetime(captured_at) < datetime(?)
+         AND datetime(captured_at) < datetime(commence_time)
+       ORDER BY datetime(captured_at) DESC, id DESC
+       LIMIT 1`
+    )
+    .get(gameId, commenceTime);
+  if (complete) {
+    const mapped = mapProbableStarterRow(complete);
+    const latestAny = db
+      .prepare(
+        `SELECT id, status, captured_at
+         FROM mlb_probable_starter_snapshots
+         WHERE game_id = ?
+           AND datetime(captured_at) < datetime(?)
+           AND datetime(captured_at) < datetime(commence_time)
+         ORDER BY datetime(captured_at) DESC, id DESC
+         LIMIT 1`
+      )
+      .get(gameId, commenceTime);
+    if (
+      latestAny &&
+      latestAny.id !== complete.id &&
+      latestAny.status === 'partial'
+    ) {
+      mapped.preferredCompleteOverLaterPartial = true;
+      mapped.laterPartialCapturedAt = latestAny.captured_at;
+    }
+    return mapped;
+  }
+
+  const row = db
+    .prepare(
+      `SELECT *
+       FROM mlb_probable_starter_snapshots
+       WHERE game_id = ?
+         AND datetime(captured_at) < datetime(?)
+         AND datetime(captured_at) < datetime(commence_time)
+       ORDER BY datetime(captured_at) DESC, id DESC
+       LIMIT 1`
+    )
+    .get(gameId, commenceTime);
+  if (!row) return { ok: false, reason: 'pregame_probable_starter_snapshot_missing' };
+  return mapProbableStarterRow(row);
 }
 
 export function backfillMlbProbableStarterSnapshotsFromTruth() {

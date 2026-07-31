@@ -68,6 +68,7 @@
 | `soft-route-keep-volume` | 2026-07-28 | dropR3+dropR2 | 高margin／中EV／甜區／低賠軟罰分或軟加分 | 軟重排常**加場但勝率/$↓**（稀釋硬規則）；無 keep≥90% 且嚴格過閘者；**維持現行** | `scripts/auditMlbSoftRouteKeepVolumeOnCurrent.mjs` → `tmp-soft-route-keep-volume-on-current.json` |
 | `feature-miss-soft` | 2026-07-28 | dropR3+dropR2 | 過自信／薄邊／攻K／高K9優勢等軟沉或硬擋 | 薄邊軟沉合併略升但 **2026 略低基線**→未過嚴格閘；高K9軟沉同；**不接**；選注可先凍結 | `scripts/auditMlbFeatureMissOnCurrent.mjs` → `tmp-feature-miss-on-current.json` |
 | `feature-weight-scale-v45` | 2026-07-28 | 選注凍結 | 先發／攻擊／Obp／對手RA／platoon／rest 權重×0～1.5 | **全部劣於**現行 v4.5；**不改正式權重** | `scripts/auditMlbFeatureWeightScaleOnFrozenPicks.mjs` → `tmp-feature-weight-scale-on-frozen-picks.json` |
+| `line-a-prime-grid1` | 2026-07-28 | B 凍結 | 舊A／短賠 P↑／margin↑／EV／edge buffer；合併優先 B | **無一** A′ 賺錢且合併≥B；舊A 勝率高仍虧；**不接入** | `scripts/auditMlbLineAPrimeOnFrozenB.mjs` → `tmp-line-a-prime-on-frozen-b.json` |
 
 ### bullpen 補充（避免誤會）
 
@@ -94,11 +95,19 @@
 | `odds-soft-prefer-195-215` | 弱候選／暫不接 | 注數 100% 保留；勝率僅 +0.4pp（54.4%）；合併 +$269 但 **2025 窗低於基線**→未過嚴格閘 |
 | `daily-drop-r3-margin050` | **已接入** `ev02_max230` | WF 過閘後寫入 `dropThirdIfMarginBelow: 0.5`；凍結點不含 |
 | `daily-drop-r2-lowodds-195` | **已接入** `ev02_max230` | WF 過閘後寫入 `dropSecondIfOddsBelow: 1.95`；與全切低賠不同 |
+| `early-soft-l020` | **已接入** `ev02_max230` | earlyExits 硬擋→軟罰 λ=0.20；`auditMlbVolumeLiftEarlySoftExpandingWf.mjs` |
+| `margin-minodds-relax` | **否決** | 分差讓步明確負優化；minOdds 讓步合併好看但 2025 掉 → 雙窗不過 |
 | `soft-route-keep-volume` | **否決本輪** | 保量軟路由未勝過現行硬結構；見 Rejected |
 | `feature-miss-on-current` | **否決本輪／診斷保留** | hit≠miss 最大差在牛棚球數／近期用球／BB／ERA；薄邊軟沉弱候選未過嚴格閘；**選注常數建議先凍結** |
 | `selection-lock-2026-07-28` | **已凍結** | 見 `MLB-PAPER-RULE-FREEZE.md`「實驗選注鎖定」；後續只動模型實驗 |
 | `feature-weight-scale-v45` | **否決本輪** | 內存權重縮放未勝過 v4.5；正式模型不變 |
 | `b-baseline-lock-2026-07-28` | **基準包鎖定／停 B 微調** | 全文：`MLB-B-BASELINE-LOCK.md`；進化改 A′ 增量或重訓 |
+| `line-a-prime-scan-1` | **否決本輪網格** | 舊A／P58–62／EV短賠等皆傷合併$；見 `MLB-A-PRIME-EXPERIMENT.md` |
+| `b-plus-a-inc-param-wf` | **過閘但不接入** | 固定/Expanding 參數 WF；保守候選 `edge02_bLt2`；見 A-PRIME §6 |
+| `a-fill-diagnose-tighten` | **分析完成／未接入** | 毒切片 1.75–1.85／低 margin；加嚴 OOS 以 `odds&lt;1.75` 最佳但仍不接；見 A-PRIME §7 |
+| `a-fill-tighten-expanding` | **觀察名單／未接入** | Expanding 偏 `odds_lt_175`（+$159）；樣本薄；見 A-PRIME §8；**非必須接入** |
+| `a-fill-shadow-ledger` | **影子試跑／未接入** | 12 注影子 +$239／83%；正式仍純 B；見 A-PRIME §9 |
+| `path-gamma-paper-2026-07-28` | **現行主路徑** | 停選注進化；晉升閉環＋報表；見 `MLB-PATH-GAMMA-PAPER.md` |
 | `threshold-relax-on-frozen` | 已開 `ev02_max230` | 見門檻放寬節；`max_none` 否決 |
 | `multibook-on-ev02` | **已接入** ≥2庄 | ≥3 不如 ≥2 |
 | `ev01-on-ev02-books2` | **否決** | 場次↑美元↓ |
@@ -155,6 +164,37 @@
 | 2026-07-28 | 第五刀特徵／失誤：診斷保留；薄邊／高K9軟沉未過嚴格閘；**建議凍結選注規則**，下一動改模型或紙上實盤 |
 | 2026-07-28 | **凍結**實驗選注 `ev02_max230`+dropR3/R2；權重縮放刀：先發削弱／攻擊加強等皆傷勝率與$；**維持 v4.5** |
 | 2026-07-28 | **B 基準包鎖定**（`MLB-B-BASELINE-LOCK.md`）：停選注／權重微調；下一步建議獨立 A′ 增量或重訓／實盤 |
+| 2026-07-28 | A′ 第一網格：短賠候選全軍覆沒（合併皆≤B）；文件 `MLB-A-PRIME-EXPERIMENT.md`；**B 繼續獨跑** |
+| 2026-07-28 | B+A 增量參數 WF：多格過嚴格閘；**使用者決定不接入**；維持純 B |
+| 2026-07-28 | A 補場診斷：毒在 1.75–1.85／margin&lt;1.25／B=1 補場；加嚴 OOS 好看但樣本薄，**仍不接入** |
+| 2026-07-28 | A 加嚴 Expanding：常選 `odds_lt_175`；定為觀察第一名，**確認「找到合適才接、非必須」** |
+| 2026-07-28 | A 影子帳試跑：`odds_lt_175` 歷史 12 注／83%／+$239；**不進正式**；可複跑 `auditMlbAFillShadowLedger.mjs` |
+| 2026-07-28 | **切路徑 γ**：paper 晉升閉環＋`reportMlbPathGammaPaper.mjs`／API pathGamma；**停 A′／B 旋鈕**；手冊 `MLB-PATH-GAMMA-PAPER.md` |
+| 2026-07-29 | 人工弱點盤點：客+強主場+Rank1；病灶細分為「高幻覺 EV≥10%」子段（20 注 40% −$143），非整包 Rank1 |
+| 2026-07-29 | 優化候選 `skip_toxic_r1_if_ev_ge10`：固定窗 Δ+$143／三窗皆正；Expanding WF +$44 但 beat/hurt=2/5 → **不接入**；影子腳本 `auditMlbToxicAwayRank1Ev10Shadow.mjs` |
+| 2026-07-29 | β 校準：分桶校準弱；**往市場收縮** `P'=(1-w)P+w/odds`（毒切片）最佳 w=0.5：固定 Δ+$352、幻覺EV Rank1 20→2；Expanding +$333 beat/hurt=4/4 → **影子觀察不接入**；`auditMlbToxicShrinkToMarketGrid.mjs` |
+| 2026-07-29 | 收縮穩健加測：w=0.5 對 2024 holdout −$164、月 beat/hurt≈5/6；**保留影子、不正式接入**；`auditMlbToxicShrinkRobustness.mjs` |
+| 2026-07-29 | 條件收縮：`shrink_ev_ge10_or_p55 w=0.65` **三窗皆≥raw**（Δ+$325；24+90/25+219/26+17）；WF/holdout 未全過 → **升格影子主候選、仍不接入**；`auditMlbToxicConditionalShrink*.mjs` |
+| 2026-07-29 | Hurt 月拆解：選參 WF 與固定 w=0.65 同為 4/6；主因丟掉當月會中的毒單。更穩固定規則 **`shrink_p_ge55 w=0.45`**（OOS 月 3/1/9、ΣΔ+$257、三窗不傷）→ **改為影子主候選**；`auditMlbToxicConditionalShrinkHurtMonths.mjs` |
+| 2026-07-29 | 收窄/EV閘/排名專用收縮複測：**未勝過** `p>=55 w=0.45`（誤踢會中僅 1）；判定本切片 overlay **暫時平台**；下一步改特徵／重訓；`auditMlbToxicNarrowPShrink.mjs` 等 |
+| 2026-07-29 | β 主場後處理：`home_add_*`／`away_cut_vs_strong` 可壓 Rank1 毒單、月級有時 7/2，但**皆無法三窗同時≥B**（常傷 2024 或 2026）；與 shrink 疊加無增益；**仍以 shrink_p55@0.45 為影子主候選**；`auditMlbHomeStrengthPostHoc.mjs`／`auditMlbAwayCutVsStrongFine.mjs` |
+| 2026-07-29 | 整模重訓+homeWinPct：快速重訓遠弱於正式 v4.5（訓練協定不一致）→否決亂重訓；改 **prod 殘差修正** |
+| 2026-07-29 | 主場殘差（正式 v4.5 上）：嚴格 OOS 2024 Δ+$344、2026 Δ+$191；24→25 Δ+$371 → **升格模型側影子**（不 persist／不改鎖定 B）；與 shrink 雙影子並列；`auditMlbHomeResidualHoldout.mjs` |
+| 2026-07-29 | **殘差+shrink 疊加**：先殘差改均值再 `shrink_p55@0.45`；三窗皆≥B；嚴格 OOS 24+26 Δ+$640（24:+344／26:+296）**勝過** residual_only(+535) 與 shrink_only(+206) → **合併為單一影子主候選** `residual_plus_shrink`（仍不接入／不改鎖定 B）；`auditMlbHomeResidualPlusShrinkStack.mjs` → `tmp-b-home-residual-plus-shrink-stack.json` |
+| 2026-07-29 | **影子健康度**：`residual+shrink` 8/9 通過 → `healthy_shadow`（Expanding 7/1/7 Δ+$666；安慰劑翻號/洗牌遠弱於真規則；丟掉注 ROI−78%／新增 +86%）。**唯一 FAIL**：殘差 `a` 符號跨年不穩（24+/25−/26+），`b` 穩定為負；fit24+25→26 僅 +$115 → **可當主影子觀察，禁止接入**；`auditMlbResidualShrinkHealth.mjs` → `tmp-b-residual-shrink-health.json` |
+| 2026-07-29 | **a/b 剝離**：`a` 單獨 OOS 有害（−$131）；`b+shrink` 靜態 OOS +$667 > `ab+shrink` +$640；但 Expanding 重擬合時 ab 更穩（7/1 vs 4/3）→ 勿用 a-only；`auditMlbResidualAbComponentAblation.mjs` |
+| 2026-07-29 | **強主場作用域**：殘差只修 hw≥65% **全面弱於**全場（best strong OOS +$227）→ **否決作用域收縮**；`auditMlbResidualScopeStrongHome.mjs` |
+| 2026-07-29 | **凍結決策**：上線影子會 freeze 不每月重擬合 → 主影子改為 **`frozen_b+shrink`**（a=0，b 來自 2025 擬合×scale0.25，+shrink_p55@0.45）；OOS +$667、月 6/0、安慰劑通過；**仍不接入**；`auditMlbFrozenShadowBvsAb.mjs` → `tmp-b-frozen-shadow-b-vs-ab.json` |
+| 2026-07-29 | **影子掛觀察**：`MlbFrozenBShadow.js` + `reportMlbFrozenBShadow.mjs`；pathγ／`GET /mlb/paper-ledger` 帶 `frozenBShadow` 摘要；**不寫 mlb_paper_bets**；手冊 `MLB-PATH-GAMMA-PAPER.md` §4 |
+| 2026-07-30 | **體感勝率／串關**：全窗後處理抬 HR 最多約 +0.6pp（難到 60%）；實用規則：**串關腿用影子且賠率≤2.10**（單腿 HR 55.9%、同日兩腿實證命中 **38.2%**／110 日）；保量可去毒客（HR 55.8% keep 92%）；**不改正式 B**；`auditMlbHitRateFirstParlay.mjs` |
+| 2026-07-30 | **升格**：`frozen_b+shrink` → **正式鎖定 B 疊加**（`B-baseline-2026-07-30`）；PrematchTruth 套 residual、classify 套毒客 shrink；回滾 `MLB_LOCKED_B_OVERLAY=false`；之後優化另開影子 |
+| 2026-07-30 | **接入** `early-soft-l020`：`ev02_max230` 關 early 硬擋、日內軟罰 λ=0.20；否決分差／minOdds 讓步；腳本 `auditMlbVolumeLift*.mjs`／`auditMlbMarginMinOddsRelaxShadow.mjs` |
+| 2026-07-30 | **A+B 診斷**：空白日主因=缺先發ID／短盤&lt;1.85（非 Top3）；近失場（margin/EV/1.75–1.85）影子加池皆 **Δ$ 為負**→確認勿放寬；產物 `tmp-empty-day-near-miss.json` |
+| 2026-07-30 | **C 產品**：`sameDayParlay`（腿≤2.10）+ `todayFunnel` 進 prematch-truth API／UI；**不改選注常數** |
+| 2026-07-30 | **probable 契約**：`resolveMlbProbableStarterSnapshot` 優先最新 complete（不被後續 partial 蓋掉）；`todayFunnel.pitcherGap`；回填 2025 缺 ID（oracle）`backfillMlb2025PitcherIdentity.mjs` |
+| 2026-07-31 | **Grok 對辯**：保排序輕罰、棄 P 乘子；落地真 IL 事件表＋標註；`MLB-IL-RETURN-FLAG.md`；影子 `auditMlbTrueIlReturnRankPenaltyShadow.mjs` |
+| 2026-07-31 | **opener/臨時先發**：定義＋影子 `auditMlbOpenerSpotStarterShadow.mjs`／`MLB-OPENER-SPOT-STARTER.md`；sparse 子池弱但輕罰負 → 留 v4.6 |
+| 2026-07-31 | **v4.6 協定草案**：`MLB-V46-TRAINING-PROTOCOL.md`（IL+sparse 兩特徵；訓練窗／消融／雙層升格閘） |
 
 ## 回滾
 

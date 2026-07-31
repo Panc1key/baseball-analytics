@@ -3,7 +3,7 @@
     <header class="header">
       <div class="brand">
         <h1>初盤分析</h1>
-        <p class="subtitle">{{ headerSubtitle }}</p>
+        <p class="subtitle">MLB 鎖定 B · 香港時間</p>
       </div>
       <div class="header-right">
         <div v-if="hasApiKey && (lastSyncAt || lastAnalysisAt)" class="status-line">
@@ -11,7 +11,7 @@
           <span v-if="oddsQuota != null" class="quota">額度 {{ oddsQuota }}</span>
         </div>
         <el-tag v-if="!hasApiKey" type="danger" size="small">未設定 API Key</el-tag>
-        <el-button type="primary" :loading="refreshing" @click="handleRefresh">
+        <el-button type="primary" plain :loading="refreshing" @click="handleRefresh">
           {{ refreshButtonLabel }}
         </el-button>
       </div>
@@ -37,15 +37,15 @@ import { ElMessage } from 'element-plus';
 import MlbPrematchTruthPanel from './components/MlbPrematchTruthPanel.vue';
 import {
   getStatus,
+  refreshSlate,
 } from './api/index.js';
+
 const baseballPanelRef = ref(null);
 const refreshing = ref(false);
 
-const headerSubtitle = computed(() => {
-  return 'MLB 賽前事實資料與紙上研究 · 香港時間';
-});
-
-const refreshButtonLabel = computed(() => '重新載入本機快照');
+const refreshButtonLabel = computed(() =>
+  refreshing.value ? '同步中…' : '同步今日 MLB'
+);
 const hasApiKey = ref(false);
 const lastSyncAt = ref(null);
 const lastAnalysisAt = ref(null);
@@ -99,10 +99,12 @@ async function loadBaseballViews() {
 async function handleRefresh() {
   refreshing.value = true;
   try {
+    // 真正拉今日賽程／初盤並跑鎖定 B truth 快照（不是只讀本機舊檔）
+    await refreshSlate({ sports: ['baseball'] });
     await loadBaseballViews();
-    ElMessage.success('已重新載入本機賽前快照');
+    ElMessage.success('已同步今日 MLB');
   } catch (err) {
-    ElMessage.error(err.response?.data?.error || err.message || '載入失敗');
+    ElMessage.error(err.response?.data?.error || err.message || '同步失敗');
   } finally {
     refreshing.value = false;
   }
@@ -115,47 +117,36 @@ onMounted(loadBaseballViews);
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  background: #f0f2f5;
+  background: #f5f5f5;
   font-family: "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
-  color: #1f2329;
+  color: #111;
 }
-.app { max-width: 1100px; margin: 0 auto; padding: 16px 16px 40px; }
+.app { max-width: 960px; margin: 0 auto; padding: 16px 16px 40px; }
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #e5e6eb;
+  border-bottom: 1px solid #ddd;
 }
 .brand h1 {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-size: 20px;
+  font-weight: 600;
 }
-.subtitle { margin: 4px 0 0; color: #86909c; font-size: 13px; }
+.subtitle { margin: 4px 0 0; color: #666; font-size: 13px; }
 .header-right { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .status-line {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
-  color: #4e5969;
+  color: #555;
 }
-.quota { color: #86909c; }
+.quota { color: #888; }
 .setup-alert { margin-bottom: 12px; }
-.all-hint { margin: 0 0 10px; font-size: 12px; color: #86909c; }
-.main-tabs :deep(.el-tabs__header) { margin-bottom: 12px; }
-.main-tabs :deep(.el-tabs__item) { font-size: 14px; padding: 0 14px; }
-.lists-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.list-hint { margin: 0 0 10px; font-size: 12px; color: #86909c; }
 @media (max-width: 640px) {
   .header { flex-direction: column; align-items: flex-start; }
   .app { padding: 12px; }

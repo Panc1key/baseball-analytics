@@ -2,7 +2,7 @@
 
 > 交接日：2026-07-25（P2：2026-07-27；minOdds≥1.85 正式：2026-07-27）  
 > **2026-07-28：B 基準包鎖定，停選注／權重微調** → 見 `MLB-B-BASELINE-LOCK.md`  
-> 給下一位 agent／開發者：**不要再為抬勝率改 B 選注常數**；進化改走 A′ 增量或重訓。  
+> 給下一位 agent／開發者：**不要再為抬勝率改 B 選注常數**；**現行主路徑 = γ 紙上實盤**（`MLB-PATH-GAMMA-PAPER.md`）。A′／重訓等活體夠了再談。
 > **禁止**把舊勝率線 A（margin≥1）原樣當正式方向。  
 > 預測骨架仍凍結：`docs/expansion/MLB-INFERENCE-FREEZE.md`。  
 > 紙上主基準：`ev02_max230` + dropR3/R2 + ≥2庄（鎖定說明見 BASELINE-LOCK）。  

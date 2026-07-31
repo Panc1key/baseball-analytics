@@ -26,7 +26,39 @@ import {
 import { config } from '../config.js';
 import { MLB_PAPER_RULE_FREEZE } from './MlbPaperRuleFreeze.js';
 
+/** 鎖定 B 毒客收縮常數（與 MlbFrozenBShadow / Locked overlay 凍結一致） */
+const LOCKED_B_TOXIC_SHRINK = Object.freeze({
+  w: 0.45,
+  modelProbMin: 0.55,
+  strongHomeWinPct: 0.65,
+});
+
+function applyLockedBToxicShrinkInline(modelProb, pickOdds, { pickHome, homeWinPct }) {
+  if (config.mlbLockedBOverlayEnabled === false) return modelProb;
+  const toxicAway = !pickHome && (homeWinPct ?? 0) >= LOCKED_B_TOXIC_SHRINK.strongHomeWinPct;
+  if (!toxicAway || modelProb < LOCKED_B_TOXIC_SHRINK.modelProbMin) return modelProb;
+  const market = 1 / pickOdds;
+  return modelProb * (1 - LOCKED_B_TOXIC_SHRINK.w) + market * LOCKED_B_TOXIC_SHRINK.w;
+}
+
 export const MLB_EXPECTED_RUNS_MODEL_VERSION = 'mlb-expected-runs-nb-v4.5';
+/** 研究版；過雙層閘後才可升格為正式 v4.6 */
+export const MLB_EXPECTED_RUNS_V46_RC_MODEL_VERSION = 'mlb-expected-runs-nb-v4.6-rc';
+export const MLB_EXPECTED_RUNS_V46_RC2_MODEL_VERSION = 'mlb-expected-runs-nb-v4.6-rc2';
+/** v4.6 凍結：對手先發身份異常（不進 fallback；不改 v4.5 消融表） */
+export const MLB_EXPECTED_RUNS_STARTER_IDENTITY_FEATURE_KEYS = [
+  'opponentStarterIsReturnFromIl',
+  'opponentStarterIsSparseStart',
+];
+/** v4.6-rc2：同一訊號的連續值表達 */
+export const MLB_EXPECTED_RUNS_STARTER_IDENTITY_CONTINUOUS_KEYS = [
+  'opponentStarterDaysSinceIlExit',
+  'opponentStarterSeasonGs',
+];
+/** daysSinceIlExit 缺省（無 IL 啟動紀錄）填此大數，避免 NaN */
+export const MLB_IL_DAYS_SINCE_EXIT_MISSING = 365;
+/** sparseStart：GS∈[1,3] 且該隊賽前場次 ≥ 此值（開季保護） */
+export const MLB_SPARSE_START_MIN_TEAM_GAMES = 15;
 export const MLB_EXPECTED_RUNS_CORE_FEATURE_KEYS = [
   'isHome',
   'offenseRecentRpg',
@@ -88,6 +120,8 @@ export const MLB_EXPECTED_RUNS_FEATURE_KEYS = [
   ...MLB_EXPECTED_RUNS_BULLPEN_STRENGTH_FEATURE_KEYS,
   'opponentStarterExpectedInnings',
   'opponentStarterRestDays',
+  ...MLB_EXPECTED_RUNS_STARTER_IDENTITY_FEATURE_KEYS,
+  ...MLB_EXPECTED_RUNS_STARTER_IDENTITY_CONTINUOUS_KEYS,
   ...MLB_EXPECTED_RUNS_WEATHER_FEATURE_KEYS,
 ];
 export const MLB_EXPECTED_RUNS_FALLBACK_FEATURE_KEYS = [
@@ -145,6 +179,11 @@ const MLB_MONEYLINE_RULES_BASE = Object.freeze({
    */
   minimumH2hBookmakers: null,
   requirePickEarlyExitsNotHigher: true,
+  /**
+   * 選邊 earlyExits 高於對手時，日內排序扣分（不硬擋）。
+   * null／0 = 關閉；與 requirePickEarlyExitsNotHigher 互斥使用（軟罰時應關硬擋）。
+   */
+  earlyExitsSoftPenaltyLambda: null,
   /** 雙方先發身份 ID 皆需可解析（資料品質閘；identity 掃描 2026-07-27 通過） */
   requireBothPitcherIdentities: false,
   maximumAbsoluteZScore: 3.5,
@@ -185,15 +224,18 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
    * EV≥2% + maxOdds≤2.30；其餘同 frozen_v1。
    * 2026-07-28：日內第3名 margin<0.50 → 當日只取 Top2（WF 過閘）。
    * 2026-07-28：日內第2名賠率∈[1.85,1.95) → 去掉 R2（WF 過閘）。
+   * 2026-07-30：earlyExits 硬擋 → 軟罰 λ=0.20（volume-lift 影子+expanding WF 過閘）。
    * 複跑：auditMlbThresholdRelaxOnFrozen.mjs /
    *       auditMlbDailyDropR3MarginWf.mjs /
-   *       auditMlbDailyDropR2LowOddsWf.mjs → ev02_max230
+   *       auditMlbDailyDropR2LowOddsWf.mjs /
+   *       auditMlbVolumeLiftShadowOnEv02.mjs /
+   *       auditMlbVolumeLiftEarlySoftExpandingWf.mjs → ev02_max230
    */
   ev02_max230: Object.freeze({
     ...MLB_MONEYLINE_RULES_BASE,
     ...MLB_PAPER_RULE_FREEZE.rules,
     id: 'ev02_max230',
-    label: '實驗：EV≥2% + maxOdds≤2.30 + dropR3/R2',
+    label: 'EV≥2% + maxOdds≤2.30 + dropR3/R2 + early軟罰0.20',
     minimumExpectedValue: 0.02,
     maximumPickOdds: 2.3,
     minimumPickOdds: 1.85,
@@ -204,6 +246,9 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
     /** 第2名賠率∈[1.85,1.95) 則去掉 R2（可保留已過 dropR3 的 R3） */
     dropSecondIfOddsBelow: 1.95,
     dropSecondIfOddsMin: 1.85,
+    /** 早退改軟罰：不硬擋，日內排序扣 0.20 */
+    requirePickEarlyExitsNotHigher: false,
+    earlyExitsSoftPenaltyLambda: 0.2,
   }),
   sweet_195_220: Object.freeze({
     ...MLB_MONEYLINE_RULES_BASE,
@@ -229,11 +274,12 @@ export function resolveMlbMoneylineRuleProfile(profileId = null) {
 export const MLB_MONEYLINE_RECOMMENDATION_RULES = resolveMlbMoneylineRuleProfile();
 
 /**
- * 日內排序分數：預設 EV；命中高 EV 毒區時扣 λ。
- * 僅影響排序，不改變 recommendation／blocked 分類門檻。
+ * 日內排序分數：預設 EV；命中高 EV 毒區時扣 λ；
+ * earlyExits 軟罰（pickEarlyExitsHigher）再扣 earlyExitsSoftPenaltyLambda。
+ * 僅影響排序，不改變 recommendation／blocked 分類門檻（軟罰模式下）。
  */
 export function scoreMlbMoneylineDailyRank(
-  { expectedValue, modelProbability } = {},
+  { expectedValue, modelProbability, pickEarlyExitsHigher } = {},
   rules = MLB_MONEYLINE_RECOMMENDATION_RULES
 ) {
   const ev = Number(expectedValue);
@@ -252,7 +298,12 @@ export function scoreMlbMoneylineDailyRank(
     ev >= minEv &&
     p >= pMin &&
     p < pMax;
-  return penalize ? ev - lambda : ev;
+  let score = penalize ? ev - lambda : ev;
+  const earlyLambda = Number(rules.earlyExitsSoftPenaltyLambda) || 0;
+  if (earlyLambda > 0 && pickEarlyExitsHigher) {
+    score -= earlyLambda;
+  }
+  return score;
 }
 
 export function compareMlbMoneylineDailyRank(a, b, rules = MLB_MONEYLINE_RECOMMENDATION_RULES) {
@@ -304,11 +355,59 @@ export function shrinkRate(value, sampleSize, priorMean, priorSize) {
     Math.max(1e-9, sample + priorSize);
 }
 
+/**
+ * v4.6 凍結 sparseStart：GS∈[1,3] 且該先發所屬隊賽前 W+L≥15。
+ * W+L 缺失時以 commence ≥ 當年 4/20 為代理。
+ */
+export function resolveMlbOpponentStarterSparseStart({
+  gamesStarted,
+  teamWins,
+  teamLosses,
+  commenceTime,
+} = {}) {
+  const gs = Number(gamesStarted);
+  if (!Number.isFinite(gs) || gs < 1 || gs > 3) return 0;
+  const wins = Number(teamWins);
+  const losses = Number(teamLosses);
+  if (Number.isFinite(wins) && Number.isFinite(losses)) {
+    return wins + losses >= MLB_SPARSE_START_MIN_TEAM_GAMES ? 1 : 0;
+  }
+  const iso = String(commenceTime || '');
+  const year = Number(iso.slice(0, 4));
+  if (!Number.isFinite(year) || year < 2000) return 0;
+  return iso.slice(0, 10) >= `${year}-04-20` ? 1 : 0;
+}
+
+export function resolveMlbOpponentStarterIdentityFlags(features, scoringSide) {
+  const opponent = scoringSide === 'home' ? 'away' : 'home';
+  const pitchers = features?.pitchers || {};
+  const ilKey = opponent === 'home' ? 'homeIlReturn' : 'awayIlReturn';
+  const ilReturn = pitchers[ilKey];
+  const oppTeam = features?.[opponent] || {};
+  const daysRaw = Number(ilReturn?.daysSinceLastIlExit);
+  const daysSinceIlExit = Number.isFinite(daysRaw) && daysRaw >= 0
+    ? clamp(daysRaw, 0, MLB_IL_DAYS_SINCE_EXIT_MISSING)
+    : MLB_IL_DAYS_SINCE_EXIT_MISSING;
+  const seasonGs = clamp(finite(pitchers?.[opponent]?.gamesStarted, 0), 0, 40);
+  return {
+    opponentStarterIsReturnFromIl: ilReturn?.isReturnPitcher ? 1 : 0,
+    opponentStarterIsSparseStart: resolveMlbOpponentStarterSparseStart({
+      gamesStarted: pitchers?.[opponent]?.gamesStarted,
+      teamWins: oppTeam.wins,
+      teamLosses: oppTeam.losses,
+      commenceTime: features?.commenceTime,
+    }),
+    opponentStarterDaysSinceIlExit: daysSinceIlExit,
+    opponentStarterSeasonGs: seasonGs,
+  };
+}
+
 export function buildMlbExpectedRunsSideFeatures(features, side) {
   const opponent = side === 'home' ? 'away' : 'home';
   const team = features?.[side] || {};
   const oppTeam = features?.[opponent] || {};
   const pitcher = features?.pitchers?.[opponent] || null;
+  const identityFlags = resolveMlbOpponentStarterIdentityFlags(features, side);
   const recentPitcher = features?.pitchers?.[
     opponent === 'home' ? 'homeRecent' : 'awayRecent'
   ] || null;
@@ -526,6 +625,10 @@ export function buildMlbExpectedRunsSideFeatures(features, side) {
       2,
       10
     ),
+    opponentStarterIsReturnFromIl: identityFlags.opponentStarterIsReturnFromIl,
+    opponentStarterIsSparseStart: identityFlags.opponentStarterIsSparseStart,
+    opponentStarterDaysSinceIlExit: identityFlags.opponentStarterDaysSinceIlExit,
+    opponentStarterSeasonGs: identityFlags.opponentStarterSeasonGs,
     gameTemperatureC: weatherVector.gameTemperatureC,
     gameWindSpeedKph: weatherVector.gameWindSpeedKph,
     gamePrecipProbability: weatherVector.gamePrecipProbability,
@@ -956,7 +1059,7 @@ export function classifyMlbMoneylineCandidate({
     return { tier: 'blocked', reasons: ['prediction_or_market_missing'] };
   }
   const pickHome = prediction.homeExpectedRuns >= prediction.awayExpectedRuns;
-  const modelProbability = pickHome
+  let modelProbability = pickHome
     ? prediction.markets.homeWinProbability
     : prediction.markets.awayWinProbability;
   const marketProbability = pickHome ? market.homeProb : market.awayProb;
@@ -966,6 +1069,13 @@ export function classifyMlbMoneylineCandidate({
   const expectedRunMargin = Math.abs(
     prediction.homeExpectedRuns - prediction.awayExpectedRuns
   );
+  const homeWinPct = Number(features?.home?.homeWinPct);
+  const modelProbabilityRaw = modelProbability;
+  modelProbability = applyLockedBToxicShrinkInline(modelProbability, odds, {
+    pickHome,
+    homeWinPct: Number.isFinite(homeWinPct) ? homeWinPct : null,
+  });
+  const toxicShrinkApplied = modelProbability !== modelProbabilityRaw;
   const edge = modelProbability - marketProbability;
   const expectedValue = modelProbability * odds - 1;
   const maximumAbsoluteZScore = finite(
@@ -987,7 +1097,11 @@ export function classifyMlbMoneylineCandidate({
     h2hBookCount < rules.minimumH2hBookmakers;
 
   let pickEarlyExitsHigher = false;
-  if (rules.requirePickEarlyExitsNotHigher && regimeSignals) {
+  const softEarlyLambda = Number(rules.earlyExitsSoftPenaltyLambda) || 0;
+  if (
+    (rules.requirePickEarlyExitsNotHigher || softEarlyLambda > 0) &&
+    regimeSignals
+  ) {
     const homeEarly = Number(regimeSignals.homeEarlyExitsLast3) || 0;
     const awayEarly = Number(regimeSignals.awayEarlyExitsLast3) || 0;
     const pickEarly = pickHome ? homeEarly : awayEarly;
@@ -1048,6 +1162,8 @@ export function classifyMlbMoneylineCandidate({
   const common = {
     side: pickHome ? 'home' : 'away',
     modelProbability,
+    modelProbabilityRaw: toxicShrinkApplied ? modelProbabilityRaw : undefined,
+    toxicShrinkApplied: toxicShrinkApplied || undefined,
     marketProbability,
     odds,
     edge,
@@ -1057,6 +1173,7 @@ export function classifyMlbMoneylineCandidate({
     homePitcherId,
     awayPitcherId,
     bothPitcherIdentities,
+    pickEarlyExitsHigher,
     reasons,
   };
   if (!reasons.length) return { tier: 'recommendation', ...common };
@@ -1778,12 +1895,270 @@ export function runMlbExpectedRunsValidation({ persist = true } = {}) {
   return run;
 }
 
-export function getLatestMlbExpectedRunsValidation() {
-  const row = db.prepare(`
-    SELECT * FROM mlb_expected_runs_models
-    ORDER BY datetime(created_at) DESC, rowid DESC
-    LIMIT 1
-  `).get();
+/** v4.5 正式選中集（消融底座；勿與 v4.5 再現路徑混用） */
+export const MLB_V45_SELECTED_FEATURE_KEYS = Object.freeze([
+  ...MLB_EXPECTED_RUNS_CORE_FEATURE_KEYS,
+  ...MLB_EXPECTED_RUNS_BATTING_FEATURE_KEYS,
+  ...MLB_EXPECTED_RUNS_PLATOON_FEATURE_KEYS,
+]);
+
+function identityFlagRates(rows) {
+  let sides = 0;
+  let il = 0;
+  let sparse = 0;
+  let daysSum = 0;
+  let daysLt365 = 0;
+  let gsSum = 0;
+  for (const row of rows) {
+    for (const side of ['home', 'away']) {
+      sides += 1;
+      const flags = resolveMlbOpponentStarterIdentityFlags(row.features, side);
+      if (flags.opponentStarterIsReturnFromIl) il += 1;
+      if (flags.opponentStarterIsSparseStart) sparse += 1;
+      daysSum += flags.opponentStarterDaysSinceIlExit;
+      if (flags.opponentStarterDaysSinceIlExit < MLB_IL_DAYS_SINCE_EXIT_MISSING) {
+        daysLt365 += 1;
+      }
+      gsSum += flags.opponentStarterSeasonGs;
+    }
+  }
+  return {
+    sides,
+    ilRate: sides ? il / sides : 0,
+    sparseStartRate: sides ? sparse / sides : 0,
+    daysSinceIlExitMean: sides ? daysSum / sides : null,
+    daysSinceIlExitObservedRate: sides ? daysLt365 / sides : 0,
+    seasonGsMean: sides ? gsSum / sides : null,
+  };
+}
+
+function runV46CandidateAblation({
+  modelVersion,
+  candidateFactory,
+  warning,
+  extraSummary = {},
+  persist = false,
+}) {
+  const rows = loadRows();
+  const bySeason = (season) => rows.filter((row) =>
+    String(row.commenceTime).startsWith(String(season))
+  );
+  const development2025 = bySeason(2025).filter((row) =>
+    row.commenceTime >= '2025-05-01T00:00:00Z'
+  );
+  const final2026 = bySeason(2026);
+  const splitIndex = Math.floor(development2025.length * 0.7);
+  const train2025 = development2025.slice(0, splitIndex);
+  const validation2025 = development2025.slice(splitIndex);
+  if (train2025.length < 700 || validation2025.length < 300 || final2026.length < 300) {
+    throw new Error('mlb_expected_runs_v46_rows_insufficient');
+  }
+
+  const trainExamples = buildMlbExpectedRunsExamples(train2025);
+  const developmentExamples = buildMlbExpectedRunsExamples(development2025);
+  const candidateFits = candidateFactory().map((candidate) => {
+    const trainModel = fitMlbExpectedRunsModel(trainExamples, {
+      featureKeys: candidate.featureKeys,
+    });
+    const validation = scoreMetrics(validation2025, trainModel);
+    return {
+      ...candidate,
+      trainModel,
+      validation,
+      totalRunsMae: validation.totalRunsMae,
+      moneylineBrier: validation.moneyline.brier,
+    };
+  });
+
+  const bestTotalRunsMae = Math.min(...candidateFits.map((c) => c.totalRunsMae));
+  const selected = [...candidateFits]
+    .filter((c) => c.totalRunsMae <= bestTotalRunsMae + 0.02)
+    .sort((a, b) =>
+      a.moneylineBrier - b.moneylineBrier ||
+      a.totalRunsMae - b.totalRunsMae ||
+      a.featureKeys.length - b.featureKeys.length
+    )[0];
+
+  const candidates = candidateFits.map((candidate) => {
+    const finalModel = fitMlbExpectedRunsModel(developmentExamples, {
+      featureKeys: candidate.featureKeys,
+    });
+    const temperature = fitMoneylineTemperature(validation2025, finalModel);
+    finalModel.moneylineTemperature = temperature.temperature;
+    finalModel.modelVersion = modelVersion;
+    const observed2026 = scoreMetrics(final2026, finalModel);
+    return {
+      key: candidate.key,
+      featureKeys: candidate.featureKeys,
+      validation: {
+        totalRunsMae: candidate.totalRunsMae,
+        moneylineBrier: candidate.moneylineBrier,
+        moneyline: candidate.validation.moneyline,
+      },
+      temperature: temperature.temperature,
+      observed2026: {
+        totalRunsMae: observed2026.totalRunsMae,
+        moneylineBrier: observed2026.moneyline.brier,
+        moneyline: observed2026.moneyline,
+        expectedRunsSideBets: observed2026.expectedRunsSideBets,
+      },
+      model: finalModel,
+      selectedByProtocol: candidate.key === selected.key,
+    };
+  });
+
+  const base = candidates.find((c) => c.key === 'base_v45');
+  const winner = candidates.find((c) => c.selectedByProtocol) || base;
+  const modelGate = {
+    validationBrierOk:
+      winner.validation.moneylineBrier <= base.validation.moneylineBrier + 1e-12,
+    observed2026BrierOk:
+      winner.observed2026.moneylineBrier <= base.observed2026.moneylineBrier + 0.001,
+    validationBrierDelta:
+      winner.validation.moneylineBrier - base.validation.moneylineBrier,
+    observed2026BrierDelta:
+      winner.observed2026.moneylineBrier - base.observed2026.moneylineBrier,
+  };
+
+  const summary = {
+    warning,
+    protocol: 'MLB-V46-TRAINING-PROTOCOL',
+    ...extraSummary,
+    split: {
+      train2025: { samples: train2025.length, ...range(train2025) },
+      validation2025: { samples: validation2025.length, ...range(validation2025) },
+      observed2026: { samples: final2026.length, ...range(final2026) },
+    },
+    identityFlagRates: {
+      development: identityFlagRates(development2025),
+      observed2026: identityFlagRates(final2026),
+    },
+    selectedKey: winner.key,
+    modelGate,
+    candidates: candidates.map((c) => ({
+      key: c.key,
+      featureKeys: c.featureKeys,
+      selectedByProtocol: c.selectedByProtocol,
+      validation: c.validation,
+      temperature: c.temperature,
+      observed2026: {
+        totalRunsMae: c.observed2026.totalRunsMae,
+        moneylineBrier: c.observed2026.moneylineBrier,
+        moneyline: c.observed2026.moneyline,
+        expectedRunsSide: c.observed2026.expectedRunsSideBets,
+      },
+    })),
+  };
+
+  const run = {
+    runId: `mlb-xruns-v46-${randomUUID()}`,
+    modelVersion,
+    featureVersion: MLB_BASELINE_FEATURE_VERSION,
+    model: winner.model,
+    modelsByKey: Object.fromEntries(candidates.map((c) => [c.key, c.model])),
+    summary,
+  };
+
+  if (persist) {
+    db.prepare(`
+      INSERT INTO mlb_expected_runs_models
+        (run_id, model_version, feature_version, training_from, training_to,
+         train_samples, model_json, summary_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      run.runId,
+      run.modelVersion,
+      run.featureVersion,
+      development2025[0].commenceTime,
+      development2025.at(-1).commenceTime,
+      development2025.length,
+      JSON.stringify(winner.model),
+      JSON.stringify(summary)
+    );
+  }
+  return run;
+}
+
+function expectedRunsV46FeatureCandidates() {
+  const base = [...MLB_V45_SELECTED_FEATURE_KEYS];
+  const il = 'opponentStarterIsReturnFromIl';
+  const sparse = 'opponentStarterIsSparseStart';
+  return [
+    { key: 'base_v45', featureKeys: base },
+    { key: 'base_plus_il_return', featureKeys: [...base, il] },
+    { key: 'base_plus_sparse_start', featureKeys: [...base, sparse] },
+    { key: 'base_plus_il_and_sparse', featureKeys: [...base, il, sparse] },
+  ];
+}
+
+function expectedRunsV46Rc2FeatureCandidates() {
+  const base = [...MLB_V45_SELECTED_FEATURE_KEYS];
+  const days = 'opponentStarterDaysSinceIlExit';
+  const gs = 'opponentStarterSeasonGs';
+  return [
+    { key: 'base_v45', featureKeys: base },
+    { key: 'rc2a_days_since_il', featureKeys: [...base, days] },
+    { key: 'rc2b_season_gs', featureKeys: [...base, gs] },
+  ];
+}
+
+/**
+ * v4.6-rc 消融：同一訓練窗、四候選；預設不寫庫（避免蓋過正式 v4.5）。
+ */
+export function runMlbExpectedRunsV46RcAblation({ persist = false } = {}) {
+  return runV46CandidateAblation({
+    modelVersion: MLB_EXPECTED_RUNS_V46_RC_MODEL_VERSION,
+    candidateFactory: expectedRunsV46FeatureCandidates,
+    warning:
+      'v4.6-rc 研究消融：不改鎖定 B 選注；未過雙層閘前禁止升格正式版號。',
+    extraSummary: {
+      sparseStart: {
+        rule: 'season_gs in [1,3] AND pitcher_team_wins_plus_losses >= 15',
+        minTeamGames: MLB_SPARSE_START_MIN_TEAM_GAMES,
+      },
+    },
+    persist,
+  });
+}
+
+/**
+ * v4.6-rc2：二元旗標改連續值（daysSinceIlExit / season_gs）；預設不寫庫。
+ */
+export function runMlbExpectedRunsV46Rc2Ablation({ persist = false } = {}) {
+  return runV46CandidateAblation({
+    modelVersion: MLB_EXPECTED_RUNS_V46_RC2_MODEL_VERSION,
+    candidateFactory: expectedRunsV46Rc2FeatureCandidates,
+    warning:
+      'v4.6-rc2：只改 IL/sparse 表達為連續值；訓練窗與雙層閘不變；未過閘不升格。',
+    extraSummary: {
+      encoding: {
+        daysSinceIlExit: `continuous; missing=${MLB_IL_DAYS_SINCE_EXIT_MISSING}; clamp[0,${MLB_IL_DAYS_SINCE_EXIT_MISSING}]`,
+        seasonGs: 'continuous gamesStarted; missing=0; clamp[0,40]',
+      },
+    },
+    persist,
+  });
+}
+
+export function getLatestMlbExpectedRunsValidation({
+  modelVersion = MLB_EXPECTED_RUNS_MODEL_VERSION,
+} = {}) {
+  let row = null;
+  if (modelVersion) {
+    row = db.prepare(`
+      SELECT * FROM mlb_expected_runs_models
+      WHERE model_version = ?
+      ORDER BY datetime(created_at) DESC, rowid DESC
+      LIMIT 1
+    `).get(modelVersion);
+  }
+  if (!row) {
+    row = db.prepare(`
+      SELECT * FROM mlb_expected_runs_models
+      ORDER BY datetime(created_at) DESC, rowid DESC
+      LIMIT 1
+    `).get();
+  }
   if (!row) return null;
   return {
     runId: row.run_id,

@@ -241,6 +241,7 @@ export function attachDailyResearchRanks(
       const expectedRunMargin = Number(classification?.expectedRunMargin);
       const expectedValue = Number(classification?.expectedValue);
       const odds = Number(classification?.odds);
+      const pickEarlyExitsHigher = Boolean(classification?.pickEarlyExitsHigher);
       return {
         ...row,
         _tier: tier,
@@ -248,8 +249,9 @@ export function attachDailyResearchRanks(
         _expectedRunMargin: expectedRunMargin,
         _expectedValue: expectedValue,
         _odds: odds,
+        _pickEarlyExitsHigher: pickEarlyExitsHigher,
         _dailyRankScore: scoreMlbMoneylineDailyRank(
-          { expectedValue, modelProbability },
+          { expectedValue, modelProbability, pickEarlyExitsHigher },
           rules
         ),
       };
@@ -263,11 +265,13 @@ export function attachDailyResearchRanks(
               expectedValue: a._expectedValue,
               modelProbability: a._modelProbability,
               expectedRunMargin: a._expectedRunMargin,
+              pickEarlyExitsHigher: a._pickEarlyExitsHigher,
             },
             {
               expectedValue: b._expectedValue,
               modelProbability: b._modelProbability,
               expectedRunMargin: b._expectedRunMargin,
+              pickEarlyExitsHigher: b._pickEarlyExitsHigher,
             },
             rules
           ) || String(a.gameId).localeCompare(String(b.gameId))
@@ -284,6 +288,7 @@ export function attachDailyResearchRanks(
         _expectedRunMargin,
         _expectedValue,
         _odds,
+        _pickEarlyExitsHigher,
         _dailyRankScore,
         ...rest
       } = row;
