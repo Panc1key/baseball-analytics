@@ -12,7 +12,7 @@
 |------|-----|
 | profile | `ev02_max230` |
 | EV / margin / P | ≥2% / ≥0.25 / ≥50% |
-| minOdds / maxOdds | ≥1.85 / ≤2.30 |
+| minOdds / maxOdds | ≥1.85 / ≤2.50 |
 | earlyExits | 選邊不高於對手 |
 | 雙先發 ID | 必須 |
 | dailyTopK / 排序 | 3 / P2 罰分 EV |

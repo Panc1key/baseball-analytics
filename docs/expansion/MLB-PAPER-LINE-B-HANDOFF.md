@@ -97,7 +97,7 @@ highEvRankPenaltyLambda: 0.15
 ...
 ```
 
-對照 profile（審計用，非正式）：`base_p2`（無 minOdds／不卡 ID）、`sweet_195_220`（1.95–2.20）、**`ev02_max230`**（EV≥2% + maxOdds≤2.30，門檻放寬掃描過嚴格閘）。  
+對照 profile（審計用，非正式）：`base_p2`（無 minOdds／不卡 ID）、`sweet_195_220`（1.95–2.20）、**`ev02_max230`**（EV≥2% + maxOdds≤2.50，門檻放寬掃描過嚴格閘；id 沿用）。  
 紙上切換：`.env` → `MLB_PAPER_RULE_PROFILE=ev02_max230`；改虧回 `frozen_v1`。  
 盤口 sanity：`minimumEitherSideOdds: 1.2`（擋 1.01/34 類髒獨贏）。  
 多莊共識：`minimumH2hBookmakers: 2`（相對 ev02 基線合併 +$204；中位偏離過濾等價、不另加）。  
