@@ -23,6 +23,7 @@ export const MLB_INFERENCE_FREEZE = Object.freeze({
     'PitcherInjuryIntelService',
     'MlbModelValidation',
     'selectBaselineH2hEdge / selectResearchDirection (deprecated for ranking)',
+    'MlbHighEvShrinkShadow shrink_w15_l15（預設 apply 可看選邊；回退 MLB_HIGH_EV_SHRINK_SHADOW=compare|off；不改 ev02 主常數）',
     '未來新優化候選（另開影子，未升格前不進正式）',
   ]),
   legacyMlbBlocked: Object.freeze([

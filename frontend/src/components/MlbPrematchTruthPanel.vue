@@ -3,10 +3,17 @@
     <header class="toolbar">
       <div>
         <h2 class="panel-title">今日鎖定 B</h2>
-        <p class="panel-sub">僅 MLB · 雙方預定先發齊即可（不必等確認打線）</p>
+        <p class="panel-sub">
+          僅 MLB · 雙方預定先發齊即可 · 可看選邊僅開賽前
+          {{ releaseHoursBefore || 8 }} 小時內放出
+        </p>
       </div>
       <el-button size="small" plain :loading="loading" @click="loadTruth">重新載入</el-button>
     </header>
+
+    <p v-if="highEvShrinkNote" class="shadow-overlay-note" :class="{ apply: highEvShrinkApply }">
+      {{ highEvShrinkNote }}
+    </p>
 
     <div v-if="dailyTop.length" class="picks-block">
       <div class="block-label">可看選邊</div>
@@ -53,8 +60,121 @@
         串關：{{ sameDayParlay?.reason || '同日選邊中賠率 ≤ 2.10 優先。' }}
       </p>
     </div>
+    <div v-else-if="!loading" class="picks-block empty-picks">
+      <div class="block-label">可看選邊</div>
+      <p class="hint">
+        現在沒有可下選邊。
+        <template v-if="heldUntilRelease.length">
+          已有 {{ heldUntilRelease.length }} 場過鎖定 B 門檻，開賽前
+          {{ releaseHoursBefore }} 小時才放出（嚴格防過早下注）。
+        </template>
+        <template v-else>
+          今日場次已在；等關鍵資料齊、過門檻且進入放出時窗後會出現選邊。
+        </template>
+      </p>
+    </div>
 
-    <div v-else-if="!loading && dataLag?.stale" class="empty-picks stale">
+    <div v-if="heldUntilRelease.length" class="picks-block held-block">
+      <div class="block-label">
+        已過門檻・未放出（{{ heldUntilRelease.length }}）· 開賽前 {{ releaseHoursBefore }}h
+      </div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">賠率</th>
+            <th class="num">距開賽</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in heldUntilRelease" :key="`held-${item.gameId}`">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick muted">—</td>
+            <td class="num muted">—</td>
+            <td class="num">約 {{ formatHoursUntil(item.hoursUntilCommence) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">
+        故意不顯示選邊與賠率，避免過早下手。進入時窗後會出現在上方「可看選邊」。
+      </p>
+    </div>
+
+    <div v-if="totalsSatellitePicks.length" class="picks-block totals-sat">
+      <div class="block-label">大小分衛星（研究）</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">盤口</th>
+            <th class="num">賠率</th>
+            <th class="num">模型</th>
+            <th class="num">市場</th>
+            <th class="num">EV</th>
+            <th class="num">|μ−線|</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in totalsSatellitePicks" :key="`tot-${item.gameId}`">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ item.line ?? '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.modelProbability) }}</td>
+            <td class="num">{{ percent(item.marketProbability) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+            <td class="num">{{ score(item.absGap) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">
+        與鎖定 B 獨贏分離；僅影子觀察，勿當主帳、不進紙上帳本。
+        {{ totalsSatellite?.note || '' }}
+      </p>
+    </div>
+
+    <div v-if="totalsUnderOnlyPicks.length" class="picks-block totals-sat">
+      <div class="block-label">大小分 Under 平行影子</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">盤口</th>
+            <th class="num">賠率</th>
+            <th class="num">EV</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in totalsUnderOnlyPicks" :key="`tot-u-${item.gameId}`">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ item.line ?? '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">{{ totalsSatelliteUnderOnly?.note || '01b 內只取小；注少、平行觀察。過關後可單獨升紙上帳本，不混鎖定 B。' }}</p>
+    </div>
+
+    <div
+      v-if="!loading && !totalsSatellitePicks.length && (dailyTop.length || (todayFunnel?.upcoming || 0) > 0)"
+      class="picks-block totals-sat"
+    >
+      <div class="block-label">大小分衛星（研究）</div>
+      <p class="hint">今日無過閘大小分（|μ−線|／EV／相對市場 edge）。不動獨贏規則。</p>
+    </div>
+
+    <div v-if="!loading && !dailyTop.length && dataLag?.stale" class="empty-picks stale">
       <p class="empty-title">本機沒有今日場次</p>
       <p class="empty-body">
         資料已停更，最後快照
@@ -63,7 +183,7 @@
       </p>
     </div>
 
-    <div v-else-if="!loading" class="empty-picks">
+    <div v-if="!loading && !dailyTop.length && !dataLag?.stale" class="empty-picks">
       <p class="empty-title">現在沒有可下選邊</p>
       <p class="empty-body">
         見下方：「分析完成・未入選」是已算完但被鎖定 B 排除；「資料未齊」是還沒辦法正式判斷。
@@ -75,6 +195,7 @@
       <span>今日場次 {{ todayFunnel.upcoming }}</span>
       <span>資料未齊 {{ todayFunnel.pendingData }}</span>
       <span>已分析 {{ todayFunnel.analyzedReady }}</span>
+      <span>未放出 {{ todayFunnel.passedGatesHeld || heldUntilRelease.length }}</span>
       <span>可看選邊 {{ todayFunnel.selected }}</span>
       <span v-if="topFunnelReason">主因 {{ topFunnelReason }}</span>
       <span v-if="pitcherGapText">先發 {{ pitcherGapText }}</span>
@@ -188,11 +309,39 @@ const truth = ref(null);
 
 const games = computed(() => truth.value?.games || []);
 const dailyTop = computed(() => truth.value?.expectedRunsTop || []);
+const heldUntilRelease = computed(() => truth.value?.heldUntilRelease || []);
+const releaseHoursBefore = computed(
+  () => truth.value?.releasePolicy?.hoursBefore ?? 8
+);
 const dataLag = computed(() => truth.value?.dataLag || null);
 const sameDayParlay = computed(() => truth.value?.sameDayParlay || null);
+const totalsSatellite = computed(() => truth.value?.totalsSatellite || null);
+const totalsSatellitePicks = computed(() => totalsSatellite.value?.picks || []);
+const totalsSatelliteUnderOnly = computed(() => truth.value?.totalsSatelliteUnderOnly || null);
+const totalsUnderOnlyPicks = computed(() => totalsSatelliteUnderOnly.value?.picks || []);
 const todayFunnel = computed(() => truth.value?.todayFunnel || null);
+const highEvShrink = computed(() => truth.value?.highEvShrinkShadow || null);
+const highEvShrinkApply = computed(() => Boolean(highEvShrink.value?.appliesToVisiblePicks));
+const highEvShrinkNote = computed(() => {
+  const s = highEvShrink.value;
+  if (!s?.enabled && s?.mode === 'off') return null;
+  if (!s?.mode || s.mode === 'off') return null;
+  const diff = s.diff;
+  const deltaBits =
+    diff && !diff.sameSlots
+      ? ` · 對照差：+${(diff.added || []).length}/−${(diff.dropped || []).length} 場`
+      : diff?.sameSlots
+        ? ' · 今日與正式名額相同'
+        : '';
+  const obs = s.observation?.status ? ` · 觀察：${s.observation.status}` : '';
+  if (s.mode === 'apply') {
+    return `影子 overlay shrink_w15_l15 已套用至可看選邊（非升格常數）${obs}`;
+  }
+  return `影子 overlay shrink_w15_l15 對照中（正式選邊不變）${deltaBits}${obs}`;
+});
 
 const selectedIds = computed(() => new Set(dailyTop.value.map((row) => row.gameId)));
+const heldIds = computed(() => new Set(heldUntilRelease.value.map((row) => row.gameId)));
 
 const upcomingGames = computed(() =>
   [...games.value].sort((a, b) =>
@@ -213,6 +362,7 @@ const analyzedExcluded = computed(() =>
   upcomingGames.value.filter((game) => {
     if (!game.dataReadiness?.recommendationAllowed) return false;
     if (selectedIds.value.has(game.gameId)) return false;
+    if (heldIds.value.has(game.gameId)) return false;
     return Boolean(game.expectedRuns?.moneylineClassification) || Boolean(game.research?.status);
   })
 );
@@ -247,6 +397,12 @@ const reasonLabels = {
   strict_pit_starter_required: '先發 PIT 身份未齊',
   regime_routes_to_totals: '路線改走大小球',
   both_stable_starters_prefer_totals_under: '雙穩先發偏 unders',
+  abs_gap_below_threshold: '總分差不足',
+  edge_vs_market_below_threshold: '相對市場優勢不足',
+  mean_prob_disagree: '均值與機率方向不一致',
+  totals_market_missing: '缺大小分盤口',
+  totals_prediction_missing: '缺總分預測',
+  total_line_above_maximum: '大小分盤口過高',
   regime_totals_primary_moneyline_secondary: '獨贏為次優先',
   one_sided_collapse_risk_no_auto_totals_lean: '單邊崩盤風險',
 };
@@ -271,11 +427,17 @@ const topFunnelReason = computed(() => {
 
 const todayFunnelText = computed(() => {
   if (!todayFunnel.value?.upcoming) return '';
+  const held = todayFunnel.value.passedGatesHeld || heldUntilRelease.value.length || 0;
+  const passedTotal =
+    todayFunnel.value.passedGatesTotal ??
+    todayFunnel.value.selected + held;
   const parts = [
     `今日共 ${todayFunnel.value.upcoming} 場`,
     `資料未齊 ${todayFunnel.value.pendingData}`,
-    `已分析未入選約 ${Math.max(0, todayFunnel.value.analyzedReady - todayFunnel.value.selected)}`,
+    `已分析未入選約 ${Math.max(0, todayFunnel.value.analyzedReady - passedTotal)}`,
   ];
+  if (held > 0) parts.push(`過門檻未放出 ${held}`);
+  parts.push(`可看選邊 ${todayFunnel.value.selected}`);
   if (topFunnelReason.value) parts.push(`最常見卡點：${topFunnelReason.value}`);
   return parts.join(' · ');
 });
@@ -360,6 +522,7 @@ function exclusionReasonText(game) {
 
 function bucketLabel(game) {
   if (selectedIds.value.has(game.gameId)) return '已入選';
+  if (heldIds.value.has(game.gameId)) return '過門檻・未到放出時窗';
   if (!game.dataReadiness?.recommendationAllowed) return '資料未齊';
   return '已分析未入選';
 }
@@ -370,6 +533,14 @@ function percent(value) {
 
 function formatOdds(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
+}
+
+function formatHoursUntil(value) {
+  const h = Number(value);
+  if (!Number.isFinite(h)) return '—';
+  if (h >= 10) return `${Math.round(h)}h`;
+  if (h >= 1) return `${h.toFixed(1)}h`;
+  return `${Math.max(0, Math.round(h * 60))}m`;
 }
 
 function score(value) {
@@ -429,6 +600,21 @@ defineExpose({ loadTruth });
   color: #666;
 }
 
+.shadow-overlay-note {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #444;
+  border-left: 3px solid #888;
+  background: #f7f7f7;
+}
+
+.shadow-overlay-note.apply {
+  border-left-color: #333;
+  background: #f0f0f0;
+  font-weight: 500;
+}
+
 .picks-block {
   border: 1px solid #ddd;
   background: #fff;
@@ -437,6 +623,21 @@ defineExpose({ loadTruth });
 .picks-block.blocked {
   border-color: #bbb;
   background: #fafafa;
+}
+
+.picks-block.held-block {
+  border-color: #c4c4c4;
+  background: #f7f7f7;
+}
+
+.picks-block.empty-picks .hint {
+  padding: 12px;
+  margin: 0;
+}
+
+.pick.muted,
+.num.muted {
+  color: #999;
 }
 
 .block-label {

@@ -120,7 +120,24 @@ export const config = {
    * 預設開啟；設 MLB_LOCKED_B_OVERLAY=false 可回滾到升格前純 ev02_max230。
    */
   mlbLockedBOverlayEnabled: process.env.MLB_LOCKED_B_OVERLAY !== 'false',
+  /**
+   * 高 EV 收縮 overlay（shrink_w15_l15）：off | compare | apply
+   * 預設 apply＝可看選邊／紙上套用；回退設 compare 或 off（不改 ev02／frozen_b 主常數）
+   */
+  mlbHighEvShrinkShadowMode: String(
+    process.env.MLB_HIGH_EV_SHRINK_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
   mlbPaperRuleProfile: process.env.MLB_PAPER_RULE_PROFILE || 'frozen_v1',
+  /**
+   * 鎖定 B「可看選邊」放出時窗：僅開賽前 N 小時內才對 UI／紙上晉升放出。
+   * 預設 8（约 T-8～開賽）；設 0 關閉時窗（恢復一過門檻就顯示）。
+   */
+  mlbLockedBReleaseHoursBefore: Math.max(
+    0,
+    parseFloat(process.env.MLB_LOCKED_B_RELEASE_HOURS || '8')
+  ),
   /** 基準均注單位（建議投注額計算基數） */
   baseStakeUnit: parseFloat(process.env.BASE_STAKE_UNIT || process.env.FLAT_BET_USD || '10'),
   stakeCurrencyLabel: process.env.STAKE_CURRENCY_LABEL || '元',

@@ -396,6 +396,12 @@ function migrateSchema() {
       closing_odds_decimal REAL,
       closing_market_prob REAL,
       clv_prob REAL,
+      release_odds_decimal REAL,
+      release_market_prob REAL,
+      release_captured_at TEXT,
+      hours_to_commence_at_fill REAL,
+      pitcher_changed INTEGER,
+      clv_release_prob REAL,
       settled_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (candidate_id) REFERENCES mlb_paper_candidates(id),
@@ -662,6 +668,12 @@ function migrateSchema() {
       ON mlb_il_transaction_events(event_kind, event_date);
   `);
   addCol('ALTER TABLE mlb_prematch_truth_snapshots ADD COLUMN model_input_json TEXT');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN release_odds_decimal REAL');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN release_market_prob REAL');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN release_captured_at TEXT');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN hours_to_commence_at_fill REAL');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN pitcher_changed INTEGER');
+  addCol('ALTER TABLE mlb_paper_bets ADD COLUMN clv_release_prob REAL');
   // 統一歷史結果字典，避免 won/lost 與 win/loss 混用。
   db.exec("UPDATE bet_log SET result = 'win' WHERE result = 'won'");
   db.exec("UPDATE bet_log SET result = 'loss' WHERE result = 'lost'");

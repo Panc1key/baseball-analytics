@@ -312,7 +312,7 @@ function selectVariant(pool, model, { shadow = false } = {}) {
       ? +pred.markets.homeWinProbability
       : +pred.markets.awayWinProbability;
     const pickOdds = pickHome ? g.homeOdds : g.awayOdds;
-    if (pickOdds < 1.4 || pickOdds > 2.3) continue;
+    if (pickOdds < 1.4 || pickOdds > (B.maximumPickOdds ?? 2.5)) continue;
     if ((pickHome ? g.homeEarly : g.awayEarly) > (pickHome ? g.awayEarly : g.homeEarly)) {
       continue;
     }

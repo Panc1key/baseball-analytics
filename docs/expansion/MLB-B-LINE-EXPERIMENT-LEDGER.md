@@ -32,6 +32,16 @@
 | `min-h2h-books-2` | 2026-07-27 | `minimumH2hBookmakers: 2`（單莊完整 h2h 不進推薦） | `scripts/auditMlbMultibookOnEv02.mjs` → `tmp-multibook-on-ev02.json` |
 | `drop-r3-margin-050` | 2026-07-28 | `ev02_max230.dropThirdIfMarginBelow: 0.5`（第3名 margin&lt;0.50→當日 Top2）；WF／holdout 過閘 | `scripts/auditMlbDailyDropR3MarginWf.mjs` → `tmp-daily-drop-r3-margin-wf.json` |
 | `drop-r2-lowodds-195` | 2026-07-28 | `ev02_max230.dropSecondIfOddsBelow: 1.95`（第2名賠率∈[1.85,1.95)→去掉 R2）；WF／holdout 過閘 | `scripts/auditMlbDailyDropR2LowOddsWf.mjs` → `tmp-daily-drop-r2-lowodds-wf.json` |
+| `maxodds-250` | 2026-07-31 | `ev02_max230.maximumPickOdds: 2.5`（放寬 2.30→2.50；≥2.50／2.80+ 仍毒不接）；三窗 @$50 Δ 皆正 | `scripts/auditMlbMaxOddsUpperBandDiag.mjs` → `tmp-max-odds-upper-band-diag.json` |
+
+### 影子衛星（非獨贏正式；觀察中）
+
+| ID | 日期 | 內容 | 狀態 | 產物／腳本 |
+|----|------|------|------|------------|
+| `totals-sat-v2026-08-01` | 2026-08-01 | 大小分：`|μ−line|≥0.5` + EV≥2% + edge≥4% + P≥52%；與鎖定 B **分離** | **研究影子**（UI可見）；缺 2025 totals 未升格；**禁止**與獨贏混 TopK／紙上帳本 | `MlbTotalsSatellite.js`；`auditMlbTotalsSatelliteMvp.mjs` → `tmp-totals-satellite-mvp.json`；回補 `backfillMlb2025TotalsPitOdds.mjs` |
+| `totals-sat-v2026-08-01b` | 2026-08-01 | 閘門改 gap≥0.6／EV≥3%／edge≥3%／line≤10（Grok A/B/C）；三窗準正式過閘 | **影子規格已更新**；仍不進紙上帳本／不混獨贏 | `auditMlbTotalsSatGrokAbc.mjs` → `tmp-totals-sat-grok-abc.json` |
+| `totals-under-only-v1` | 2026-08-01 | 01b 內只取 Under；平行影子 | 三窗皆正、合併 ROI+14%；**可觀察後單獨升紙上衛星帳本**；不替換 01b、不混 B | `auditMlbTotalsSatUnderOnly3y.mjs` |
+| `runline-shelved` | 2026-08-01 | 讓分 ±1.5 三窗／單邊皆不過 2024 | **正式擱置** | `auditMlbRunLineSatDualYear.mjs`／`auditMlbRunLineSideOnlyDiag.mjs` |
 
 相對「僅 min185、不卡 ID」基線：合併約 **+$255 @$50**（注數約 −11%，勝率／ROI 略升；2025↑、2026 持平）。  
 同窗內 `require_both_hands`／`ids+hands` 與 `require_both_ids` **結果相同**，正式只接 ID 閘（資料品質），不另接投打左右切片。
@@ -195,7 +205,12 @@
 | 2026-07-31 | **Grok 對辯**：保排序輕罰、棄 P 乘子；落地真 IL 事件表＋標註；`MLB-IL-RETURN-FLAG.md`；影子 `auditMlbTrueIlReturnRankPenaltyShadow.mjs` |
 | 2026-07-31 | **opener/臨時先發**：定義＋影子 `auditMlbOpenerSpotStarterShadow.mjs`／`MLB-OPENER-SPOT-STARTER.md`；sparse 子池弱但輕罰負 → 留 v4.6 |
 | 2026-07-31 | **v4.6 協定草案**：`MLB-V46-TRAINING-PROTOCOL.md`（IL+sparse 兩特徵；訓練窗／消融／雙層升格閘） |
+| 2026-08-03 | **高 EV 尾實驗**：`cal_high_ev_tail` 影子 PASS（w15／w15+λ）；`exec_clv_timing` 歷史不足→活體 CLV 台帳 |
+| 2026-08-03 | **Expanding WF**：`shrink_w15_l15` 固定＋選參皆 PASS（Δ≈+$326／+$323；2026 −$43）；產物 `tmp-cal-high-ev-tail-expanding-wf.json` |
+| 2026-08-03 | **開影子觀察**：`MlbHighEvShrinkShadow` + compare；不升格常數 |
+| 2026-08-03 | **套用 overlay**：預設 `MLB_HIGH_EV_SHRINK_SHADOW=apply`（可看選邊／紙上）；回退 compare/off；**不改** ev02／frozen_b 主常數 |
 
 ## 回滾
 
 正式改壞時：`.env` 設 `MLB_PAPER_RULE_PROFILE=frozen_v1` 後重啟。細節見 `MLB-PAPER-RULE-FREEZE.md`。
+高 EV 影子：`MLB_HIGH_EV_SHRINK_SHADOW=off`（或退回 `compare`）。

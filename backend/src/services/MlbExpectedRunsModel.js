@@ -141,16 +141,16 @@ export const MLB_EXPECTED_RUNS_FALLBACK_FEATURE_KEYS = [
  * 日內排序：按 EV，並對高 EV 毒區做條件罰分（P2）：
  *   EV≥0.12 且 modelProb∈[0.53,0.56) → score = EV - 0.15
  * 選注：凍結點 minOdds≥1.85 + 雙先發 ID + dailyTopK=3；
- *       實驗候選 ev02_max230（EV≥2% + maxOdds≤2.30 + dropR3 margin<0.50）。
- * 複驗：auditMlbStrictRuleWalkForward.mjs / auditMlbMinOddsAb.mjs /
- *       auditMlbIdentityScanOnMin185.mjs /
- *       auditMlbThresholdRelaxOnFrozen.mjs /
- *       auditMlbDailyDropR3MarginWf.mjs /
- *       tmp-lineb-p2-strict-wf.json / tmp-mlb-minodds-ab.json /
- *       tmp-identity-scan-on-min185.json /
- *       tmp-threshold-relax-on-frozen.json /
- *       tmp-daily-drop-r3-margin-wf.json
- */
+   *       實驗候選 ev02_max230（EV≥2% + maxOdds≤2.50 + dropR3 margin<0.50）。
+   * 複驗：auditMlbStrictRuleWalkForward.mjs / auditMlbMinOddsAb.mjs /
+   *       auditMlbIdentityScanOnMin185.mjs /
+   *       auditMlbThresholdRelaxOnFrozen.mjs /
+   *       auditMlbDailyDropR3MarginWf.mjs /
+   *       tmp-lineb-p2-strict-wf.json / tmp-mlb-minodds-ab.json /
+   *       tmp-identity-scan-on-min185.json /
+   *       tmp-threshold-relax-on-frozen.json /
+   *       tmp-daily-drop-r3-margin-wf.json
+   */
 const MLB_MONEYLINE_RULES_BASE = Object.freeze({
   minimumModelProbability: 0.5,
   minimumExpectedRunMargin: 0.25,
@@ -221,23 +221,26 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
   }),
   /**
    * 門檻放寬掃描過嚴格閘（2026-07-27）：
-   * EV≥2% + maxOdds≤2.30；其餘同 frozen_v1。
+   * EV≥2% + maxOdds≤2.50；其餘同 frozen_v1。
    * 2026-07-28：日內第3名 margin<0.50 → 當日只取 Top2（WF 過閘）。
    * 2026-07-28：日內第2名賠率∈[1.85,1.95) → 去掉 R2（WF 過閘）。
    * 2026-07-30：earlyExits 硬擋 → 軟罰 λ=0.20（volume-lift 影子+expanding WF 過閘）。
+   * 2026-07-31：maxOdds 2.30→2.50（auditMlbMaxOddsUpperBandDiag 三窗@$50 正；≥2.50 仍毒）。
+   * profile id 仍用 ev02_max230（環境變數相容）；實際上限以 maximumPickOdds 為準。
    * 複跑：auditMlbThresholdRelaxOnFrozen.mjs /
    *       auditMlbDailyDropR3MarginWf.mjs /
    *       auditMlbDailyDropR2LowOddsWf.mjs /
    *       auditMlbVolumeLiftShadowOnEv02.mjs /
-   *       auditMlbVolumeLiftEarlySoftExpandingWf.mjs → ev02_max230
+   *       auditMlbVolumeLiftEarlySoftExpandingWf.mjs /
+   *       auditMlbMaxOddsUpperBandDiag.mjs → ev02_max230
    */
   ev02_max230: Object.freeze({
     ...MLB_MONEYLINE_RULES_BASE,
     ...MLB_PAPER_RULE_FREEZE.rules,
     id: 'ev02_max230',
-    label: 'EV≥2% + maxOdds≤2.30 + dropR3/R2 + early軟罰0.20',
+    label: 'EV≥2% + maxOdds≤2.50 + dropR3/R2 + early軟罰0.20',
     minimumExpectedValue: 0.02,
-    maximumPickOdds: 2.3,
+    maximumPickOdds: 2.5,
     minimumPickOdds: 1.85,
     requireBothPitcherIdentities: true,
     minimumH2hBookmakers: 2,

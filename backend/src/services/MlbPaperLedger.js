@@ -11,6 +11,7 @@ import db from '../db/database.js';
 import { config } from '../config.js';
 import { decimalToImpliedProb, removeVig } from '../utils/odds.js';
 import { getFrozenBShadowObservationSummary } from './MlbFrozenBShadow.js';
+import { getHighEvShrinkShadowObservationSummary } from './MlbHighEvShrinkShadow.js';
 
 /** 鎖定基準 KPI（@$50，見 MLB-B-BASELINE-LOCK.md）— 對照用，非活體帳本 */
 export const MLB_B_BASELINE_LOCK_KPI = Object.freeze({
@@ -36,19 +37,9 @@ function parseBookmakers(raw) {
   }
 }
 
-function closingH2h(gameId, pick, homeTeam, awayTeam) {
-  const row = db.prepare(`
-    SELECT bookmakers_json
-    FROM odds_snapshots
-    WHERE game_id = ?
-      AND datetime(captured_at) < datetime((SELECT commence_time FROM games WHERE id = ?))
-      AND source NOT LIKE '%_post_start'
-    ORDER BY datetime(captured_at) DESC
-    LIMIT 1
-  `).get(gameId, gameId);
-  if (!row) return null;
-
-  for (const book of parseBookmakers(row.bookmakers_json)) {
+function h2hFromBookmakers(bookmakers, pick, homeTeam, awayTeam) {
+  let best = null;
+  for (const book of bookmakers || []) {
     const market = book.markets?.find((item) => item.key === 'h2h');
     const selected = market?.outcomes?.find((item) => item.name === pick);
     const oppositeName = pick === homeTeam ? awayTeam : homeTeam;
@@ -58,9 +49,106 @@ function closingH2h(gameId, pick, homeTeam, awayTeam) {
       decimalToImpliedProb(selected.price),
       decimalToImpliedProb(opposite.price)
     );
-    return { oddsDecimal: Number(selected.price), marketProb: fair.fairA };
+    const oddsDecimal = Number(selected.price);
+    if (!Number.isFinite(oddsDecimal)) continue;
+    if (!best || oddsDecimal > best.oddsDecimal) {
+      best = { oddsDecimal, marketProb: fair.fairA };
+    }
   }
-  return null;
+  return best;
+}
+
+function closingH2h(gameId, pick, homeTeam, awayTeam) {
+  const row = db.prepare(`
+    SELECT captured_at, bookmakers_json
+    FROM odds_snapshots
+    WHERE game_id = ?
+      AND datetime(captured_at) < datetime((SELECT commence_time FROM games WHERE id = ?))
+      AND source NOT LIKE '%_post_start'
+    ORDER BY datetime(captured_at) DESC
+    LIMIT 1
+  `).get(gameId, gameId);
+  if (!row) return null;
+  const h2h = h2hFromBookmakers(parseBookmakers(row.bookmakers_json), pick, homeTeam, awayTeam);
+  if (!h2h) return null;
+  return { ...h2h, capturedAt: row.captured_at };
+}
+
+/** 開賽前 N 小時附近的 H2H（預設 T-8）；無窗內快照則取目標時刻前最近一筆。 */
+function releaseH2h(gameId, pick, homeTeam, awayTeam, commenceTime, hoursBefore = 8) {
+  const commenceMs = Date.parse(commenceTime);
+  if (!Number.isFinite(commenceMs)) return null;
+  const targetMs = commenceMs - hoursBefore * 3600e3;
+  const targetIso = new Date(targetMs).toISOString();
+  const windowH = 1.5;
+  const from = new Date(targetMs - windowH * 3600e3).toISOString();
+  const to = new Date(targetMs + windowH * 3600e3).toISOString();
+  const near = db
+    .prepare(
+      `SELECT captured_at, bookmakers_json
+       FROM odds_snapshots
+       WHERE game_id = ?
+         AND datetime(captured_at) >= datetime(?)
+         AND datetime(captured_at) <= datetime(?)
+         AND source NOT LIKE '%_post_start'
+       ORDER BY captured_at`
+    )
+    .all(gameId, from, to);
+  let chosen = null;
+  let bestAbs = Infinity;
+  for (const row of near) {
+    const abs = Math.abs(Date.parse(row.captured_at) - targetMs);
+    if (abs < bestAbs) {
+      bestAbs = abs;
+      chosen = row;
+    }
+  }
+  if (!chosen) {
+    chosen = db
+      .prepare(
+        `SELECT captured_at, bookmakers_json
+         FROM odds_snapshots
+         WHERE game_id = ?
+           AND datetime(captured_at) <= datetime(?)
+           AND source NOT LIKE '%_post_start'
+         ORDER BY datetime(captured_at) DESC
+         LIMIT 1`
+      )
+      .get(gameId, targetIso);
+  }
+  if (!chosen) return null;
+  const h2h = h2hFromBookmakers(
+    parseBookmakers(chosen.bookmakers_json),
+    pick,
+    homeTeam,
+    awayTeam
+  );
+  if (!h2h) return null;
+  return { ...h2h, capturedAt: chosen.captured_at, targetHoursBefore: hoursBefore };
+}
+
+function pitcherChangedAfterFill(gameId, fillIso) {
+  const rows = db
+    .prepare(
+      `SELECT captured_at, home_pitcher_name, away_pitcher_name
+       FROM mlb_probable_starter_snapshots
+       WHERE game_id = ?
+       ORDER BY captured_at`
+    )
+    .all(gameId);
+  if (rows.length < 2) return { changed: false };
+  const afterMs = Date.parse(fillIso);
+  let ref = null;
+  for (const r of rows) {
+    const t = Date.parse(r.captured_at);
+    if (Number.isFinite(afterMs) && t <= afterMs) ref = r;
+  }
+  if (!ref) ref = rows[0];
+  const last = rows[rows.length - 1];
+  const changed =
+    (ref.home_pitcher_name || '') !== (last.home_pitcher_name || '') ||
+    (ref.away_pitcher_name || '') !== (last.away_pitcher_name || '');
+  return { changed };
 }
 
 function evaluateH2h(pick, game) {
@@ -121,9 +209,10 @@ function summarizeSettledRows(rows, stakeUsd = 50) {
 
 export function createPaperBetFromCandidate(candidateId) {
   const candidate = db.prepare(`
-    SELECT c.*, t.mandatory_complete
+    SELECT c.*, t.mandatory_complete, g.commence_time, g.home_team, g.away_team
     FROM mlb_paper_candidates c
     JOIN mlb_prematch_truth_snapshots t ON t.id = c.truth_snapshot_id
+    JOIN games g ON g.id = c.game_id
     WHERE c.id = ?
   `).get(candidateId);
 
@@ -144,11 +233,28 @@ export function createPaperBetFromCandidate(candidateId) {
     return { created: false, reason: 'game_market_already_recorded' };
   }
 
+  const releaseHours = Number(config.mlbLockedBReleaseHoursBefore) || 8;
+  const release = releaseH2h(
+    candidate.game_id,
+    candidate.pick,
+    candidate.home_team,
+    candidate.away_team,
+    candidate.commence_time,
+    releaseHours
+  );
+  const fillMs = Date.now();
+  const commenceMs = Date.parse(candidate.commence_time);
+  const hoursToCommence = Number.isFinite(commenceMs)
+    ? Number(((commenceMs - fillMs) / 3600e3).toFixed(3))
+    : null;
+
   const result = db.prepare(`
     INSERT OR IGNORE INTO mlb_paper_bets
       (candidate_id, game_id, market, pick, stake_units, odds_decimal, market_prob,
-       model_prob, model_version, strategy_version)
-    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+       model_prob, model_version, strategy_version,
+       release_odds_decimal, release_market_prob, release_captured_at,
+       hours_to_commence_at_fill)
+    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     candidate.id,
     candidate.game_id,
@@ -158,7 +264,11 @@ export function createPaperBetFromCandidate(candidateId) {
     candidate.market_prob,
     candidate.model_prob,
     candidate.model_version,
-    candidate.strategy_version
+    candidate.strategy_version,
+    release?.oddsDecimal ?? null,
+    release?.marketProb ?? null,
+    release?.capturedAt ?? null,
+    hoursToCommence
   );
   return { created: result.changes === 1, id: result.lastInsertRowid || null };
 }
@@ -177,8 +287,10 @@ export function autoCreateEligiblePaperBets() {
 }
 
 export function autoSettleMlbPaperBets() {
+  backfillMlbPaperClvLedgerFields();
   const pending = db.prepare(`
-    SELECT p.*, g.home_team, g.away_team, g.home_score, g.away_score, g.completed, g.status
+    SELECT p.*, g.home_team, g.away_team, g.home_score, g.away_score, g.completed, g.status,
+           g.commence_time
     FROM mlb_paper_bets p
     JOIN games g ON g.id = p.game_id
     WHERE p.result = 'pending'
@@ -188,7 +300,7 @@ export function autoSettleMlbPaperBets() {
   const update = db.prepare(`
     UPDATE mlb_paper_bets
     SET result = ?, profit_units = ?, closing_odds_decimal = ?, closing_market_prob = ?,
-        clv_prob = ?, settled_at = datetime('now')
+        clv_prob = ?, pitcher_changed = ?, clv_release_prob = ?, settled_at = datetime('now')
     WHERE id = ?
   `);
 
@@ -202,12 +314,106 @@ export function autoSettleMlbPaperBets() {
       const clv = closing?.marketProb != null && bet.market_prob != null
         ? closing.marketProb - bet.market_prob
         : null;
-      update.run(result, profit, closing?.oddsDecimal ?? null, closing?.marketProb ?? null, clv, bet.id);
+      const releaseProb = bet.release_market_prob;
+      const clvRelease =
+        closing?.marketProb != null && releaseProb != null
+          ? closing.marketProb - releaseProb
+          : null;
+      const pitcher = pitcherChangedAfterFill(bet.game_id, bet.created_at);
+      update.run(
+        result,
+        profit,
+        closing?.oddsDecimal ?? null,
+        closing?.marketProb ?? null,
+        clv,
+        pitcher.changed ? 1 : 0,
+        clvRelease,
+        bet.id
+      );
       settled += 1;
     }
   });
   transaction();
   return { pending: pending.length, settled };
+}
+
+/** 既有紙上注補 T-release／換投／release→close CLV；不改選注結果。 */
+export function backfillMlbPaperClvLedgerFields() {
+  const releaseHours = Number(config.mlbLockedBReleaseHoursBefore) || 8;
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.game_id, p.pick, p.created_at, p.release_odds_decimal,
+              p.release_market_prob, p.closing_market_prob, p.pitcher_changed,
+              p.hours_to_commence_at_fill, p.clv_release_prob,
+              g.commence_time, g.home_team, g.away_team
+       FROM mlb_paper_bets p
+       JOIN games g ON g.id = p.game_id
+       WHERE p.release_odds_decimal IS NULL
+          OR p.pitcher_changed IS NULL
+          OR (p.closing_market_prob IS NOT NULL AND p.clv_release_prob IS NULL)
+          OR p.hours_to_commence_at_fill IS NULL`
+    )
+    .all();
+  if (!rows.length) return { updated: 0 };
+  const upd = db.prepare(`
+    UPDATE mlb_paper_bets
+    SET release_odds_decimal = COALESCE(release_odds_decimal, ?),
+        release_market_prob = COALESCE(release_market_prob, ?),
+        release_captured_at = COALESCE(release_captured_at, ?),
+        hours_to_commence_at_fill = COALESCE(hours_to_commence_at_fill, ?),
+        pitcher_changed = COALESCE(pitcher_changed, ?),
+        clv_release_prob = COALESCE(clv_release_prob, ?)
+    WHERE id = ?
+  `);
+  let updated = 0;
+  const tx = db.transaction(() => {
+    for (const bet of rows) {
+      const release =
+        bet.release_odds_decimal == null
+          ? releaseH2h(
+              bet.game_id,
+              bet.pick,
+              bet.home_team,
+              bet.away_team,
+              bet.commence_time,
+              releaseHours
+            )
+          : null;
+      const releaseOdds = bet.release_odds_decimal ?? release?.oddsDecimal ?? null;
+      const releaseProb = bet.release_market_prob ?? release?.marketProb ?? null;
+      const releaseAt = release?.capturedAt ?? null;
+      const fillMs = Date.parse(bet.created_at);
+      const commenceMs = Date.parse(bet.commence_time);
+      const hours =
+        bet.hours_to_commence_at_fill != null
+          ? bet.hours_to_commence_at_fill
+          : Number.isFinite(fillMs) && Number.isFinite(commenceMs)
+            ? Number(((commenceMs - fillMs) / 3600e3).toFixed(3))
+            : null;
+      const pitcher =
+        bet.pitcher_changed != null
+          ? { changed: bet.pitcher_changed === 1 }
+          : pitcherChangedAfterFill(bet.game_id, bet.created_at);
+      const clvRelease =
+        bet.clv_release_prob != null
+          ? bet.clv_release_prob
+          : bet.closing_market_prob != null && releaseProb != null
+            ? bet.closing_market_prob - releaseProb
+            : null;
+      upd.run(
+        releaseOdds,
+        releaseProb,
+        releaseAt,
+        hours,
+        pitcher.changed ? 1 : 0,
+        clvRelease,
+        bet.id
+      );
+      updated += 1;
+    }
+  });
+  tx();
+  return { updated };
 }
 
 function loadPaperBetRows() {
@@ -280,6 +486,37 @@ export function buildMlbPathGammaPaperReport({
     GROUP BY status
   `).all();
 
+  const clvCoverage = db.prepare(`
+    SELECT
+      COUNT(*) AS paperBets,
+      SUM(CASE WHEN release_odds_decimal IS NOT NULL THEN 1 ELSE 0 END) AS withRelease,
+      SUM(CASE WHEN closing_odds_decimal IS NOT NULL THEN 1 ELSE 0 END) AS withClose,
+      SUM(CASE WHEN clv_prob IS NOT NULL THEN 1 ELSE 0 END) AS withFillClv,
+      SUM(CASE WHEN clv_release_prob IS NOT NULL THEN 1 ELSE 0 END) AS withReleaseClv,
+      SUM(CASE WHEN pitcher_changed IS NOT NULL THEN 1 ELSE 0 END) AS withPitcherFlag,
+      SUM(CASE
+        WHEN release_odds_decimal IS NOT NULL
+         AND odds_decimal IS NOT NULL
+         AND closing_odds_decimal IS NOT NULL
+         AND pitcher_changed IS NOT NULL
+         AND clv_prob IS NOT NULL
+        THEN 1 ELSE 0 END) AS fullLedgerRows,
+      AVG(CASE WHEN clv_prob IS NOT NULL THEN clv_prob END) AS avgFillClvProb,
+      AVG(CASE WHEN clv_release_prob IS NOT NULL THEN clv_release_prob END) AS avgReleaseClvProb,
+      SUM(CASE WHEN pitcher_changed = 1 THEN 1 ELSE 0 END) AS pitcherChangedN
+    FROM mlb_paper_bets
+  `).get();
+  const fullN = Number(clvCoverage.fullLedgerRows || 0);
+  const clvLedger = {
+    ...clvCoverage,
+    evaluateAfterBets: 40,
+    readyToEvaluateWithdrawRules: fullN >= 40,
+    note:
+      fullN >= 40
+        ? '完整台帳≥40 筆，可開始評估逆向／換投撤單影子規則；仍不寫入正式選注'
+        : `完整台帳 ${fullN}/40；繼續累積，不提前寫正式撤單規則`,
+  };
+
   return {
     mode: 'path_gamma',
     generatedAt: new Date().toISOString(),
@@ -303,23 +540,33 @@ export function buildMlbPathGammaPaperReport({
         matchup: `${r.away_team} @ ${r.home_team}`,
         pick: r.pick,
         odds: r.odds_decimal,
+        releaseOdds: r.release_odds_decimal,
+        closingOdds: r.closing_odds_decimal,
+        clvProb: r.clv_prob,
+        clvReleaseProb: r.clv_release_prob,
+        pitcherChanged: r.pitcher_changed,
+        hoursToCommenceAtFill: r.hours_to_commence_at_fill,
         result: r.result,
         profitUnits: r.profit_units,
         usd50:
           r.profit_units == null ? null : Math.round(Number(r.profit_units) * stakeUsd),
       })),
     },
+    clvLedger,
     candidateCounts: Object.fromEntries(
       candidateCounts.map((row) => [row.status, row.count])
     ),
     drift,
     frozenBShadow: getFrozenBShadowObservationSummary(),
+    highEvShrinkShadow: getHighEvShrinkShadowObservationSummary(),
     operatingRules: [
       '正式紙上：ev02_max230 + 鎖定疊加 frozen_b+shrink（殘差 b + 毒客 shrink）',
       '禁止為抬勝率改選注常數／v4.5 權重／疊加係數',
       '之後優化請另開影子觀察；確認後再升格',
       '回滾疊加：MLB_LOCKED_B_OVERLAY=false；回滾選注 profile：MLB_PAPER_RULE_PROFILE=frozen_v1',
       '活體樣本不足勿下結論',
+      'CLV 台帳：每筆記 T-release／成交／收盤／換投／CLV；≥40 完整筆再評撤單，不提前寫正式規則',
+      '高 EV overlay：預設 apply（shrink_w15_l15）；回退 MLB_HIGH_EV_SHRINK_SHADOW=compare|off；不改 ev02／frozen_b 主常數',
     ],
   };
 }
@@ -354,7 +601,9 @@ export function getMlbPaperLedgerSummary() {
       rolling30d: pathGamma.liveLedger.rolling30d,
       byMonth: pathGamma.liveLedger.byMonth,
       drift: pathGamma.drift,
+      clvLedger: pathGamma.clvLedger,
       frozenBShadow: pathGamma.frozenBShadow,
+      highEvShrinkShadow: pathGamma.highEvShrinkShadow,
       profileConfigured: pathGamma.profileConfigured,
       profileMismatch: pathGamma.profileMismatch,
       operatingRules: pathGamma.operatingRules,
