@@ -2,14 +2,20 @@
  * MLB 大小分衛星（研究影子；不動鎖定 B 獨贏）。
  *
  * 2026-08-01：初版 MVP + 盤口≤10。
- * 2026-08-01 晚：Grok A/B/C → 閘門改 gap≥0.6 / EV≥3% / edge≥3%（三窗準正式過閘；仍不進紙上帳本）。
+ * 2026-08-01 晚：Grok A/B/C → 閘門改 gap≥0.6 / EV≥3% / edge≥3%。
+ * 2026-08-03：Hybrid 主打（raw Under + 投手公園去偏 Over）；均注 $50。
  */
 import { decimalToImpliedProb, removeVig } from '../utils/odds.js';
+import {
+  buildMlbScoreDistribution,
+  deriveMlbScoreMarkets,
+} from './MlbExpectedRunsModel.js';
 
 export const MLB_TOTALS_SATELLITE_SPEC = Object.freeze({
   id: 'totals_sat_v2026-08-01b',
-  label: '大小分衛星（研究）',
+  label: '大小分 both（對照研究）',
   researchOnly: true,
+  primarySatellite: false,
   modelVersion: 'mlb-expected-runs-nb-v4.5',
   rules: Object.freeze({
     minAbsGap: 0.6,
@@ -42,33 +48,115 @@ export const MLB_TOTALS_SATELLITE_SPEC = Object.freeze({
     artifact: 'tmp-totals-sat-grok-abc.json',
   }),
   note:
-    '準正式過閘（三窗 ROI≥0、合併≥3%、holdout≥5%），仍為影子：勿寫入 mlb_paper_bets、勿與鎖定 B 混 TopK。',
+    'both 寬線對照；預設主打為 hybrid。勿寫入 mlb_paper_bets、勿與鎖定 B 混 TopK。',
 });
 
 /**
- * 平行影子：同一 01b 閘門但只保留 Under（注少、三窗更肥）。
- * 不替換主衛星 both-sides；UI 另列觀察。
- * 2026-08-01 Grok：觀察過關後可單獨升紙上衛星帳本（仍不混 B／不替換 01b）。
+ * Under-only：平行對照（均注 $50；不混鎖定 B TopK）。
+ * 2026-08-03：曾作主打；2026-08-03 晚主打改 hybrid（raw Under + 投手公園去偏 Over）。
  */
 export const MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC = Object.freeze({
   id: 'totals_sat_under_only_v1',
-  label: '大小分 Under 平行影子',
+  label: '大小分 Under 對照',
   researchOnly: true,
+  primarySatellite: false,
+  suggestedStakeUsd: 50,
   parentSpecId: 'totals_sat_v2026-08-01b',
   rules: MLB_TOTALS_SATELLITE_SPEC.rules,
   sideFilter: 'under',
   paperEvidenceUsd50: Object.freeze({
     byYear: Object.freeze({
-      '2024': Object.freeze({ bets: 90, hitRate: 0.6667, roi: 0.267, usd50: 1202 }),
-      '2025': Object.freeze({ bets: 144, hitRate: 0.5903, roi: 0.1135, usd50: 817 }),
-      '2026': Object.freeze({ bets: 64, hitRate: 0.5469, roi: 0.0269, usd50: 86 }),
+      '2024': Object.freeze({ bets: 81, hitRate: 0.6543, roi: 0.2604, usd50: 1055 }),
+      '2025': Object.freeze({ bets: 136, hitRate: 0.5515, roi: 0.0655, usd50: 445 }),
+      '2026': Object.freeze({ bets: 61, hitRate: 0.5574, roi: 0.0811, usd50: 247 }),
     }),
-    merged: Object.freeze({ bets: 298, hitRate: 0.604, roi: 0.1412, usd50: 2104 }),
-    auditScript: 'scripts/auditMlbTotalsSatUnderOnly3y.mjs',
-    artifact: 'tmp-totals-sat-under-only-3y.json',
+    merged: Object.freeze({ bets: 278, hitRate: 0.5827, roi: 0.1257, usd50: 1748 }),
+    auditScript: 'scripts/auditMlbTotalsSatNextKnifeProfit.mjs',
+    artifact: 'tmp-totals-sat-next-knife-profit.json',
   }),
   note:
-    '01b 閘門內只取小；三窗皆正但注少。平行觀察，不替換主衛星；過關後可單獨升紙上衛星帳本（不混鎖定 B）。',
+    '01b 閘門內只取小；均注 $50。現為對照線；主打見 hybrid。',
+});
+
+/**
+ * Hybrid 主打：Under=raw μ；Over=僅投手公園（parkFactor&lt;0.97）扣凍結 offset。
+ * 2026-08-04：Over·raw 另加 absGap≤1.25（砍過度自信厚邊）；納入鎖定 B 組合包。
+ * 均注 $50。不混鎖定 B TopK／不寫入獨贏紙上帳本。
+ */
+export const MLB_TOTALS_SATELLITE_HYBRID_SPEC = Object.freeze({
+  id: 'totals_sat_hybrid_v1.1',
+  label: '大小分 Hybrid 衛星（主打）',
+  researchOnly: false,
+  primarySatellite: true,
+  suggestedStakeUsd: 50,
+  parentSpecId: 'totals_sat_v2026-08-01b',
+  rules: MLB_TOTALS_SATELLITE_SPEC.rules,
+  /** 投手公園判定 */
+  pitcherParkFactorMax: 0.97,
+  /**
+   * 凍結：pitcher_park 上 mean(μ−line)。
+   * 來源 auditMlbTotalsCalibParkOos / hybrid OOS（≈0.706）；取 0.70。
+   */
+  pitcherParkMuMinusLineOffset: 0.7,
+  /**
+   * Over 專用收緊：|μ−線|≥0.9（Under 仍用 rules.minAbsGap=0.6）。
+   * auditMlbTotalsHybridOverTighten：勝率 +0.17pp、ROI 微升、三窗仍正；再抬 EV/prob 反而變差。
+   */
+  overMinAbsGap: 0.9,
+  /**
+   * 僅 Over·raw（非投手去偏）：|μ−線|上限。厚邊 Over·raw 更差（rigor + best-scheme）。
+   * auditMlbTotalsHybridBestScheme：cap1.25 三年皆贏 baseline，注數 1387→787、勝率 55.2%→58.3%、Δ$+507。
+   * 回滾：`.env` MLB_TOTALS_RAW_OVER_MAX_ABS_GAP=off
+   */
+  rawOverMaxAbsGap: 1.25,
+  paperEvidenceUsd50: Object.freeze({
+    byYear: Object.freeze({
+      '2024': Object.freeze({
+        both: Object.freeze({
+          bets: 301,
+          hitRate: 0.5748,
+          roi: 0.1182,
+          usd50: 1779,
+        }),
+      }),
+      '2025': Object.freeze({
+        both: Object.freeze({
+          bets: 293,
+          hitRate: 0.5904,
+          roi: 0.1455,
+          usd50: 2132,
+        }),
+      }),
+      '2026': Object.freeze({
+        both: Object.freeze({
+          bets: 193,
+          hitRate: 0.5855,
+          roi: 0.1408,
+          usd50: 1359,
+        }),
+      }),
+    }),
+    merged: Object.freeze({
+      both: Object.freeze({
+        bets: 787,
+        hitRate: 0.5832,
+        roi: 0.1339,
+        usd50: 5270,
+        note: 'v1.1：overMinAbsGap=0.9 + rawOverMaxAbsGap=1.25',
+      }),
+      vsV1NoCap: Object.freeze({
+        bets: 1387,
+        hitRate: 0.5523,
+        roi: 0.0687,
+        usd50: 4763,
+        deltaUsd: 507,
+      }),
+    }),
+    auditScript: 'scripts/auditMlbTotalsHybridBestScheme.mjs',
+    artifact: 'tmp-totals-hybrid-best-scheme.json',
+  }),
+  note:
+    'Under raw gap≥0.6；Over 投手去偏 gap≥0.9；Over·raw 另限 absGap≤1.25。均注 $50。勿混鎖定 B TopK。',
 });
 
 /**
@@ -336,4 +424,151 @@ export function selectDailyTotalsSatellitePicks(candidates, spec = MLB_TOTALS_SA
     );
   }
   return out;
+}
+
+/**
+ * 將總分 μ 平移 totalOffset（負=下修），重算大小分機率；獨贏市場不重算。
+ */
+export function shiftTotalsPredictionMeans(prediction, totalOffset, totalLine) {
+  const home0 = Number(prediction?.homeExpectedRuns);
+  const away0 = Number(prediction?.awayExpectedRuns);
+  if (!Number.isFinite(home0) || !Number.isFinite(away0)) return prediction;
+  const half = Number(totalOffset) / 2;
+  const homeMu = Math.max(0.5, home0 + half);
+  const awayMu = Math.max(0.5, away0 + half);
+  const dispersion = Number(prediction?.dispersion) || 1;
+  const line = Number(
+    totalLine ?? prediction?.markets?.total?.line ?? 8.5
+  );
+  const dist = buildMlbScoreDistribution({
+    homeMean: homeMu,
+    awayMean: awayMu,
+    homeDispersion: dispersion,
+    awayDispersion: dispersion,
+  });
+  const markets = deriveMlbScoreMarkets(dist, { totalLine: line });
+  return {
+    ...prediction,
+    homeExpectedRuns: homeMu,
+    awayExpectedRuns: awayMu,
+    expectedTotal: homeMu + awayMu,
+    markets: {
+      ...(prediction.markets || {}),
+      total: markets.total,
+    },
+    totalsMeanShift: {
+      totalOffset,
+      from: home0 + away0,
+      to: homeMu + awayMu,
+    },
+  };
+}
+
+/**
+ * Hybrid：Under 用 raw；Over 在投手公園對 μ 扣凍結 offset 後再分類。
+ */
+export function classifyMlbTotalsHybridCandidate({
+  prediction,
+  totalsMarket,
+  parkFactor = 1,
+  spec = MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+} = {}) {
+  const pitcherMax = Number(spec.pitcherParkFactorMax) || 0.97;
+  const offset = Number(spec.pitcherParkMuMinusLineOffset) || 0.7;
+  const pf = Number(parkFactor);
+  const isPitcherPark = Number.isFinite(pf) && pf < pitcherMax;
+
+  const raw = classifyMlbTotalsSatelliteCandidate({
+    prediction,
+    totalsMarket,
+    spec: { ...spec, id: spec.id, rules: spec.rules || MLB_TOTALS_SATELLITE_SPEC.rules },
+  });
+
+  if (raw.tier === 'actionable' && raw.side === 'under') {
+    return {
+      ...raw,
+      researchOnly: Boolean(spec.researchOnly),
+      specId: spec.id,
+      hybridPath: 'raw_under',
+      pitcherParkDebiasApplied: false,
+      parkFactor: pf,
+    };
+  }
+
+  const overPrediction = isPitcherPark
+    ? shiftTotalsPredictionMeans(prediction, -offset, totalsMarket?.line)
+    : prediction;
+  const overCls = classifyMlbTotalsSatelliteCandidate({
+    prediction: overPrediction,
+    totalsMarket,
+    spec: {
+      ...spec,
+      id: spec.id,
+      rules: {
+        ...(spec.rules || MLB_TOTALS_SATELLITE_SPEC.rules),
+        minAbsGap: Number.isFinite(Number(spec.overMinAbsGap))
+          ? Number(spec.overMinAbsGap)
+          : Number(spec.rules?.minAbsGap ?? MLB_TOTALS_SATELLITE_SPEC.rules.minAbsGap),
+      },
+    },
+  });
+
+  if (overCls.tier === 'actionable' && overCls.side === 'over') {
+    const hybridPath = isPitcherPark ? 'pitcher_debiased_over' : 'raw_over';
+    const rawOverMax = Number(spec.rawOverMaxAbsGap);
+    if (
+      hybridPath === 'raw_over' &&
+      Number.isFinite(rawOverMax) &&
+      rawOverMax > 0 &&
+      Number(overCls.absGap) > rawOverMax
+    ) {
+      return {
+        tier: 'blocked',
+        market: 'totals',
+        side: 'over',
+        reasons: [
+          ...(overCls.reasons || []).map((r) => `overPath:${r}`),
+          'raw_over_abs_gap_above_maximum',
+        ],
+        researchOnly: Boolean(spec.researchOnly),
+        specId: spec.id,
+        hybridPath: null,
+        pitcherParkDebiasApplied: false,
+        parkFactor: pf,
+        absGap: overCls.absGap,
+        rawOverMaxAbsGap: rawOverMax,
+        expectedTotalRaw: Number(prediction?.expectedTotal),
+        line: overCls.line,
+        pick: overCls.pick,
+        oddsDecimal: overCls.oddsDecimal,
+      };
+    }
+    return {
+      ...overCls,
+      researchOnly: Boolean(spec.researchOnly),
+      specId: spec.id,
+      hybridPath,
+      pitcherParkDebiasApplied: isPitcherPark,
+      parkFactor: pf,
+      expectedTotalRaw: Number(prediction?.expectedTotal),
+      overMinAbsGap: Number(spec.overMinAbsGap) || null,
+      rawOverMaxAbsGap: Number.isFinite(rawOverMax) ? rawOverMax : null,
+    };
+  }
+
+  return {
+    tier: 'blocked',
+    market: 'totals',
+    side: null,
+    reasons: [
+      ...(raw.reasons || []).map((r) => `raw:${r}`),
+      ...(overCls.reasons || []).map((r) => `overPath:${r}`),
+      'hybrid_no_actionable_side',
+    ],
+    researchOnly: Boolean(spec.researchOnly),
+    specId: spec.id,
+    hybridPath: null,
+    pitcherParkDebiasApplied: isPitcherPark,
+    parkFactor: pf,
+  };
 }

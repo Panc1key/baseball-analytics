@@ -86,7 +86,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { getSlate } from '../api/index.js';
 import { marketLabel, tierLabel } from '../utils/market.js';
 import { formatMatchup, leagueLabel, translatePick } from '../utils/teams.js';
@@ -95,6 +95,10 @@ const props = defineProps({
   autoLoad: { type: Boolean, default: true },
   /** baseball | basketball | football | tennis | all — 空／all 為跨運動 */
   sport: { type: String, default: 'baseball' },
+  /** 可選：NPB | KBO；空=不限聯盟 */
+  league: { type: String, default: '' },
+  /** 僅顯示日職／韓職（排除 MLB） */
+  asianOnly: { type: Boolean, default: false },
 });
 
 const loading = ref(false);
@@ -136,6 +140,10 @@ const visibleDays = computed(() => {
   return dates
     .map((day) => {
       const games = (day.games || [])
+        .filter((g) => {
+          if (!props.asianOnly) return true;
+          return g.league === 'NPB' || g.league === 'KBO';
+        })
         .map((g) => {
           const picks = sortPicks(filterPicks(g.picks));
           // 「全部」時：無推薦的場次也要顯示；篩均注/關注時只留有命中的
@@ -228,6 +236,7 @@ async function loadSlate() {
   try {
     const params = { days: days.value };
     if (props.sport && props.sport !== 'all') params.sport = props.sport;
+    if (props.league) params.league = props.league;
     const res = await getSlate(params);
     slate.value = res.data;
   } finally {
@@ -238,6 +247,13 @@ async function loadSlate() {
 onMounted(() => {
   if (props.autoLoad) loadSlate();
 });
+
+watch(
+  () => props.league,
+  () => {
+    loadSlate();
+  }
+);
 
 defineExpose({ loadSlate, slate });
 </script>

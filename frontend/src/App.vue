@@ -3,7 +3,7 @@
     <header class="header">
       <div class="brand">
         <h1>初盤分析</h1>
-        <p class="subtitle">MLB 鎖定 B · 香港時間</p>
+        <p class="subtitle">{{ subtitle }}</p>
       </div>
       <div class="header-right">
         <div v-if="hasApiKey && (lastSyncAt || lastAnalysisAt)" class="status-line">
@@ -27,25 +27,42 @@
       class="setup-alert"
     />
 
-    <MlbPrematchTruthPanel ref="baseballPanelRef" />
+    <el-radio-group v-model="mainTab" size="small" class="main-tabs">
+      <el-radio-button label="mlb">MLB 鎖定 B</el-radio-button>
+      <el-radio-button label="asian">日職／韓職</el-radio-button>
+    </el-radio-group>
+
+    <MlbPrematchTruthPanel v-show="mainTab === 'mlb'" ref="mlbPanelRef" />
+    <AsianLeaguePrematchPanel v-show="mainTab === 'asian'" ref="asianPanelRef" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import MlbPrematchTruthPanel from './components/MlbPrematchTruthPanel.vue';
+import AsianLeaguePrematchPanel from './components/AsianLeaguePrematchPanel.vue';
 import {
   getStatus,
   refreshSlate,
 } from './api/index.js';
 
-const baseballPanelRef = ref(null);
+const mainTab = ref('mlb');
+const mlbPanelRef = ref(null);
+const asianPanelRef = ref(null);
 const refreshing = ref(false);
 
-const refreshButtonLabel = computed(() =>
-  refreshing.value ? '同步中…' : '同步今日 MLB'
+const subtitle = computed(() =>
+  mainTab.value === 'asian'
+    ? '日職／韓職初盤 · 與 MLB 分開 · 香港時間'
+    : 'MLB 鎖定 B · 香港時間'
 );
+
+const refreshButtonLabel = computed(() => {
+  if (refreshing.value) return '同步中…';
+  return mainTab.value === 'asian' ? '同步日職／韓職' : '同步今日 MLB';
+});
+
 const hasApiKey = ref(false);
 const lastSyncAt = ref(null);
 const lastAnalysisAt = ref(null);
@@ -82,11 +99,15 @@ function applyStatus(cfg) {
   oddsQuota.value = cfg?.oddsQuotaRemaining ?? null;
 }
 
-async function loadBaseballViews() {
+async function loadViews() {
   try {
     const statusRes = await getStatus();
     applyStatus(statusRes.data);
-    await baseballPanelRef.value?.loadTruth?.();
+    if (mainTab.value === 'mlb') {
+      await mlbPanelRef.value?.loadTruth?.();
+    } else {
+      await asianPanelRef.value?.reload?.();
+    }
   } catch (err) {
     if (!err.response) {
       ElMessage.error('無法連接後端（請確認 backend 已啟動在 port 3101）');
@@ -99,10 +120,11 @@ async function loadBaseballViews() {
 async function handleRefresh() {
   refreshing.value = true;
   try {
-    // 真正拉今日賽程／初盤並跑鎖定 B truth 快照（不是只讀本機舊檔）
     await refreshSlate({ sports: ['baseball'] });
-    await loadBaseballViews();
-    ElMessage.success('已同步今日 MLB');
+    await loadViews();
+    ElMessage.success(
+      mainTab.value === 'asian' ? '已同步棒球（含日職／韓職）' : '已同步今日 MLB'
+    );
   } catch (err) {
     ElMessage.error(err.response?.data?.error || err.message || '同步失敗');
   } finally {
@@ -110,7 +132,11 @@ async function handleRefresh() {
   }
 }
 
-onMounted(loadBaseballViews);
+watch(mainTab, () => {
+  loadViews();
+});
+
+onMounted(loadViews);
 </script>
 
 <style>
@@ -127,7 +153,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid #ddd;
 }
@@ -147,6 +173,7 @@ body {
 }
 .quota { color: #888; }
 .setup-alert { margin-bottom: 12px; }
+.main-tabs { margin-bottom: 14px; }
 @media (max-width: 640px) {
   .header { flex-direction: column; align-items: flex-start; }
   .app { padding: 12px; }

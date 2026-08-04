@@ -686,6 +686,46 @@ function migrateSchema() {
       updated_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  /*
+   * 亞聯先發身份快照（研究用；不進 MLB Locked B / 正式推薦）。
+   * capture_kind:
+   *   prematch_live — 開賽前捕獲
+   *   schedule_historical — 官網日程回填（KBO）
+   *   boxscore_historical — 賽後頁回填身份（NPB 先發・）
+   */
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS asian_probable_starter_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      league TEXT NOT NULL CHECK (league IN ('NPB', 'KBO')),
+      game_id TEXT NOT NULL,
+      commence_time TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      source TEXT NOT NULL,
+      capture_kind TEXT NOT NULL CHECK (
+        capture_kind IN ('prematch_live', 'schedule_historical', 'boxscore_historical')
+      ),
+      status TEXT NOT NULL CHECK (status IN ('complete', 'partial')),
+      home_pitcher_key TEXT,
+      home_pitcher_id INTEGER,
+      home_pitcher_name TEXT,
+      away_pitcher_key TEXT,
+      away_pitcher_id INTEGER,
+      away_pitcher_name TEXT,
+      home_era REAL,
+      home_whip REAL,
+      away_era REAL,
+      away_whip REAL,
+      stats_asof_kind TEXT,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(league, game_id, captured_at, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_asian_starter_game
+      ON asian_probable_starter_snapshots(league, game_id, captured_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_asian_starter_pitcher
+      ON asian_probable_starter_snapshots(league, home_pitcher_key, away_pitcher_key);
+  `);
 }
 
 migrateSchema();

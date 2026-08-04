@@ -112,10 +112,16 @@ import {
 import {
   MLB_TOTALS_SATELLITE_SPEC,
   MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC,
+  MLB_TOTALS_SATELLITE_HYBRID_SPEC,
   bestFairTotals,
   classifyMlbTotalsSatelliteCandidate,
+  classifyMlbTotalsHybridCandidate,
   selectDailyTotalsSatellitePicks,
 } from './MlbTotalsSatellite.js';
+import {
+  MLB_LOCKED_B_PACKAGE,
+  buildLockedBPackageSnapshot,
+} from './MlbLockedBPackage.js';
 import {
   buildHighEvShrinkShadowSlate,
 } from './MlbHighEvShrinkShadow.js';
@@ -1054,6 +1060,24 @@ async function collectEvidence(game) {
         researchOnly: true,
         specId: MLB_TOTALS_SATELLITE_SPEC.id,
       };
+  const totalsSatelliteHybrid = expectedRunsPredictionRouted
+    ? classifyMlbTotalsHybridCandidate({
+        prediction: expectedRunsPredictionRouted,
+        totalsMarket,
+        parkFactor: expectedRunsFeatures.parkFactor,
+        spec: {
+          ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+          rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+        },
+      })
+    : {
+        tier: 'blocked',
+        market: 'totals',
+        side: null,
+        reasons: ['totals_prediction_missing'],
+        researchOnly: false,
+        specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
+      };
   let moneylineClassification = expectedRunsPredictionRouted
     ? classifyMlbMoneylineCandidate({
       prediction: expectedRunsPredictionRouted,
@@ -1138,6 +1162,7 @@ async function collectEvidence(game) {
         marketPlan,
         totalsDecision: expectedRunsPredictionRouted?.totalsDecision || null,
         totalsSatellite,
+        totalsSatelliteHybrid,
         totalsMarket: totalsMarket
           ? {
               line: totalsMarket.line,
@@ -1167,6 +1192,14 @@ async function collectEvidence(game) {
           reasons: ['expected_runs_model_or_features_missing'],
           researchOnly: true,
           specId: MLB_TOTALS_SATELLITE_SPEC.id,
+        },
+        totalsSatelliteHybrid: {
+          tier: 'blocked',
+          market: 'totals',
+          side: null,
+          reasons: ['expected_runs_model_or_features_missing'],
+          researchOnly: false,
+          specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
         },
         totalsMarket: totalsMarket
           ? {
@@ -1529,7 +1562,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   // 可看選邊＝僅已進入放出時窗者（嚴格；防過早下注）
   const topSummaries = topSummariesReleased;
 
-  /** 同日 2 串衛星：從可看選邊取賠率≤2.10、按排名，至少 2 腿才提示（不改選場） */
+  /** 同日 2 串：從可看選邊取賠率≤2.10、按排名，至少 2 腿（組合包主串） */
   const PARLAY_LEG_MAX_ODDS = 2.1;
   const parlayLegs = topSummaries
     .filter((row) => Number.isFinite(Number(row.oddsDecimal)) && Number(row.oddsDecimal) <= PARLAY_LEG_MAX_ODDS)
@@ -1539,9 +1572,13 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     parlayLegs.length >= 2
       ? {
           available: true,
+          id: 'same_day_ml_2leg',
+          label: '同日獨贏 2 串',
           legCount: 2,
           maxLegOdds: PARLAY_LEG_MAX_ODDS,
-          suggestedStakeNote: '衛星小注（建議遠低於單場均注）',
+          suggestedStakeUsd: Number(config.mlbTotalsSatelliteStakeUsd) || 50,
+          suggestedStakeNote: '均注 $50（與單場相同）',
+          packageRole: 'primary_parlay',
           combinedOdds: Number(
             (parlayLegs[0].oddsDecimal * parlayLegs[1].oddsDecimal).toFixed(3)
           ),
@@ -1555,8 +1592,12 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         }
       : {
           available: false,
+          id: 'same_day_ml_2leg',
+          label: '同日獨贏 2 串',
           legCount: parlayLegs.length,
           maxLegOdds: PARLAY_LEG_MAX_ODDS,
+          suggestedStakeUsd: Number(config.mlbTotalsSatelliteStakeUsd) || 50,
+          packageRole: 'primary_parlay',
           reason:
             topSummariesAll.length < 2
               ? '今日過門檻場次不足 2，無法組同日 2 串'
@@ -1573,6 +1614,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         };
 
   /** 大小分衛星（研究影子）：與鎖定 B 獨贏完全分離，不進紙上帳本 */
+  /** 大小分衛星：hybrid 主打（均注 $50）；01b both / under-only 作對照 */
   const totalsSatelliteCandidates = ranked.map((game) => {
     const sat = game.expectedRuns?.totalsSatellite;
     if (!sat) return null;
@@ -1615,6 +1657,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const totalsSatellite = {
     available: totalsSatellitePicks.length > 0,
     researchOnly: true,
+    primarySatellite: false,
     specId: MLB_TOTALS_SATELLITE_SPEC.id,
     label: MLB_TOTALS_SATELLITE_SPEC.label,
     note: MLB_TOTALS_SATELLITE_SPEC.note,
@@ -1626,15 +1669,153 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const totalsSatelliteUnderOnlyPicks = totalsSatellitePicks
     .filter((c) => c.side === 'under')
     .map((c, index) => ({ ...c, rank: index + 1 }));
+  const totalsStakeUsd = Number(config.mlbTotalsSatelliteStakeUsd) || 50;
+  const totalsPrimaryMode = String(config.mlbTotalsSatellitePrimary || 'hybrid')
+    .trim()
+    .toLowerCase();
   const totalsSatelliteUnderOnly = {
     available: totalsSatelliteUnderOnlyPicks.length > 0,
     researchOnly: true,
+    primarySatellite: totalsPrimaryMode === 'under',
+    suggestedStakeUsd: totalsStakeUsd,
+    primaryMode: totalsPrimaryMode,
     specId: MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC.id,
     label: MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC.label,
     note: MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC.note,
     parentSpecId: MLB_TOTALS_SATELLITE_UNDER_ONLY_SPEC.parentSpecId,
     picks: totalsSatelliteUnderOnlyPicks,
   };
+
+  const totalsHybridCandidates = ranked.map((game) => {
+    const sat = game.expectedRuns?.totalsSatelliteHybrid;
+    if (!sat) return null;
+    const day =
+      game.researchDay ||
+      new Date(game.commenceTime).toLocaleDateString('en-CA', {
+        timeZone: 'Asia/Hong_Kong',
+      });
+    return {
+      ...sat,
+      researchDay: day,
+      gameId: game.gameId,
+      matchup: `${game.awayTeam} @ ${game.homeTeam}`,
+      commenceTime: game.commenceTime,
+      recommendationAllowed: Boolean(game.dataReadiness?.recommendationAllowed),
+    };
+  }).filter(Boolean);
+  const totalsHybridPicks = selectDailyTotalsSatellitePicks(
+    totalsHybridCandidates.filter(
+      (c) =>
+        c.tier === 'actionable' &&
+        c.recommendationAllowed &&
+        isWithinLockedBReleaseWindow(c.commenceTime, nowMs)
+    ),
+    MLB_TOTALS_SATELLITE_HYBRID_SPEC
+  ).map((c, index) => ({
+    rank: index + 1,
+    gameId: c.gameId,
+    matchup: c.matchup,
+    commenceTime: c.commenceTime,
+    pick: c.pick,
+    side: c.side,
+    line: c.line,
+    oddsDecimal: c.oddsDecimal,
+    modelProbability: c.modelProbability,
+    marketProbability: c.marketProbability,
+    expectedValue: c.expectedValue,
+    absGap: c.absGap,
+    expectedTotal: c.expectedTotal,
+    hybridPath: c.hybridPath || null,
+    pitcherParkDebiasApplied: Boolean(c.pitcherParkDebiasApplied),
+  }));
+
+  /** Hybrid：已過閘但未進 T-N 時窗／缺先發 — 只提示狀態不給選邊細節（防過早下） */
+  const totalsHybridHeld = totalsHybridCandidates
+    .filter((c) => c.tier === 'actionable')
+    .map((c) => {
+      const release = lockedBReleaseWindowMeta(c.commenceTime, nowMs);
+      const ready = Boolean(c.recommendationAllowed);
+      let holdReason = null;
+      if (!ready) holdReason = 'data_incomplete_pitchers';
+      else if (!release.released) holdReason = release.holdReason || 'outside_release_window';
+      else holdReason = null;
+      if (!holdReason) return null;
+      return {
+        gameId: c.gameId,
+        matchup: c.matchup,
+        commenceTime: c.commenceTime,
+        hoursUntilCommence: release.hoursUntilCommence,
+        holdReason,
+        side: c.side,
+        line: c.line,
+      };
+    })
+    .filter(Boolean);
+
+  /** 今日強訊號但被硬閘擋住（例如盤口>10 的小分）— 說明為何空倉 */
+  const totalsHybridBlockedNotable = totalsHybridCandidates
+    .filter((c) => {
+      if (c.tier === 'actionable') return false;
+      const reasons = c.reasons || [];
+      const interesting =
+        reasons.some((r) => String(r).includes('total_line_above_maximum')) ||
+        (c.side === 'under' &&
+          Number(c.absGap) >= 0.6 &&
+          Number(c.expectedValue) >= 0.03);
+      return interesting;
+    })
+    .slice(0, 8)
+    .map((c) => ({
+      gameId: c.gameId,
+      matchup: c.matchup,
+      commenceTime: c.commenceTime,
+      side: c.side,
+      line: c.line,
+      absGap: c.absGap,
+      expectedValue: c.expectedValue,
+      reasons: (c.reasons || [])
+        .map((r) => String(r).replace(/^raw:/, '').replace(/^overPath:/, ''))
+        .filter((r, i, arr) => arr.indexOf(r) === i)
+        .slice(0, 4),
+    }));
+
+  const totalsSatelliteHybrid = {
+    available: totalsHybridPicks.length > 0,
+    researchOnly: false,
+    primarySatellite: totalsPrimaryMode === 'hybrid' || totalsPrimaryMode === '',
+    suggestedStakeUsd: totalsStakeUsd,
+    primaryMode: totalsPrimaryMode,
+    specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
+    label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
+    note: MLB_TOTALS_SATELLITE_HYBRID_SPEC.note,
+    rules: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules,
+    pitcherParkMuMinusLineOffset:
+      MLB_TOTALS_SATELLITE_HYBRID_SPEC.pitcherParkMuMinusLineOffset,
+    overMinAbsGap: MLB_TOTALS_SATELLITE_HYBRID_SPEC.overMinAbsGap,
+    rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+    maxTotalLine: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules?.maxTotalLine ?? 10,
+    picks: totalsHybridPicks,
+    held: totalsHybridHeld,
+    blockedNotable: totalsHybridBlockedNotable,
+    blockedCount: totalsHybridCandidates.filter((c) => c.tier === 'blocked').length,
+  };
+
+  const packageStake =
+    Number(config.mlbTotalsSatelliteStakeUsd) ||
+    MLB_LOCKED_B_PACKAGE.flatStakeUsd ||
+    50;
+  const parlayStake =
+    Number(config.mlbStarParlayStakeUsd) ||
+    MLB_LOCKED_B_PACKAGE.parlays.stakeUsd ||
+    Math.round(packageStake / 2) ||
+    25;
+  const lockedBPackage = buildLockedBPackageSnapshot({
+    moneylinePicks: topSummaries,
+    hybridTotalsPicks: totalsHybridPicks,
+    sameDayMlParlay: sameDayParlay,
+    stakeUsd: packageStake,
+    parlayStakeUsd: parlayStake,
+  });
 
   /** 今日卡關摘要：幫助理解「為什麼場次少」（不改規則） */
   const reasonCounts = {};
@@ -1752,8 +1933,10 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       holdReason: row.releaseWindow?.holdReason || 'held',
     })),
     sameDayParlay,
+    lockedBPackage,
     totalsSatellite,
     totalsSatelliteUnderOnly,
+    totalsSatelliteHybrid,
     todayFunnel,
     blockedByData: blockedByData.map((game, index) => summarizeTopPick(game, index)),
     valueWatch: valueWatch.map((game) => {

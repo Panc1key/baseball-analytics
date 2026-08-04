@@ -963,6 +963,7 @@ export async function runAnalysis() {
         mlbScheduleGame,
         eloOverride,
         commenceTime: game.commence_time,
+        gameId: game.id,
       }
     );
     const featureSnapshotId = saveFeatureSnapshot(analysisRunId, game, analysis);

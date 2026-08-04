@@ -286,6 +286,8 @@ export async function analyzeMatchup(league, homeTeam, awayTeam, bookmakers, opt
         const kboP = await resolveKboPitchersForGame(homeTeam, awayTeam, commenceTime, {
           dateYmd: options.kboDateYmd,
           scheduleRows: options.kboScheduleRows,
+          gameId: options.gameId || null,
+          persistSnapshot: options.persistAsianStarterSnapshot !== false,
         });
         homePitcherStats = kboP.homePitcherStats;
         awayPitcherStats = kboP.awayPitcherStats;

@@ -470,9 +470,12 @@ export async function slateFullRefresh(options = {}) {
   console.log(`[slate] 本次同步範圍: ${[...modules].join(', ') || '(空)'}`);
 
   if (wantBaseball) {
-    // 今日推薦只要初盤；滾球頁傳 sports=['live'] 才附帶滾球分析
+    // 棒球初盤：MLB + 日職 + 韓職（滾球仍由 includeLive 控制）
     const baseball = await runSlateModule('baseball', () =>
-      fullRefresh({ includeLive: wantLive, leagueCodes: ['MLB'] })
+      fullRefresh({
+        includeLive: wantLive,
+        leagueCodes: ['MLB', 'NPB', 'KBO'],
+      })
     );
     if (baseball?.error) result.errors.push({ sport: 'baseball', message: baseball.error });
     result.baseball = baseball;

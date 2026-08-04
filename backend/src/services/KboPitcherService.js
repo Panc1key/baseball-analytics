@@ -268,7 +268,7 @@ export async function resolveKboPitchersForGame(homeTeam, awayTeam, commenceTime
       matched.away?.id != null ? getKboPitcherSeasonStats(matched.away.id) : null,
     ]);
 
-    return {
+    const resolved = {
       homePitcherStats: homeStats,
       awayPitcherStats: awayStats,
       homePitcherName: matched.home?.nameKo || null,
@@ -276,6 +276,39 @@ export async function resolveKboPitchersForGame(homeTeam, awayTeam, commenceTime
       homePitcherId: matched.home?.id ?? null,
       awayPitcherId: matched.away?.id ?? null,
     };
+
+    // 研究用身份快照（不改變正式選邊邏輯）
+    if (options.persistSnapshot && options.gameId && commenceTime) {
+      try {
+        const { recordAsianStarterSnapshot } = await import('./AsianStarterSnapshots.js');
+        const nowIso = new Date().toISOString();
+        const commenceMs = Date.parse(commenceTime);
+        const nowMs = Date.parse(nowIso);
+        if (Number.isFinite(commenceMs) && nowMs < commenceMs) {
+          recordAsianStarterSnapshot({
+            league: 'KBO',
+            gameId: options.gameId,
+            commenceTime,
+            capturedAt: nowIso,
+            source: 'kbo_official_live_resolve',
+            captureKind: 'prematch_live',
+            home: matched.home
+              ? { id: matched.home.id, name: matched.home.nameKo }
+              : null,
+            away: matched.away
+              ? { id: matched.away.id, name: matched.away.nameKo }
+              : null,
+            homeStats,
+            awayStats,
+            statsAsofKind: 'season_page_at_capture',
+          });
+        }
+      } catch (err) {
+        console.warn('[KboPitcher] snapshot persist failed:', err.message);
+      }
+    }
+
+    return resolved;
   } catch (err) {
     console.warn('[KboPitcher] resolve failed:', err.message);
     return empty;

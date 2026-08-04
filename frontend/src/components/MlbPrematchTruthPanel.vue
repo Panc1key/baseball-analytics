@@ -2,21 +2,119 @@
   <section class="truth-panel" v-loading="loading">
     <header class="toolbar">
       <div>
-        <h2 class="panel-title">今日鎖定 B</h2>
+        <h2 class="panel-title">今日鎖定 B 組合包</h2>
         <p class="panel-sub">
-          僅 MLB · 雙方預定先發齊即可 · 可看選邊僅開賽前
+          獨贏主倉 + Hybrid 大小 · 均注 ${{ packageStake }} · 可看選邊僅開賽前
           {{ releaseHoursBefore || 8 }} 小時內放出
         </p>
       </div>
       <el-button size="small" plain :loading="loading" @click="loadTruth">重新載入</el-button>
     </header>
 
+    <p v-if="lockedBPackage?.note" class="package-note">{{ lockedBPackage.note }}</p>
+
     <p v-if="highEvShrinkNote" class="shadow-overlay-note" :class="{ apply: highEvShrinkApply }">
       {{ highEvShrinkNote }}
     </p>
 
+    <div v-if="packageSingles.length" class="picks-block">
+      <div class="block-label">
+        單場合集（獨贏 {{ lockedBPackage?.moneylineCount || 0 }} · 大小 {{ lockedBPackage?.totalsCount || 0 }}）
+      </div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th>市場</th>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">賠率</th>
+            <th class="num">模型</th>
+            <th class="num">EV</th>
+            <th class="num">注碼</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="item in packageSingles"
+            :key="`${item.market}-${item.gameId}-${item.pick}`"
+            :class="{ 'is-top': item.market === 'h2h' && item.rank === 1 }"
+          >
+            <td>{{ item.marketLabel || item.market }}</td>
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.modelProbability) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+            <td class="num">${{ item.stakeUsd || packageStake }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div v-if="starParlayTickets.length || parlaySecondary || starParlayBundle" class="picks-block parlay-block">
+      <div class="block-label">
+        獨贏 Star 串關（建議 ${{ parlayStake }}／注）
+        <span v-if="starParlayBundle?.moneylineLegCount" class="block-meta">
+          · 今日可看獨贏 {{ starParlayBundle.moneylineLegCount }} 場
+        </span>
+      </div>
+      <p v-if="starParlayBundle?.howToBet" class="package-note">{{ starParlayBundle.howToBet }}</p>
+      <p v-else-if="starParlayBundle?.rule" class="hint">{{ starParlayBundle.rule }}</p>
+
+      <div
+        v-for="(ticket, tIdx) in starParlayTickets"
+        :key="ticket.id || `star-${tIdx}`"
+        class="parlay-card star-ticket"
+      >
+        <div class="parlay-title">
+          <span class="ticket-idx">票 {{ tIdx + 1 }}</span>
+          {{ ticket.label }}
+          <span class="ticket-stake">下 ${{ ticket.suggestedStakeUsd || parlayStake }}</span>
+        </div>
+        <p class="parlay-line">
+          <template v-for="(leg, idx) in ticket.legs" :key="`${ticket.id}-${idx}`">
+            <span v-if="idx"> × </span>
+            <strong>R{{ leg.rank }}</strong>
+            {{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
+            <span class="leg-matchup">{{ leg.matchup }}</span>
+          </template>
+        </p>
+        <p class="parlay-combined">
+          合計約 {{ formatOdds(ticket.combinedOdds) }}
+          · {{ ticket.legCount }} 串 1
+        </p>
+      </div>
+
+      <p v-if="!starParlayTickets.length" class="hint">
+        {{ starParlayBundle?.reason || '可看獨贏不足 2，暫無 Star 串關' }}
+      </p>
+      <p class="hint forbid-note">禁止：四場獨贏長串（四串）。日 TopK 維持 3，不因串關升 4。</p>
+
+      <div v-if="parlaySecondary?.available" class="parlay-card satellite-ticket">
+        <div class="parlay-title">
+          衛星混串（可選・分帳）：{{ parlaySecondary.label }}
+          <span class="ticket-stake">下 ${{ parlaySecondary.suggestedStakeUsd || parlayStake }}</span>
+        </div>
+        <p class="parlay-line">
+          <template v-for="(leg, idx) in parlaySecondary.legs" :key="`sat-${idx}`">
+            <span v-if="idx"> × </span>
+            {{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
+            <span class="leg-matchup">{{ leg.matchup }}</span>
+          </template>
+          · 合計約 {{ formatOdds(parlaySecondary.combinedOdds) }}
+          <span v-if="parlaySecondary.sameGame"> · 同場</span>
+        </p>
+        <p class="hint">{{ parlaySecondary.rule }} · 不佔獨贏主倉</p>
+      </div>
+      <p v-else-if="parlaySecondary" class="hint">衛星混串：{{ parlaySecondary.reason }}</p>
+
+      <p v-if="lockedBPackage?.parlays?.note" class="hint">{{ lockedBPackage.parlays.note }}</p>
+    </div>
+
     <div v-if="dailyTop.length" class="picks-block">
-      <div class="block-label">可看選邊</div>
+      <div class="block-label">可看選邊（獨贏明細）</div>
       <table class="picks-table">
         <thead>
           <tr>
@@ -45,20 +143,6 @@
           </tr>
         </tbody>
       </table>
-
-      <div v-if="sameDayParlay?.available" class="parlay-hint">
-        <div class="block-label">同日 2 串（衛星）</div>
-        <p class="parlay-line">
-          {{ sameDayParlay.legs[0].pick }}（{{ formatOdds(sameDayParlay.legs[0].oddsDecimal) }}）
-          ×
-          {{ sameDayParlay.legs[1].pick }}（{{ formatOdds(sameDayParlay.legs[1].oddsDecimal) }}）
-          · 合計約 {{ formatOdds(sameDayParlay.combinedOdds) }}
-        </p>
-        <p class="hint">只取可看選邊且賠率 ≤ 2.10；小注即可，勿當主帳。</p>
-      </div>
-      <p v-else class="hint">
-        串關：{{ sameDayParlay?.reason || '同日選邊中賠率 ≤ 2.10 優先。' }}
-      </p>
     </div>
     <div v-else-if="!loading" class="picks-block empty-picks">
       <div class="block-label">可看選邊</div>
@@ -103,8 +187,103 @@
       </p>
     </div>
 
-    <div v-if="totalsSatellitePicks.length" class="picks-block totals-sat">
-      <div class="block-label">大小分衛星（研究）</div>
+    <div v-if="totalsHybridPicks.length" class="picks-block totals-sat primary-sat">
+      <div class="block-label">
+        大小分 Hybrid 衛星（主打 · 均注 ${{ totalsSatStake }}）
+      </div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">盤口</th>
+            <th class="num">賠率</th>
+            <th class="num">EV</th>
+            <th>路徑</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in totalsHybridPicks" :key="`tot-h-${item.gameId}`">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ item.line ?? '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+            <td class="path">{{ hybridPathLabel(item) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">
+        與鎖定 B 分離；均注 ${{ totalsSatStake }}。Under=raw；Over=投手公園去偏。
+        {{ totalsSatelliteHybrid?.note || '' }}
+      </p>
+    </div>
+
+    <div
+      v-if="!loading && !totalsHybridPicks.length && (dailyTop.length || (todayFunnel?.upcoming || 0) > 0)"
+      class="picks-block totals-sat"
+    >
+      <div class="block-label">大小分 Hybrid 衛星</div>
+      <p class="hint">今日無過閘可下 Hybrid（時窗內 + 資料齊）。不動獨贏規則。</p>
+      <p v-if="totalsHybridHeld.length" class="hint">
+        已過大小閘但未放出／缺先發 {{ totalsHybridHeld.length }} 場
+        （例：{{ totalsHybridHeld[0].matchup }}
+        <template v-if="totalsHybridHeld[0].holdReason === 'data_incomplete_pitchers'"> · 缺先發</template>
+        <template v-else> · 約 {{ formatHoursUntil(totalsHybridHeld[0].hoursUntilCommence) }} 後進時窗</template>）。
+      </p>
+      <p v-if="totalsHybridBlockedNotable.length" class="hint">
+        強訊號被硬閘：{{ totalsHybridBlockedNotable[0].matchup }}
+        傾向{{ totalsHybridBlockedNotable[0].side === 'under' ? '小' : '大' }}
+        {{ totalsHybridBlockedNotable[0].line }}
+        · {{ (totalsHybridBlockedNotable[0].reasons || []).join('、') || '未過閘' }}。
+        <template v-if="(totalsHybridBlockedNotable[0].reasons || []).includes('total_line_above_maximum')">
+          （衛星盤口上限 {{ totalsHybridMaxLine }}，洛磯等高盤會擋）
+        </template>
+      </p>
+    </div>
+
+    <div v-if="totalsHybridHeld.length && totalsHybridPicks.length" class="picks-block held-block">
+      <div class="block-label">大小分・已過閘未放出（{{ totalsHybridHeld.length }}）</div>
+      <p class="hint">
+        <template v-for="(item, idx) in totalsHybridHeld.slice(0, 4)" :key="item.gameId">
+          <span v-if="idx">；</span>{{ item.matchup }}
+          <template v-if="item.holdReason === 'data_incomplete_pitchers'">（缺先發）</template>
+          <template v-else>（約 {{ formatHoursUntil(item.hoursUntilCommence) }}）</template>
+        </template>
+      </p>
+    </div>
+
+    <div v-if="totalsUnderOnlyPicks.length" class="picks-block totals-sat research-sat">
+      <div class="block-label">大小分 Under 對照</div>
+      <table class="picks-table">
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th>對陣</th>
+            <th>選邊</th>
+            <th class="num">盤口</th>
+            <th class="num">賠率</th>
+            <th class="num">EV</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in totalsUnderOnlyPicks" :key="`tot-u-${item.gameId}`">
+            <td class="col-rank">{{ item.rank }}</td>
+            <td class="matchup">{{ item.matchup }}</td>
+            <td class="pick">{{ item.pick || '—' }}</td>
+            <td class="num">{{ item.line ?? '—' }}</td>
+            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+            <td class="num">{{ percent(item.expectedValue) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">{{ totalsSatelliteUnderOnly?.note || '' }}</p>
+    </div>
+
+    <div v-if="totalsSatellitePicks.length" class="picks-block totals-sat research-sat">
+      <div class="block-label">大小分 both（對照研究）</div>
       <table class="picks-table">
         <thead>
           <tr>
@@ -133,45 +312,7 @@
           </tr>
         </tbody>
       </table>
-      <p class="hint">
-        與鎖定 B 獨贏分離；僅影子觀察，勿當主帳、不進紙上帳本。
-        {{ totalsSatellite?.note || '' }}
-      </p>
-    </div>
-
-    <div v-if="totalsUnderOnlyPicks.length" class="picks-block totals-sat">
-      <div class="block-label">大小分 Under 平行影子</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">盤口</th>
-            <th class="num">賠率</th>
-            <th class="num">EV</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in totalsUnderOnlyPicks" :key="`tot-u-${item.gameId}`">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ item.line ?? '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">{{ totalsSatelliteUnderOnly?.note || '01b 內只取小；注少、平行觀察。過關後可單獨升紙上帳本，不混鎖定 B。' }}</p>
-    </div>
-
-    <div
-      v-if="!loading && !totalsSatellitePicks.length && (dailyTop.length || (todayFunnel?.upcoming || 0) > 0)"
-      class="picks-block totals-sat"
-    >
-      <div class="block-label">大小分衛星（研究）</div>
-      <p class="hint">今日無過閘大小分（|μ−線|／EV／相對市場 edge）。不動獨贏規則。</p>
+      <p class="hint">寬線對照，非預設實投。{{ totalsSatellite?.note || '' }}</p>
     </div>
 
     <div v-if="!loading && !dailyTop.length && dataLag?.stale" class="empty-picks stale">
@@ -319,6 +460,51 @@ const totalsSatellite = computed(() => truth.value?.totalsSatellite || null);
 const totalsSatellitePicks = computed(() => totalsSatellite.value?.picks || []);
 const totalsSatelliteUnderOnly = computed(() => truth.value?.totalsSatelliteUnderOnly || null);
 const totalsUnderOnlyPicks = computed(() => totalsSatelliteUnderOnly.value?.picks || []);
+const totalsSatelliteHybrid = computed(() => truth.value?.totalsSatelliteHybrid || null);
+const totalsHybridPicks = computed(() => totalsSatelliteHybrid.value?.picks || []);
+const totalsHybridHeld = computed(() => totalsSatelliteHybrid.value?.held || []);
+const totalsHybridBlockedNotable = computed(
+  () => totalsSatelliteHybrid.value?.blockedNotable || []
+);
+const totalsHybridMaxLine = computed(
+  () => Number(totalsSatelliteHybrid.value?.maxTotalLine) || 10
+);
+const totalsSatStake = computed(
+  () =>
+    Number(totalsSatelliteHybrid.value?.suggestedStakeUsd) ||
+    Number(totalsSatelliteUnderOnly.value?.suggestedStakeUsd) ||
+    50
+);
+const lockedBPackage = computed(() => truth.value?.lockedBPackage || null);
+const packageSingles = computed(() => lockedBPackage.value?.singles || []);
+const packageStake = computed(
+  () => Number(lockedBPackage.value?.flatStakeUsd) || totalsSatStake.value || 50
+);
+const parlayStake = computed(
+  () =>
+    Number(lockedBPackage.value?.parlayStakeUsd) ||
+    Number(starParlayBundle.value?.suggestedStakeUsd) ||
+    Math.round(packageStake.value / 2) ||
+    25
+);
+const starParlayBundle = computed(
+  () => lockedBPackage.value?.parlays?.star || null
+);
+const starParlayTickets = computed(
+  () =>
+    lockedBPackage.value?.parlays?.tickets ||
+    lockedBPackage.value?.parlays?.star?.tickets ||
+    []
+);
+const parlayPrimary = computed(() => lockedBPackage.value?.parlays?.primary || sameDayParlay.value);
+const parlaySecondary = computed(() => lockedBPackage.value?.parlays?.secondary || null);
+
+function hybridPathLabel(item) {
+  if (item?.hybridPath === 'raw_under') return 'Under·raw';
+  if (item?.hybridPath === 'pitcher_debiased_over') return 'Over·投手去偏';
+  if (item?.hybridPath === 'raw_over') return 'Over·raw';
+  return item?.side === 'under' ? 'Under' : item?.side === 'over' ? 'Over' : '—';
+}
 const todayFunnel = computed(() => truth.value?.todayFunnel || null);
 const highEvShrink = computed(() => truth.value?.highEvShrinkShadow || null);
 const highEvShrinkApply = computed(() => Boolean(highEvShrink.value?.appliesToVisiblePicks));
@@ -729,6 +915,85 @@ defineExpose({ loadTruth });
   font-size: 11px;
   color: #777;
   border-top: 1px solid #eee;
+}
+
+.package-note {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #444;
+  background: #f7f7f5;
+  border: 1px solid #e8e8e4;
+}
+
+.parlay-block .parlay-card {
+  padding: 10px 12px;
+  border-top: 1px solid #eee;
+}
+
+.parlay-block .star-ticket {
+  background: #fafaf8;
+  margin-bottom: 6px;
+  border: 1px solid #ebebe6;
+  border-radius: 4px;
+  border-top: 1px solid #ebebe6;
+}
+
+.parlay-block .satellite-ticket {
+  margin-top: 10px;
+  background: #f5f7fa;
+  border: 1px dashed #c5cdd8;
+  border-radius: 4px;
+}
+
+.parlay-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ticket-idx {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  background: #2c3e50;
+  color: #fff;
+  border-radius: 3px;
+}
+
+.ticket-stake {
+  margin-left: auto;
+  font-size: 12px;
+  color: #0b6e4f;
+  font-weight: 700;
+}
+
+.leg-matchup {
+  font-size: 11px;
+  color: #888;
+  font-weight: 400;
+}
+
+.parlay-combined {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.forbid-note {
+  color: #8a4b08 !important;
+}
+
+.block-meta {
+  font-weight: 400;
+  color: #777;
+  font-size: 12px;
 }
 
 .parlay-hint {

@@ -9,19 +9,32 @@ const YAHOO_NPB_SCHEDULE = 'https://baseball.yahoo.co.jp/npb/schedule/';
 /** 日文簡稱 → Odds API 英文隊名（Yahoo / baseball-data 共用） */
 export const NPB_JA_TO_EN = {
   巨人: 'Yomiuri Giants',
+  読売: 'Yomiuri Giants',
+  ジャイアンツ: 'Yomiuri Giants',
   ヤクルト: 'Tokyo Yakult Swallows',
+  スワローズ: 'Tokyo Yakult Swallows',
   阪神: 'Hanshin Tigers',
+  タイガース: 'Hanshin Tigers',
   中日: 'Chunichi Dragons',
+  ドラゴンズ: 'Chunichi Dragons',
   広島: 'Hiroshima Toyo Carp',
+  カープ: 'Hiroshima Toyo Carp',
   DeNA: 'Yokohama DeNA BayStars',
   横浜: 'Yokohama DeNA BayStars',
+  ベイスターズ: 'Yokohama DeNA BayStars',
   西武: 'Saitama Seibu Lions',
+  ライオンズ: 'Saitama Seibu Lions',
   ロッテ: 'Chiba Lotte Marines',
+  マリーンズ: 'Chiba Lotte Marines',
   ソフトバンク: 'Fukuoka SoftBank Hawks',
+  ホークス: 'Fukuoka SoftBank Hawks',
   日本ハム: 'Hokkaido Nippon-Ham Fighters',
   日ハム: 'Hokkaido Nippon-Ham Fighters',
+  ファイターズ: 'Hokkaido Nippon-Ham Fighters',
   オリックス: 'Orix Buffaloes',
+  バファローズ: 'Orix Buffaloes',
   楽天: 'Tohoku Rakuten Golden Eagles',
+  イーグルス: 'Tohoku Rakuten Golden Eagles',
 };
 
 function stripTags(s) {

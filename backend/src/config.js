@@ -129,6 +129,45 @@ export const config = {
   )
     .trim()
     .toLowerCase(),
+  /**
+   * 大小分衛星主打：hybrid（預設）| under | both | off
+   * 不混鎖定 B TopK；不寫入獨贏紙上帳本。
+   */
+  mlbTotalsSatellitePrimary: String(
+    process.env.MLB_TOTALS_SATELLITE_PRIMARY || 'hybrid'
+  )
+    .trim()
+    .toLowerCase(),
+  /** 大小分衛星均注（美元）；預設 50（與鎖定 B 單場一致） */
+  mlbTotalsSatelliteStakeUsd: Math.max(
+    1,
+    parseFloat(process.env.MLB_TOTALS_SATELLITE_STAKE_USD || '50')
+  ),
+  /**
+   * Star 獨贏串關建議注碼（美元）。預設單場衛星注的一半（50→25）。
+   * 對齊 auditMlbStarParlayDiscipline。
+   */
+  mlbStarParlayStakeUsd: Math.max(
+    1,
+    parseFloat(
+      process.env.MLB_STAR_PARLAY_STAKE_USD ||
+        String(Math.round(parseFloat(process.env.MLB_TOTALS_SATELLITE_STAKE_USD || '50') / 2) || 25)
+    )
+  ),
+  /**
+   * Hybrid Over·raw |μ−線| 上限（鎖定組合包 v1.1 預設 1.25）。
+   * 設 off / none / 空字串 → 關閉上限（回滾至 v1 無 cap）。
+   */
+  mlbTotalsRawOverMaxAbsGap: (() => {
+    const raw = String(
+      process.env.MLB_TOTALS_RAW_OVER_MAX_ABS_GAP ?? '1.25'
+    )
+      .trim()
+      .toLowerCase();
+    if (!raw || raw === 'off' || raw === 'none' || raw === 'false') return null;
+    const n = parseFloat(raw);
+    return Number.isFinite(n) && n > 0 ? n : 1.25;
+  })(),
   mlbPaperRuleProfile: process.env.MLB_PAPER_RULE_PROFILE || 'frozen_v1',
   /**
    * 鎖定 B「可看選邊」放出時窗：僅開賽前 N 小時內才對 UI／紙上晉升放出。
