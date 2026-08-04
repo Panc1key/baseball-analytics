@@ -4,7 +4,7 @@
       <div>
         <h2 class="panel-title">今日鎖定 B 組合包</h2>
         <p class="panel-sub">
-          獨贏主倉 + Hybrid 大小 · 均注 ${{ packageStake }} · 可看選邊僅開賽前
+          獨贏主倉 + Hybrid 大小 · 單場 ${{ packageStake }} · 串關 ${{ parlayStake }}（一半）· 可看選邊僅開賽前
           {{ releaseHoursBefore || 8 }} 小時內放出
         </p>
       </div>
@@ -12,6 +12,7 @@
     </header>
 
     <p v-if="lockedBPackage?.note" class="package-note">{{ lockedBPackage.note }}</p>
+    <p v-if="stakeGuideText" class="package-note stake-guide">{{ stakeGuideText }}</p>
 
     <p v-if="highEvShrinkNote" class="shadow-overlay-note" :class="{ apply: highEvShrinkApply }">
       {{ highEvShrinkNote }}
@@ -55,12 +56,15 @@
 
     <div v-if="starParlayTickets.length || parlaySecondary || starParlayBundle" class="picks-block parlay-block">
       <div class="block-label">
-        獨贏 Star 串關（建議 ${{ parlayStake }}／注）
+        獨贏 Star 串關（每票 ${{ parlayStake }} · 單場的一半）
         <span v-if="starParlayBundle?.moneylineLegCount" class="block-meta">
           · 今日可看獨贏 {{ starParlayBundle.moneylineLegCount }} 場
         </span>
       </div>
-      <p v-if="starParlayBundle?.howToBet" class="package-note">{{ starParlayBundle.howToBet }}</p>
+      <p class="package-note stake-guide">
+        注碼：單場各 ${{ packageStake }}；下方每張串關 ${{ parlayStake }}（勿與單場同額）
+      </p>
+      <p v-if="starParlayBundle?.howToBet" class="hint">{{ starParlayBundle.howToBet }}</p>
       <p v-else-if="starParlayBundle?.rule" class="hint">{{ starParlayBundle.rule }}</p>
 
       <div
@@ -498,6 +502,11 @@ const starParlayTickets = computed(
 );
 const parlayPrimary = computed(() => lockedBPackage.value?.parlays?.primary || sameDayParlay.value);
 const parlaySecondary = computed(() => lockedBPackage.value?.parlays?.secondary || null);
+const stakeGuideText = computed(() => {
+  const g = lockedBPackage.value?.stakeGuide;
+  if (g?.text) return `注碼紀律：${g.text}（串關 = 單場 ÷ 2）`;
+  return `注碼紀律：單場 $${packageStake.value} → 串關 $${parlayStake.value}`;
+});
 
 function hybridPathLabel(item) {
   if (item?.hybridPath === 'raw_under') return 'Under·raw';
@@ -924,6 +933,13 @@ defineExpose({ loadTruth });
   color: #444;
   background: #f7f7f5;
   border: 1px solid #e8e8e4;
+}
+
+.package-note.stake-guide {
+  background: #eef6f1;
+  border-color: #c5e0d0;
+  color: #0b6e4f;
+  font-weight: 600;
 }
 
 .parlay-block .parlay-card {

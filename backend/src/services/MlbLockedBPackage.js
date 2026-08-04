@@ -33,8 +33,9 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     evidenceUsd50: MLB_TOTALS_SATELLITE_HYBRID_SPEC.paperEvidenceUsd50?.merged || null,
   }),
   parlays: Object.freeze({
-    /** 單場 $50 時串關建議 $25（對齊 star-parlay-discipline 審計） */
+    /** 單場 $50 → 串關固定建議 $25（1/2；對齊 star-parlay-discipline） */
     stakeUsd: 25,
+    stakeRatioOfSingle: 0.5,
     star: Object.freeze({
       id: 'star_ml_parlay_discipline',
       label: '獨贏 Star 串關包',
@@ -43,6 +44,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
       rule3: '三推：R1×R2、R1×R3、R1×R2×R3',
       rule4: '四推：R1×R2、R1×R3、R1×R2×R3、R1×R4；禁止四串',
       rule2: '兩推：僅 R1×R2',
+      stakeGuide: '單場均注 $50 時，每張串關票下 $25（勿與單場同額）',
     }),
     /** 衛星混串（獨贏×大小）；獨立於獨贏主串，可選 */
     secondary: Object.freeze({
@@ -61,7 +63,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     '串關為組合包提示，非自動建單',
   ]),
   note:
-    '單場均注 $50（獨贏 + Hybrid 大小分欄）。串關看下方 Star 票單（建議 $25／注）；日 TopK 維持 3。',
+    '注碼紀律：單場均注 $50（獨贏／Hybrid 大小）；串關每票 $25（單場一半）。日 TopK 維持 3。',
 });
 
 function mapMlLeg(leg) {
@@ -99,6 +101,7 @@ function buildTicket(id, label, legs, stakeUsd) {
 export function buildStarMoneylineParlayBundle({
   moneylinePicks = [],
   stakeUsd = MLB_LOCKED_B_PACKAGE.parlays.stakeUsd,
+  singleStakeUsd = MLB_LOCKED_B_PACKAGE.flatStakeUsd,
 } = {}) {
   const spec = MLB_LOCKED_B_PACKAGE.parlays.star;
   const ranked = [...(moneylinePicks || [])]
@@ -131,6 +134,8 @@ export function buildStarMoneylineParlayBundle({
     id: spec.id,
     label: spec.label,
     rule,
+    stakeGuide: spec.stakeGuide,
+    singleStakeUsd,
     moneylineLegCount: n,
     suggestedStakeUsd: stakeUsd,
     forbidFourLeg: true,
@@ -138,7 +143,7 @@ export function buildStarMoneylineParlayBundle({
     reason: n < 2 ? rule : undefined,
     howToBet:
       n >= 2
-        ? `先下 ${n} 場獨贏單場；再按下述 ${tickets.length} 張串關票各下 $${stakeUsd}`
+        ? `注碼：單場各 $${singleStakeUsd}；下列 ${tickets.length} 張串關各 $${stakeUsd}（單場一半，勿同額）。先下 ${n} 場獨贏，再照票串。`
         : rule,
   };
 }
@@ -237,6 +242,7 @@ export function buildLockedBPackageSnapshot({
   const star = buildStarMoneylineParlayBundle({
     moneylinePicks,
     stakeUsd: parlayStakeUsd,
+    singleStakeUsd: stakeUsd,
   });
 
   const r1Under = buildR1xHybridUnderParlay({
@@ -319,8 +325,14 @@ export function buildLockedBPackageSnapshot({
       recommendedOrder: ['star', 'secondary'],
       note:
         star.available
-          ? `${star.howToBet}。禁止四串。大小混串見「衛星」票（可選、分帳）。`
+          ? `注碼紀律：單場 $${stakeUsd}／串關 $${parlayStakeUsd}（一半）。${star.howToBet} 禁止四串。大小混串見衛星票（可選、同用串關注碼）。`
           : star.reason || '今日串關暫無',
+    },
+    stakeGuide: {
+      singleUsd: stakeUsd,
+      parlayUsd: parlayStakeUsd,
+      ratio: 'parlay = single / 2',
+      text: `單場 $${stakeUsd} → 串關 $${parlayStakeUsd}`,
     },
     spec: MLB_LOCKED_B_PACKAGE,
   };
