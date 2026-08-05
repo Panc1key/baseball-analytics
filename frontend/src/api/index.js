@@ -36,6 +36,11 @@ export async function getMlbPrematchTruth(params = {}) {
   return data;
 }
 
+export async function getNpbPrematch(params = {}) {
+  const { data } = await api.get('/npb/prematch', { params });
+  return data;
+}
+
 export async function getMlbPaperLedger() {
   const { data } = await api.get('/mlb/paper-ledger');
   return data;

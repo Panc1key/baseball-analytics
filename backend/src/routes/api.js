@@ -29,6 +29,7 @@ import {
   runMlbPrematchTruthPipeline,
 } from '../services/MlbPrematchTruthPipeline.js';
 import { getMlbPaperLedgerSummary } from '../services/MlbPaperLedger.js';
+import { getNpbPrematchSlate } from '../services/NpbPrematchRecommend.js';
 import { runMlbTruthPitBacktest } from '../services/MlbTruthPitBacktest.js';
 import { getMlbPrematchSchedulerStatus } from '../services/MlbPrematchScheduler.js';
 import { runMlbDailyTopWalkForward } from '../services/MlbResearchRanker.js';
@@ -186,6 +187,28 @@ router.get('/mlb/prematch-truth', (req, res) => {
       to: req.query.to || undefined,
     }),
   });
+});
+
+/**
+ * NPB 正式日推（ridge 條件 μ→league + mid gate）
+ * 與 MLB 鎖定 B／舊泊松 slate 分離；不寫 mlb_paper_*。
+ */
+router.get('/npb/prematch', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: getNpbPrematchSlate({
+        from: req.query.from || undefined,
+      }),
+      meta: {
+        mode: 'formal_recommend',
+        league: 'NPB',
+        note: 'NPB 正式獨贏日推；大小／KBO 不在此板。',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 router.get('/mlb/paper-ledger', (_req, res) => {

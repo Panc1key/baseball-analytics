@@ -29,7 +29,7 @@
 
     <el-radio-group v-model="mainTab" size="small" class="main-tabs">
       <el-radio-button label="mlb">MLB 鎖定 B</el-radio-button>
-      <el-radio-button label="asian">日職／韓職</el-radio-button>
+      <el-radio-button label="asian">NPB 正式</el-radio-button>
     </el-radio-group>
 
     <MlbPrematchTruthPanel v-show="mainTab === 'mlb'" ref="mlbPanelRef" />
@@ -54,13 +54,13 @@ const refreshing = ref(false);
 
 const subtitle = computed(() =>
   mainTab.value === 'asian'
-    ? '日職／韓職初盤 · 與 MLB 分開 · 香港時間'
+    ? 'NPB 正式獨贏 · 與 MLB 同版下注板 · 香港時間'
     : 'MLB 鎖定 B · 香港時間'
 );
 
 const refreshButtonLabel = computed(() => {
   if (refreshing.value) return '同步中…';
-  return mainTab.value === 'asian' ? '同步日職／韓職' : '同步今日 MLB';
+  return mainTab.value === 'asian' ? '同步今日 NPB' : '同步今日 MLB';
 });
 
 const hasApiKey = ref(false);
@@ -123,7 +123,7 @@ async function handleRefresh() {
     await refreshSlate({ sports: ['baseball'] });
     await loadViews();
     ElMessage.success(
-      mainTab.value === 'asian' ? '已同步棒球（含日職／韓職）' : '已同步今日 MLB'
+      mainTab.value === 'asian' ? '已同步棒球（含 NPB）' : '已同步今日 MLB'
     );
   } catch (err) {
     ElMessage.error(err.response?.data?.error || err.message || '同步失敗');

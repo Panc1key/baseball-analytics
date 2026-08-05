@@ -61,6 +61,54 @@ export function poissonHomeWinProb(homeMu, awayMu, maxRuns = 18) {
   };
 }
 
+/**
+ * 獨立泊松：總分 ~ Poisson(μh+μa)
+ * 對 totals 盤：整數線 push；.5 線無 push
+ */
+export function poissonTotalOverUnderProb(homeMu, awayMu, line, maxRuns = 28) {
+  const lambda = Math.max(1, Number(homeMu) + Number(awayMu) || 8);
+  const L = Number(line);
+  if (!Number.isFinite(L)) {
+    return { overProb: 0.5, underProb: 0.5, pushProb: 0, lambda, line: L };
+  }
+  const probs = [];
+  let s = 0;
+  for (let i = 0; i <= maxRuns; i += 1) {
+    const p = Math.exp(-lambda) * lambda ** i / factorial(i);
+    probs[i] = p;
+    s += p;
+  }
+  for (let i = 0; i <= maxRuns; i += 1) probs[i] /= s || 1;
+
+  let pOver = 0;
+  let pUnder = 0;
+  let pPush = 0;
+  const isHalf = Math.abs(L - Math.round(L)) > 1e-6;
+  for (let i = 0; i <= maxRuns; i += 1) {
+    if (isHalf) {
+      if (i > L) pOver += probs[i];
+      else pUnder += probs[i];
+    } else {
+      if (i > L) pOver += probs[i];
+      else if (i < L) pUnder += probs[i];
+      else pPush += probs[i];
+    }
+  }
+  // 無 push 盤：整數線平局機率對半分（部分亞盤如此；研究用）
+  if (!isHalf && pPush > 0) {
+    pOver += pPush / 2;
+    pUnder += pPush / 2;
+  }
+  return {
+    overProb: pOver,
+    underProb: pUnder,
+    pushProb: isHalf ? 0 : pPush,
+    lambda,
+    line: L,
+    isHalf,
+  };
+}
+
 const factCache = [1];
 function factorial(n) {
   while (factCache.length <= n) {

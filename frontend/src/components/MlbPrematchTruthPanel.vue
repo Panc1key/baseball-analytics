@@ -2,448 +2,257 @@
   <section class="truth-panel" v-loading="loading">
     <header class="toolbar">
       <div>
-        <h2 class="panel-title">今日鎖定 B 組合包</h2>
+        <h2 class="panel-title">今日鎖定 B · 下注板</h2>
         <p class="panel-sub">
-          獨贏主倉 + Hybrid 大小 · 單場 ${{ packageStake }} · 串關 ${{ parlayStake }}（一半）· 可看選邊僅開賽前
-          {{ releaseHoursBefore || 8 }} 小時內放出
+          單場 ${{ packageStake }} · 串關 ${{ parlayStake }} · 開賽前 {{ releaseHoursBefore || 8 }}h 才顯示獨贏選邊
         </p>
       </div>
       <el-button size="small" plain :loading="loading" @click="loadTruth">重新載入</el-button>
     </header>
 
-    <p v-if="lockedBPackage?.note" class="package-note">{{ lockedBPackage.note }}</p>
-    <p v-if="stakeGuideText" class="package-note stake-guide">{{ stakeGuideText }}</p>
+    <p class="schedule-note">港時查看：今晚 <strong>20:00–23:00</strong> · 只下「現在可下」（開賽前 {{ releaseHoursBefore || 8 }}h）</p>
 
-    <p v-if="highEvShrinkNote" class="shadow-overlay-note" :class="{ apply: highEvShrinkApply }">
+    <div class="action-board">
+      <div class="action-head">
+        <span class="action-badge">現在可下</span>
+        <span class="action-summary">
+          獨贏 {{ dailyTop.length }} · 大小 {{ totalsHybridPicks.length }} · 串關 {{ starParlayTickets.length }}
+        </span>
+      </div>
+
+      <div v-if="!loading && !hasActionableBets" class="action-empty">
+        <p class="empty-title">此刻沒有可下主倉</p>
+        <p class="empty-body">
+          <template v-if="heldUntilRelease.length">
+            已有 {{ heldUntilRelease.length }} 場獨贏過閘，約 {{ soonestHeldHours }} 後放出選邊（見「稍後放出」）。
+          </template>
+          <template v-else>
+            今日多數未過鎖定 B（常見 EV／賠率／分差）。不是壞掉。
+          </template>
+        </p>
+      </div>
+
+      <div v-if="dailyTop.length" class="picks-block action-block">
+        <div class="block-label">獨贏主倉 · 各 ${{ packageStake }}</div>
+        <table class="picks-table">
+          <thead>
+            <tr>
+              <th class="col-rank">#</th>
+              <th>對陣</th>
+              <th>選邊</th>
+              <th class="num">賠率</th>
+              <th class="num">EV</th>
+              <th class="num">注碼</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in dailyTop" :key="item.gameId" :class="{ 'is-top': item.rank === 1 }">
+              <td class="col-rank">{{ item.rank }}</td>
+              <td class="matchup">{{ item.matchup }}</td>
+              <td class="pick">{{ item.pick || '—' }}</td>
+              <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+              <td class="num">{{ percent(item.expectedValue) }}</td>
+              <td class="num stake-cell">${{ packageStake }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-if="totalsHybridPicks.length" class="picks-block action-block">
+        <div class="block-label">大小 Hybrid · 各 ${{ totalsSatStake }}（分帳）</div>
+        <table class="picks-table">
+          <thead>
+            <tr>
+              <th class="col-rank">#</th>
+              <th>對陣</th>
+              <th>選邊</th>
+              <th class="num">盤口</th>
+              <th class="num">賠率</th>
+              <th class="num">EV</th>
+              <th class="num">注碼</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in totalsHybridPicks" :key="`tot-h-${item.gameId}`">
+              <td class="col-rank">{{ item.rank }}</td>
+              <td class="matchup">{{ item.matchup }}</td>
+              <td class="pick">{{ item.pick || '—' }}</td>
+              <td class="num">{{ item.line ?? '—' }}</td>
+              <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+              <td class="num">{{ percent(item.expectedValue) }}</td>
+              <td class="num stake-cell">${{ totalsSatStake }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-if="starParlayTickets.length" class="picks-block action-block parlay-block">
+        <div class="block-label">Star 串關 · 每票 ${{ parlayStake }}</div>
+        <div
+          v-for="(ticket, tIdx) in starParlayTickets"
+          :key="ticket.id || `star-${tIdx}`"
+          class="parlay-card star-ticket"
+        >
+          <div class="parlay-title">
+            <span class="ticket-idx">票 {{ tIdx + 1 }}</span>
+            {{ ticket.label }}
+            <span class="ticket-stake">下 ${{ ticket.suggestedStakeUsd || parlayStake }}</span>
+          </div>
+          <p class="parlay-line">
+            <template v-for="(leg, idx) in ticket.legs" :key="`${ticket.id}-${idx}`">
+              <span v-if="idx"> × </span>
+              <strong>R{{ leg.rank }}</strong>
+              {{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
+              <span class="leg-matchup">{{ leg.matchup }}</span>
+            </template>
+          </p>
+          <p class="parlay-combined">合計約 {{ formatOdds(ticket.combinedOdds) }}</p>
+        </div>
+      </div>
+
+      <div v-if="parlaySecondary?.available" class="picks-block action-block">
+        <div class="block-label">衛星混串（可選）· ${{ parlaySecondary.suggestedStakeUsd || parlayStake }}</div>
+        <div class="parlay-card satellite-ticket">
+          <p class="parlay-line">
+            <template v-for="(leg, idx) in parlaySecondary.legs" :key="`sat-${idx}`">
+              <span v-if="idx"> × </span>{{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
+            </template>
+            · 合計約 {{ formatOdds(parlaySecondary.combinedOdds) }}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="heldUntilRelease.length || totalsHybridHeld.length" class="picks-block held-block">
+      <div class="block-label">稍後放出（先別下）</div>
+      <ul class="held-list">
+        <li v-for="item in heldUntilRelease" :key="`held-ml-${item.gameId}`">
+          <span class="held-tag">獨贏</span>
+          {{ item.matchup }}
+          <span class="held-eta">約 {{ formatHoursUntil(item.hoursUntilCommence) }} 後顯示選邊</span>
+        </li>
+        <li v-for="item in totalsHybridHeld.slice(0, 6)" :key="`held-tot-${item.gameId}`">
+          <span class="held-tag tot">大小</span>
+          {{ item.matchup }}
+          <span class="held-eta">
+            <template v-if="item.holdReason === 'data_incomplete_pitchers'">缺先發</template>
+            <template v-else>約 {{ formatHoursUntil(item.hoursUntilCommence) }}</template>
+          </span>
+        </li>
+      </ul>
+    </div>
+
+    <div v-if="!loading && todayFunnel" class="funnel-strip compact">
+      <span>今日 {{ todayFunnel.upcoming }}</span>
+      <span>可看獨贏 {{ todayFunnel.selected }}</span>
+      <span>未放出 {{ todayFunnel.passedGatesHeld || heldUntilRelease.length }}</span>
+      <span>資料未齊 {{ todayFunnel.pendingData }}</span>
+      <span v-if="topFunnelReason">主因 {{ topFunnelReason }}</span>
+    </div>
+
+    <p v-if="highEvShrinkNote" class="shadow-overlay-note quiet" :class="{ apply: highEvShrinkApply }">
       {{ highEvShrinkNote }}
     </p>
 
-    <div v-if="packageSingles.length" class="picks-block">
-      <div class="block-label">
-        單場合集（獨贏 {{ lockedBPackage?.moneylineCount || 0 }} · 大小 {{ lockedBPackage?.totalsCount || 0 }}）
-      </div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th>市場</th>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">賠率</th>
-            <th class="num">模型</th>
-            <th class="num">EV</th>
-            <th class="num">注碼</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="item in packageSingles"
-            :key="`${item.market}-${item.gameId}-${item.pick}`"
-            :class="{ 'is-top': item.market === 'h2h' && item.rank === 1 }"
-          >
-            <td>{{ item.marketLabel || item.market }}</td>
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.modelProbability) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-            <td class="num">${{ item.stakeUsd || packageStake }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <details class="diag-fold">
+      <summary>診斷與對照線（一般下注可忽略）</summary>
 
-    <div v-if="starParlayTickets.length || parlaySecondary || starParlayBundle" class="picks-block parlay-block">
-      <div class="block-label">
-        獨贏 Star 串關（每票 ${{ parlayStake }} · 單場的一半）
-        <span v-if="starParlayBundle?.moneylineLegCount" class="block-meta">
-          · 今日可看獨贏 {{ starParlayBundle.moneylineLegCount }} 場
-        </span>
-      </div>
-      <p class="package-note stake-guide">
-        注碼：單場各 ${{ packageStake }}；下方每張串關 ${{ parlayStake }}（勿與單場同額）
-      </p>
-      <p v-if="starParlayBundle?.howToBet" class="hint">{{ starParlayBundle.howToBet }}</p>
-      <p v-else-if="starParlayBundle?.rule" class="hint">{{ starParlayBundle.rule }}</p>
-
-      <div
-        v-for="(ticket, tIdx) in starParlayTickets"
-        :key="ticket.id || `star-${tIdx}`"
-        class="parlay-card star-ticket"
-      >
-        <div class="parlay-title">
-          <span class="ticket-idx">票 {{ tIdx + 1 }}</span>
-          {{ ticket.label }}
-          <span class="ticket-stake">下 ${{ ticket.suggestedStakeUsd || parlayStake }}</span>
-        </div>
-        <p class="parlay-line">
-          <template v-for="(leg, idx) in ticket.legs" :key="`${ticket.id}-${idx}`">
-            <span v-if="idx"> × </span>
-            <strong>R{{ leg.rank }}</strong>
-            {{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
-            <span class="leg-matchup">{{ leg.matchup }}</span>
-          </template>
-        </p>
-        <p class="parlay-combined">
-          合計約 {{ formatOdds(ticket.combinedOdds) }}
-          · {{ ticket.legCount }} 串 1
-        </p>
+      <div v-if="analyzedExcluded.length" class="picks-block">
+        <div class="block-label">未入選（{{ analyzedExcluded.length }}）</div>
+        <table class="picks-table">
+          <thead>
+            <tr><th>開賽</th><th>對陣</th><th>原因</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="game in analyzedExcluded" :key="`ex-${game.truthSnapshotId}`">
+              <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
+              <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
+              <td class="missing">{{ exclusionReasonText(game) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <p v-if="!starParlayTickets.length" class="hint">
-        {{ starParlayBundle?.reason || '可看獨贏不足 2，暫無 Star 串關' }}
-      </p>
-      <p class="hint forbid-note">禁止：四場獨贏長串（四串）。日 TopK 維持 3，不因串關升 4。</p>
-
-      <div v-if="parlaySecondary?.available" class="parlay-card satellite-ticket">
-        <div class="parlay-title">
-          衛星混串（可選・分帳）：{{ parlaySecondary.label }}
-          <span class="ticket-stake">下 ${{ parlaySecondary.suggestedStakeUsd || parlayStake }}</span>
-        </div>
-        <p class="parlay-line">
-          <template v-for="(leg, idx) in parlaySecondary.legs" :key="`sat-${idx}`">
-            <span v-if="idx"> × </span>
-            {{ leg.pick }}（{{ formatOdds(leg.oddsDecimal) }}）
-            <span class="leg-matchup">{{ leg.matchup }}</span>
-          </template>
-          · 合計約 {{ formatOdds(parlaySecondary.combinedOdds) }}
-          <span v-if="parlaySecondary.sameGame"> · 同場</span>
-        </p>
-        <p class="hint">{{ parlaySecondary.rule }} · 不佔獨贏主倉</p>
+      <div v-if="pendingData.length" class="picks-block blocked">
+        <div class="block-label">資料未齊（{{ pendingData.length }}）</div>
+        <table class="picks-table">
+          <thead>
+            <tr><th>開賽</th><th>對陣</th><th>還缺</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="game in pendingData" :key="`pend-${game.truthSnapshotId}`">
+              <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
+              <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
+              <td class="missing">{{ missingCriticalText(game.dataReadiness?.missingCritical) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <p v-else-if="parlaySecondary" class="hint">衛星混串：{{ parlaySecondary.reason }}</p>
 
-      <p v-if="lockedBPackage?.parlays?.note" class="hint">{{ lockedBPackage.parlays.note }}</p>
-    </div>
-
-    <div v-if="dailyTop.length" class="picks-block">
-      <div class="block-label">可看選邊（獨贏明細）</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">賠率</th>
-            <th class="num">模型</th>
-            <th class="num">市場</th>
-            <th class="num">EV</th>
-            <th class="num">分差</th>
-            <th class="num">資料</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in dailyTop" :key="item.gameId" :class="{ 'is-top': item.rank === 1 }">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.modelProbability) }}</td>
-            <td class="num">{{ percent(item.marketProbability) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-            <td class="num">{{ score(item.expectedRunMargin) }}</td>
-            <td class="num data-ok">{{ item.dataScorePct ?? '—' }}%</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <div v-else-if="!loading" class="picks-block empty-picks">
-      <div class="block-label">可看選邊</div>
-      <p class="hint">
-        現在沒有可下選邊。
-        <template v-if="heldUntilRelease.length">
-          已有 {{ heldUntilRelease.length }} 場過鎖定 B 門檻，開賽前
-          {{ releaseHoursBefore }} 小時才放出（嚴格防過早下注）。
-        </template>
-        <template v-else>
-          今日場次已在；等關鍵資料齊、過門檻且進入放出時窗後會出現選邊。
-        </template>
-      </p>
-    </div>
-
-    <div v-if="heldUntilRelease.length" class="picks-block held-block">
-      <div class="block-label">
-        已過門檻・未放出（{{ heldUntilRelease.length }}）· 開賽前 {{ releaseHoursBefore }}h
+      <div v-if="totalsUnderOnlyPicks.length" class="picks-block research-sat">
+        <div class="block-label">Under 對照（非主打）</div>
+        <table class="picks-table">
+          <thead>
+            <tr><th>對陣</th><th>選邊</th><th class="num">賠率</th><th class="num">EV</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in totalsUnderOnlyPicks" :key="`tot-u-${item.gameId}`">
+              <td class="matchup">{{ item.matchup }}</td>
+              <td class="pick">{{ item.pick || '—' }}</td>
+              <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+              <td class="num">{{ percent(item.expectedValue) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">賠率</th>
-            <th class="num">距開賽</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in heldUntilRelease" :key="`held-${item.gameId}`">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick muted">—</td>
-            <td class="num muted">—</td>
-            <td class="num">約 {{ formatHoursUntil(item.hoursUntilCommence) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">
-        故意不顯示選邊與賠率，避免過早下手。進入時窗後會出現在上方「可看選邊」。
-      </p>
-    </div>
 
-    <div v-if="totalsHybridPicks.length" class="picks-block totals-sat primary-sat">
-      <div class="block-label">
-        大小分 Hybrid 衛星（主打 · 均注 ${{ totalsSatStake }}）
+      <div v-if="totalsSatellitePicks.length" class="picks-block research-sat">
+        <div class="block-label">both 對照（非主打）</div>
+        <table class="picks-table">
+          <thead>
+            <tr><th>對陣</th><th>選邊</th><th class="num">賠率</th><th class="num">EV</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in totalsSatellitePicks" :key="`tot-${item.gameId}`">
+              <td class="matchup">{{ item.matchup }}</td>
+              <td class="pick">{{ item.pick || '—' }}</td>
+              <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
+              <td class="num">{{ percent(item.expectedValue) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">盤口</th>
-            <th class="num">賠率</th>
-            <th class="num">EV</th>
-            <th>路徑</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in totalsHybridPicks" :key="`tot-h-${item.gameId}`">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ item.line ?? '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-            <td class="path">{{ hybridPathLabel(item) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">
-        與鎖定 B 分離；均注 ${{ totalsSatStake }}。Under=raw；Over=投手公園去偏。
-        {{ totalsSatelliteHybrid?.note || '' }}
-      </p>
-    </div>
 
-    <div
-      v-if="!loading && !totalsHybridPicks.length && (dailyTop.length || (todayFunnel?.upcoming || 0) > 0)"
-      class="picks-block totals-sat"
-    >
-      <div class="block-label">大小分 Hybrid 衛星</div>
-      <p class="hint">今日無過閘可下 Hybrid（時窗內 + 資料齊）。不動獨贏規則。</p>
-      <p v-if="totalsHybridHeld.length" class="hint">
-        已過大小閘但未放出／缺先發 {{ totalsHybridHeld.length }} 場
-        （例：{{ totalsHybridHeld[0].matchup }}
-        <template v-if="totalsHybridHeld[0].holdReason === 'data_incomplete_pitchers'"> · 缺先發</template>
-        <template v-else> · 約 {{ formatHoursUntil(totalsHybridHeld[0].hoursUntilCommence) }} 後進時窗</template>）。
-      </p>
-      <p v-if="totalsHybridBlockedNotable.length" class="hint">
-        強訊號被硬閘：{{ totalsHybridBlockedNotable[0].matchup }}
-        傾向{{ totalsHybridBlockedNotable[0].side === 'under' ? '小' : '大' }}
-        {{ totalsHybridBlockedNotable[0].line }}
-        · {{ (totalsHybridBlockedNotable[0].reasons || []).join('、') || '未過閘' }}。
-        <template v-if="(totalsHybridBlockedNotable[0].reasons || []).includes('total_line_above_maximum')">
-          （衛星盤口上限 {{ totalsHybridMaxLine }}，洛磯等高盤會擋）
-        </template>
-      </p>
-    </div>
-
-    <div v-if="totalsHybridHeld.length && totalsHybridPicks.length" class="picks-block held-block">
-      <div class="block-label">大小分・已過閘未放出（{{ totalsHybridHeld.length }}）</div>
-      <p class="hint">
-        <template v-for="(item, idx) in totalsHybridHeld.slice(0, 4)" :key="item.gameId">
-          <span v-if="idx">；</span>{{ item.matchup }}
-          <template v-if="item.holdReason === 'data_incomplete_pitchers'">（缺先發）</template>
-          <template v-else>（約 {{ formatHoursUntil(item.hoursUntilCommence) }}）</template>
-        </template>
-      </p>
-    </div>
-
-    <div v-if="totalsUnderOnlyPicks.length" class="picks-block totals-sat research-sat">
-      <div class="block-label">大小分 Under 對照</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">盤口</th>
-            <th class="num">賠率</th>
-            <th class="num">EV</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in totalsUnderOnlyPicks" :key="`tot-u-${item.gameId}`">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ item.line ?? '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">{{ totalsSatelliteUnderOnly?.note || '' }}</p>
-    </div>
-
-    <div v-if="totalsSatellitePicks.length" class="picks-block totals-sat research-sat">
-      <div class="block-label">大小分 both（對照研究）</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th>對陣</th>
-            <th>選邊</th>
-            <th class="num">盤口</th>
-            <th class="num">賠率</th>
-            <th class="num">模型</th>
-            <th class="num">市場</th>
-            <th class="num">EV</th>
-            <th class="num">|μ−線|</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in totalsSatellitePicks" :key="`tot-${item.gameId}`">
-            <td class="col-rank">{{ item.rank }}</td>
-            <td class="matchup">{{ item.matchup }}</td>
-            <td class="pick">{{ item.pick || '—' }}</td>
-            <td class="num">{{ item.line ?? '—' }}</td>
-            <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
-            <td class="num">{{ percent(item.modelProbability) }}</td>
-            <td class="num">{{ percent(item.marketProbability) }}</td>
-            <td class="num">{{ percent(item.expectedValue) }}</td>
-            <td class="num">{{ score(item.absGap) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">寬線對照，非預設實投。{{ totalsSatellite?.note || '' }}</p>
-    </div>
+      <details class="meta-fold" v-if="upcomingGames.length" style="margin-top:12px">
+        <summary>展開原始資料清單</summary>
+        <article v-for="game in upcomingGames" :key="`detail-${game.truthSnapshotId}`" class="game-card">
+          <header class="game-head">
+            <div>
+              <div class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</div>
+              <div class="time">{{ formatTime(game.commenceTime) }}</div>
+            </div>
+            <div class="status-plain">
+              <span :class="game.dataReadiness?.recommendationAllowed ? 'data-ok' : 'data-bad'">
+                {{ bucketLabel(game) }} · {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
+              </span>
+            </div>
+          </header>
+        </article>
+      </details>
+    </details>
 
     <div v-if="!loading && !dailyTop.length && dataLag?.stale" class="empty-picks stale">
       <p class="empty-title">本機沒有今日場次</p>
-      <p class="empty-body">
-        資料已停更，最後快照
-        {{ formatTime(dataLag?.lastCapturedAt) || '未知' }}。
-        請點右上角「同步今日 MLB」拉取賽程與初盤。
-      </p>
+      <p class="empty-body">請同步今日 MLB。</p>
     </div>
-
-    <div v-if="!loading && !dailyTop.length && !dataLag?.stale" class="empty-picks">
-      <p class="empty-title">現在沒有可下選邊</p>
-      <p class="empty-body">
-        見下方：「分析完成・未入選」是已算完但被鎖定 B 排除；「資料未齊」是還沒辦法正式判斷。
-      </p>
-      <p v-if="todayFunnelText" class="empty-body funnel-line">{{ todayFunnelText }}</p>
-    </div>
-
-    <div v-if="!loading && todayFunnel && (dailyTop.length > 0 || todayFunnel.upcoming > 0)" class="funnel-strip">
-      <span>今日場次 {{ todayFunnel.upcoming }}</span>
-      <span>資料未齊 {{ todayFunnel.pendingData }}</span>
-      <span>已分析 {{ todayFunnel.analyzedReady }}</span>
-      <span>未放出 {{ todayFunnel.passedGatesHeld || heldUntilRelease.length }}</span>
-      <span>可看選邊 {{ todayFunnel.selected }}</span>
-      <span v-if="topFunnelReason">主因 {{ topFunnelReason }}</span>
-      <span v-if="pitcherGapText">先發 {{ pitcherGapText }}</span>
-    </div>
-
-    <div v-if="analyzedExcluded.length" class="picks-block">
-      <div class="block-label">分析完成・未入選（{{ analyzedExcluded.length }}）</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th>開賽（港）</th>
-            <th>對陣</th>
-            <th class="num">資料</th>
-            <th>結果</th>
-            <th>未入選原因</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="game in analyzedExcluded" :key="`ex-${game.truthSnapshotId}`">
-            <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
-            <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
-            <td class="num data-ok">
-              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
-            </td>
-            <td class="status-cell">{{ analyzedResultLabel(game) }}</td>
-            <td class="missing">{{ exclusionReasonText(game) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">已完成模型分析；未過鎖定 B（EV／賠率／分差等）故不進可看選邊。</p>
-    </div>
-
-    <div v-if="pendingData.length" class="picks-block blocked">
-      <div class="block-label">資料未齊・暫不入選（{{ pendingData.length }}）</div>
-      <table class="picks-table">
-        <thead>
-          <tr>
-            <th>開賽（港）</th>
-            <th>對陣</th>
-            <th class="num">資料</th>
-            <th>還缺</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="game in pendingData" :key="`pend-${game.truthSnapshotId}`">
-            <td class="time-cell">{{ formatTime(game.commenceTime) }}</td>
-            <td class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</td>
-            <td class="num data-bad">
-              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
-            </td>
-            <td class="missing">{{ missingCriticalText(game.dataReadiness?.missingCritical) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">關鍵資料未齊，不做正式入選判斷；齊了之後會進上面兩類之一。</p>
-    </div>
-
-    <details class="meta-fold" v-if="upcomingGames.length">
-      <summary>展開資料清單</summary>
-      <article v-for="game in upcomingGames" :key="`detail-${game.truthSnapshotId}`" class="game-card">
-        <header class="game-head">
-          <div>
-            <div class="matchup">{{ game.awayTeam }} @ {{ game.homeTeam }}</div>
-            <div class="time">{{ formatTime(game.commenceTime) }}</div>
-          </div>
-          <div class="status-plain">
-            <span :class="game.dataReadiness?.recommendationAllowed ? 'data-ok' : 'data-bad'">
-              {{ bucketLabel(game) }}
-              ·
-              {{ game.dataReadiness?.scorePct ?? Math.round((game.completeness || 0) * 100) }}%
-            </span>
-          </div>
-        </header>
-
-        <ul class="evidence-list">
-          <li
-            v-for="item in readinessChecklist(game)"
-            :key="item.key"
-            :class="{
-              critical: item.blockRecommend,
-              ok: item.ok,
-              soft: !item.ok && item.softOk,
-              bad: !item.softOk,
-            }"
-          >
-            <span class="ev-weight">w{{ item.weight }}</span>
-            <span class="ev-state">{{ item.statusLabel || stateSymbol(item.status) }}</span>
-            <span>
-              <strong v-if="item.blockRecommend">[關鍵]</strong>
-              {{ item.label || labelFor(item.key) }}
-              <span v-if="item.summary" class="ev-summary">— {{ item.summary }}</span>
-            </span>
-          </li>
-        </ul>
-      </article>
-    </details>
 
     <el-empty
       v-if="!loading && !games.length"
-      description="尚無 MLB 賽前快照。點右上角重新載入；若仍空，需後端先同步今日賽程。"
+      description="尚無 MLB 賽前快照。請重新載入或同步今日賽程。"
     />
   </section>
 </template>
+
 
 <script setup>
 import { computed, ref } from 'vue';
@@ -502,6 +311,20 @@ const starParlayTickets = computed(
 );
 const parlayPrimary = computed(() => lockedBPackage.value?.parlays?.primary || sameDayParlay.value);
 const parlaySecondary = computed(() => lockedBPackage.value?.parlays?.secondary || null);
+const hasActionableBets = computed(
+  () =>
+    dailyTop.value.length > 0 ||
+    totalsHybridPicks.value.length > 0 ||
+    starParlayTickets.value.length > 0 ||
+    Boolean(parlaySecondary.value?.available)
+);
+const soonestHeldHours = computed(() => {
+  const hours = heldUntilRelease.value
+    .map((r) => Number(r.hoursUntilCommence))
+    .filter((h) => Number.isFinite(h));
+  if (!hours.length) return '—';
+  return formatHoursUntil(Math.min(...hours));
+});
 const stakeGuideText = computed(() => {
   const g = lockedBPackage.value?.stakeGuide;
   if (g?.text) return `注碼紀律：${g.text}（串關 = 單場 ÷ 2）`;
@@ -793,6 +616,12 @@ defineExpose({ loadTruth });
   margin: 4px 0 0;
   font-size: 12px;
   color: #666;
+}
+
+.schedule-note {
+  margin: 0;
+  font-size: 12px;
+  color: #555;
 }
 
 .shadow-overlay-note {
@@ -1155,4 +984,150 @@ defineExpose({ loadTruth });
   color: #777;
   font-weight: 400;
 }
+
+.action-board {
+  border: 2px solid #222;
+  background: #fff;
+  display: grid;
+  gap: 0;
+}
+
+.action-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #111;
+  color: #fff;
+}
+
+.action-badge {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.action-summary {
+  font-size: 12px;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.action-empty {
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.action-block {
+  border: none;
+  border-top: 1px solid #e8e8e8;
+}
+
+.action-block .block-label {
+  background: #f5f5f3;
+}
+
+.stake-cell {
+  font-weight: 700;
+  color: #0b6e4f;
+}
+
+.held-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.held-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: #333;
+}
+
+.held-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  background: #e8e8e8;
+  color: #444;
+}
+
+.held-tag.tot {
+  background: #e4ebe6;
+  color: #2a5a3c;
+}
+
+.held-eta {
+  margin-left: auto;
+  font-size: 12px;
+  color: #777;
+  font-variant-numeric: tabular-nums;
+}
+
+.funnel-strip.compact {
+  font-size: 11px;
+  padding: 6px 10px;
+  gap: 8px 12px;
+  color: #777;
+  background: transparent;
+  border-color: #eee;
+}
+
+.shadow-overlay-note.quiet {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  background: transparent;
+  border-left: 2px solid #ddd;
+}
+
+.diag-fold {
+  border: 1px solid #e5e5e5;
+  padding: 8px 12px 12px;
+  background: #fafafa;
+}
+
+.diag-fold > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #666;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.diag-fold .picks-block {
+  margin-top: 10px;
+}
+
+.diag-fold .research-sat {
+  opacity: 0.92;
+}
+
+.action-board .parlay-card {
+  padding: 10px 12px;
+  border-top: 1px solid #eee;
+}
+
+.action-board .star-ticket {
+  background: #fafaf8;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
+.action-board .satellite-ticket {
+  margin: 0;
+  background: #f5f7fa;
+  border: none;
+  border-radius: 0;
+}
+
 </style>

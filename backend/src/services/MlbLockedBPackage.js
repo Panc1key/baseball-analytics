@@ -63,7 +63,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     '串關為組合包提示，非自動建單',
   ]),
   note:
-    '注碼紀律：單場均注 $50（獨贏／Hybrid 大小）；串關每票 $25（單場一半）。日 TopK 維持 3。',
+    '注碼：單場 $50（獨贏／Hybrid）；串關每票 $25。注意力看「現在可下」區塊即可。',
 });
 
 function mapMlLeg(leg) {
@@ -325,7 +325,7 @@ export function buildLockedBPackageSnapshot({
       recommendedOrder: ['star', 'secondary'],
       note:
         star.available
-          ? `注碼紀律：單場 $${stakeUsd}／串關 $${parlayStakeUsd}（一半）。${star.howToBet} 禁止四串。大小混串見衛星票（可選、同用串關注碼）。`
+          ? `單場 $${stakeUsd}／串關 $${parlayStakeUsd}。照「現在可下」與 Star 票單執行即可。`
           : star.reason || '今日串關暫無',
     },
     stakeGuide: {

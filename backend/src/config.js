@@ -173,6 +173,12 @@ export const config = {
    * 鎖定 B「可看選邊」放出時窗：僅開賽前 N 小時內才對 UI／紙上晉升放出。
    * 預設 8（约 T-8～開賽）；設 0 關閉時窗（恢復一過門檻就顯示）。
    */
+  /** NPB 正式日推：開賽前幾小時才放出選邊（對齊鎖定 B 預設） */
+  npbFormalReleaseHoursBefore: Math.max(
+    0,
+    parseInt(process.env.NPB_FORMAL_RELEASE_HOURS_BEFORE || process.env.MLB_LOCKED_B_RELEASE_HOURS_BEFORE || '8', 10) ||
+      8
+  ),
   mlbLockedBReleaseHoursBefore: Math.max(
     0,
     parseFloat(process.env.MLB_LOCKED_B_RELEASE_HOURS || '8')
