@@ -104,6 +104,12 @@ export const MLB_TOTALS_SATELLITE_HYBRID_SPEC = Object.freeze({
    */
   overMinAbsGap: 0.9,
   /**
+   * Over 專用 EV 底線（Under 仍用 rules.minimumExpectedValue=0.03）。
+   * 2026-08-06：活體 T-8 放出後約 29% 撤單；老虎@水手大 7.5 放出 EV≈4.8% 後於 T-2.7 因 EV 不過閘撤單。
+   * 活體 2026-07～08 快照：Over EV≥5% 可擋該案並改善薄樣本 ROI（仍短，僅作致命 UX／脆弱 Over 防護）。
+   */
+  overMinimumExpectedValue: 0.05,
+  /**
    * 僅 Over·raw（非投手去偏）：|μ−線|上限。厚邊 Over·raw 更差（rigor + best-scheme）。
    * auditMlbTotalsHybridBestScheme：cap1.25 三年皆贏 baseline，注數 1387→787、勝率 55.2%→58.3%、Δ$+507。
    * 回滾：`.env` MLB_TOTALS_RAW_OVER_MAX_ABS_GAP=off
@@ -156,7 +162,7 @@ export const MLB_TOTALS_SATELLITE_HYBRID_SPEC = Object.freeze({
     artifact: 'tmp-totals-hybrid-best-scheme.json',
   }),
   note:
-    'Under raw gap≥0.6；Over 投手去偏 gap≥0.9；Over·raw 另限 absGap≤1.25。均注 $50。勿混鎖定 B TopK。',
+    'Under raw gap≥0.6 EV≥3%；Over 投手去偏 gap≥0.9 且 EV≥5%；Over·raw 另限 absGap≤1.25。T-8 首次過閘凍結選邊（對齊回測）。均注 $50。勿混鎖定 B TopK。',
 });
 
 /**
@@ -516,6 +522,9 @@ export function classifyMlbTotalsHybridCandidate({
   if (overCls.tier === 'actionable' && overCls.side === 'over') {
     const hybridPath = isPitcherPark ? 'pitcher_debiased_over' : 'raw_over';
     const rawOverMax = Number(spec.rawOverMaxAbsGap);
+    const overMinEv = Number.isFinite(Number(spec.overMinimumExpectedValue))
+      ? Number(spec.overMinimumExpectedValue)
+      : Number(spec.rules?.minimumExpectedValue ?? 0.03);
     if (
       hybridPath === 'raw_over' &&
       Number.isFinite(rawOverMax) &&
@@ -543,6 +552,29 @@ export function classifyMlbTotalsHybridCandidate({
         oddsDecimal: overCls.oddsDecimal,
       };
     }
+    if (Number(overCls.expectedValue) < overMinEv) {
+      return {
+        tier: 'blocked',
+        market: 'totals',
+        side: 'over',
+        reasons: [
+          ...(overCls.reasons || []).map((r) => `overPath:${r}`),
+          'over_expected_value_below_hybrid_minimum',
+        ],
+        researchOnly: Boolean(spec.researchOnly),
+        specId: spec.id,
+        hybridPath: null,
+        pitcherParkDebiasApplied: isPitcherPark,
+        parkFactor: pf,
+        absGap: overCls.absGap,
+        expectedValue: overCls.expectedValue,
+        overMinimumExpectedValue: overMinEv,
+        expectedTotalRaw: Number(prediction?.expectedTotal),
+        line: overCls.line,
+        pick: overCls.pick,
+        oddsDecimal: overCls.oddsDecimal,
+      };
+    }
     return {
       ...overCls,
       researchOnly: Boolean(spec.researchOnly),
@@ -552,6 +584,7 @@ export function classifyMlbTotalsHybridCandidate({
       parkFactor: pf,
       expectedTotalRaw: Number(prediction?.expectedTotal),
       overMinAbsGap: Number(spec.overMinAbsGap) || null,
+      overMinimumExpectedValue: overMinEv,
       rawOverMaxAbsGap: Number.isFinite(rawOverMax) ? rawOverMax : null,
     };
   }

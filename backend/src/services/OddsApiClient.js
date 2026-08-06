@@ -48,6 +48,7 @@ export class OddsApiClient {
     this.lastQuota = {
       remaining: res.headers.get('x-requests-remaining'),
       used: res.headers.get('x-requests-used'),
+      last: res.headers.get('x-requests-last'),
     };
 
     if (!res.ok) {
@@ -99,6 +100,20 @@ export class OddsApiClient {
     return this.request(`/historical/sports/${leagueKey}/odds`, {
       regions,
       markets,
+      oddsFormat,
+      date: dateIso,
+    });
+  }
+
+  /**
+   * 付費：單場歷史盤（含 team_totals 等 extra markets）
+   * 成本約 10 × 回傳市場數 × regions
+   */
+  async getHistoricalEventOdds(sportKey, eventId, dateIso, markets, options = {}) {
+    const { regions = 'us', oddsFormat = 'decimal' } = options;
+    return this.request(`/historical/sports/${sportKey}/events/${eventId}/odds`, {
+      regions,
+      markets: Array.isArray(markets) ? markets.join(',') : markets,
       oddsFormat,
       date: dateIso,
     });

@@ -4,7 +4,7 @@
       <div>
         <h2 class="panel-title">今日 NPB · 下注板</h2>
         <p class="panel-sub">
-          單場 ${{ stake }} · 日 TopK {{ dailyTopK }} · 開賽前 {{ releaseHours }}h 才顯示獨贏選邊
+          單場 ${{ stake }} · 獨贏日 TopK {{ dailyTopK }} · 大小 Over（砍中賠）· 開賽前 {{ releaseHours }}h 放出
         </p>
       </div>
       <el-button size="small" plain :loading="loading" @click="load">重新載入</el-button>
@@ -16,21 +16,21 @@
       <div class="action-head">
         <span class="action-badge">現在可下</span>
         <span class="action-summary">
-          獨贏 {{ dailyTop.length }} · 未放出 {{ held.length }}
+          獨贏 {{ dailyTop.length }} · 大小 {{ totalsDailyTop.length }} · 未放出 {{ heldTotal }}
         </span>
       </div>
 
       <div v-if="!loading && !hasActionableBets" class="action-empty">
         <p class="empty-title">此刻沒有可下主倉</p>
         <p class="empty-body">
-          <template v-if="held.length">
-            已有 {{ held.length }} 場獨贏過閘，約 {{ soonestHeldHours }} 後放出選邊（見「稍後放出」）。
+          <template v-if="heldTotal">
+            已有 {{ heldTotal }} 場過閘，約 {{ soonestHeldHours }} 後放出選邊（見「稍後放出」）。
           </template>
           <template v-else-if="startedToday.length">
             今日 {{ startedToday.length }} 場已開賽（初盤窗口已過）。明早同步後再看可下。
           </template>
           <template v-else>
-            今日多數未過 mid 閘（常見 EV／賠率／勝率）。不是壞掉。
+            今日多數未過閘（獨贏 mid／大小 Over+中賠砍帶）。不是壞掉。
           </template>
         </p>
       </div>
@@ -60,13 +60,51 @@
           </tbody>
         </table>
       </div>
+
+      <div v-if="totalsDailyTop.length" class="picks-block action-block">
+        <div class="block-label">大小主倉 · Over · 各 ${{ stake }}</div>
+        <table class="picks-table">
+          <thead>
+            <tr>
+              <th class="col-rank">#</th>
+              <th>對陣</th>
+              <th>選邊</th>
+              <th class="num">賠率</th>
+              <th class="num">EV</th>
+              <th class="num">注碼</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="item in totalsDailyTop"
+              :key="`tot-${item.gameId}`"
+              :class="{ 'is-top': item.rank === 1 }"
+            >
+              <td class="col-rank">{{ item.rank }}</td>
+              <td class="matchup">{{ item.matchup }}</td>
+              <td class="pick">{{ item.pick || '—' }}</td>
+              <td class="num">{{ formatOdds(item.oddsDecimal ?? item.odds) }}</td>
+              <td class="num">{{ percent(item.expectedValue) }}</td>
+              <td class="num stake-cell">${{ stake }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="totalsPackage?.thinYearWarning" class="thin-year-note">
+          大小證據幾乎僅 2026（thin-year），已正式接入；若連續翻負可關 totals。
+        </p>
+      </div>
     </div>
 
-    <div v-if="held.length" class="picks-block held-block">
+    <div v-if="heldTotal" class="picks-block held-block">
       <div class="block-label">稍後放出（先別下）</div>
       <ul class="held-list">
         <li v-for="item in held" :key="`held-ml-${item.gameId}`">
           <span class="held-tag">獨贏</span>
+          {{ item.matchup }}
+          <span class="held-eta">約 {{ formatHoursUntil(item.hoursUntilCommence) }} 後顯示選邊</span>
+        </li>
+        <li v-for="item in totalsHeld" :key="`held-tot-${item.gameId}`">
+          <span class="held-tag">大小</span>
           {{ item.matchup }}
           <span class="held-eta">約 {{ formatHoursUntil(item.hoursUntilCommence) }} 後顯示選邊</span>
         </li>
@@ -76,7 +114,8 @@
     <div v-if="!loading && funnel" class="funnel-strip compact">
       <span>今日 {{ funnel.upcoming }}</span>
       <span>可看獨贏 {{ funnel.selected }}</span>
-      <span>未放出 {{ funnel.passedGatesHeld || held.length }}</span>
+      <span>可看大小 {{ funnel.totalsSelected || totalsDailyTop.length }}</span>
+      <span>未放出 {{ (funnel.passedGatesHeld || held.length) + (funnel.totalsHeld || totalsHeld.length) }}</span>
       <span>已開賽 {{ funnel.startedToday || startedToday.length }}</span>
       <span>未過閘 {{ funnel.excluded }}</span>
       <span v-if="topReason">主因 {{ topReason }}</span>
@@ -119,54 +158,37 @@
           </tbody>
         </table>
       </div>
-
-      <details class="meta-fold" style="margin-top:12px" @toggle="onLegacyToggle">
-        <summary>舊管線對照（泊松／Elo · 非正式）</summary>
-        <p class="legacy-hint">KBO 仍 pause；此區僅對照，勿當正式主倉。</p>
-        <div class="legacy-toolbar">
-          <el-radio-group v-model="legacyLeague" size="small">
-            <el-radio-button label="NPB">日職</el-radio-button>
-            <el-radio-button label="KBO">韓職</el-radio-button>
-            <el-radio-button label="">全部</el-radio-button>
-          </el-radio-group>
-        </div>
-        <DailySlatePanel
-          ref="slateRef"
-          sport="baseball"
-          :league="legacyLeague || ''"
-          :asian-only="!legacyLeague"
-          :auto-load="false"
-        />
-      </details>
     </details>
   </section>
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { getNpbPrematch } from '../api/index.js';
-import DailySlatePanel from './DailySlatePanel.vue';
 
 const loading = ref(false);
 const slate = ref(null);
-const slateRef = ref(null);
-const legacyLeague = ref('NPB');
-const legacyLoaded = ref(false);
 
 const packageMeta = computed(() => slate.value?.package || null);
+const totalsPackage = computed(() => packageMeta.value?.totalsPackage || null);
 const stake = computed(() => Number(packageMeta.value?.flatStakeUsd) || 50);
 const dailyTopK = computed(() => Number(packageMeta.value?.dailyTopK) || 3);
 const releaseHours = computed(
   () => Number(slate.value?.releasePolicy?.hoursBefore ?? packageMeta.value?.releaseHoursBefore) || 8
 );
 const dailyTop = computed(() => slate.value?.dailyTop || []);
+const totalsDailyTop = computed(() => slate.value?.totalsDailyTop || []);
 const held = computed(() => slate.value?.heldUntilRelease || []);
+const totalsHeld = computed(() => slate.value?.totalsHeldUntilRelease || []);
+const heldTotal = computed(() => held.value.length + totalsHeld.value.length);
 const excluded = computed(() => slate.value?.excluded || []);
 const startedToday = computed(() => slate.value?.startedToday || []);
 const funnel = computed(() => slate.value?.todayFunnel || null);
-const hasActionableBets = computed(() => dailyTop.value.length > 0);
+const hasActionableBets = computed(
+  () => dailyTop.value.length > 0 || totalsDailyTop.value.length > 0
+);
 const soonestHeldHours = computed(() => {
-  const hours = held.value
+  const hours = [...held.value, ...totalsHeld.value]
     .map((r) => Number(r.hoursUntilCommence))
     .filter((h) => Number.isFinite(h));
   if (!hours.length) return '—';
@@ -203,24 +225,6 @@ function formatTime(value) {
   });
 }
 
-async function loadLegacyIfNeeded() {
-  if (legacyLoaded.value) {
-    await slateRef.value?.loadSlate?.();
-    return;
-  }
-  await nextTick();
-  await slateRef.value?.loadSlate?.();
-  legacyLoaded.value = true;
-}
-
-function onLegacyToggle(ev) {
-  if (ev.target?.open) loadLegacyIfNeeded();
-}
-
-watch(legacyLeague, () => {
-  if (legacyLoaded.value) slateRef.value?.loadSlate?.();
-});
-
 async function load() {
   loading.value = true;
   try {
@@ -234,10 +238,7 @@ async function load() {
 defineExpose({
   load,
   loadTruth: load,
-  reload: async () => {
-    await load();
-    if (legacyLoaded.value) await loadLegacyIfNeeded();
-  },
+  reload: load,
 });
 </script>
 
@@ -290,6 +291,13 @@ defineExpose({
   color: #888;
   background: transparent;
   border-left: 2px solid #ddd;
+}
+
+.thin-year-note {
+  margin: 0;
+  padding: 6px 12px 10px;
+  font-size: 11px;
+  color: #888;
 }
 
 .picks-block {
@@ -509,28 +517,5 @@ defineExpose({
 
 .diag-fold .picks-block {
   margin-top: 10px;
-}
-
-.meta-fold {
-  border: 1px solid #e5e5e5;
-  padding: 8px 12px;
-  background: #fff;
-}
-
-.meta-fold > summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: #555;
-  font-weight: 600;
-}
-
-.legacy-hint {
-  margin: 8px 0;
-  font-size: 11px;
-  color: #888;
-}
-
-.legacy-toolbar {
-  margin-bottom: 10px;
 }
 </style>

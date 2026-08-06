@@ -30,6 +30,13 @@ import {
 } from '../services/MlbPrematchTruthPipeline.js';
 import { getMlbPaperLedgerSummary } from '../services/MlbPaperLedger.js';
 import { getNpbPrematchSlate } from '../services/NpbPrematchRecommend.js';
+import {
+  getNpbTotalsResearchShadowSlate,
+  getNpbTotalsResearchShadowStatus,
+  ensureNpbTotalsShadowPaperFills,
+  settleNpbTotalsShadowPaperBets,
+  getNpbTotalsShadowPaperLedgerSummary,
+} from '../services/NpbTotalsResearchShadow.js';
 import { runMlbTruthPitBacktest } from '../services/MlbTruthPitBacktest.js';
 import { getMlbPrematchSchedulerStatus } from '../services/MlbPrematchScheduler.js';
 import { runMlbDailyTopWalkForward } from '../services/MlbResearchRanker.js';
@@ -203,7 +210,61 @@ router.get('/npb/prematch', (req, res) => {
       meta: {
         mode: 'formal_recommend',
         league: 'NPB',
-        note: 'NPB 正式獨贏日推；大小／KBO 不在此板。',
+        note: 'NPB 正式日推：獨贏 + 大小（thin-year）；KBO 不在此板。',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * NPB 大小研究影子（Round8 規則；紙上日更；非正式）
+ */
+router.get('/npb/totals-research-shadow', (req, res) => {
+  try {
+    const sync = String(req.query.sync || '') === '1';
+    let fill = null;
+    let settle = null;
+    if (sync) {
+      settle = settleNpbTotalsShadowPaperBets();
+      fill = ensureNpbTotalsShadowPaperFills({
+        from: req.query.from || undefined,
+      });
+    }
+    const slate = getNpbTotalsResearchShadowSlate({
+      from: req.query.from || undefined,
+    });
+    const status = getNpbTotalsResearchShadowStatus({
+      includeReplay: String(req.query.replay || '') === '1',
+    });
+    res.json({
+      success: true,
+      data: {
+        slate,
+        status,
+        sync: sync ? { settle, fill } : null,
+      },
+      meta: {
+        mode: 'research_only',
+        league: 'NPB',
+        market: 'totals',
+        note: '大小研究紙上影子；不進正式日推；?sync=1 可結算並填釋放窗內候選',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/npb/totals-research-shadow/ledger', (_req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: getNpbTotalsShadowPaperLedgerSummary(),
+      meta: {
+        mode: 'research_only',
+        note: 'NPB totals 紙上影子帳本；非正式下注',
       },
     });
   } catch (err) {

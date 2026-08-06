@@ -119,6 +119,18 @@ import {
   selectDailyTotalsSatellitePicks,
 } from './MlbTotalsSatellite.js';
 import {
+  freezeMlbTotalsHybridOnRelease,
+  formatFrozenHybridPick,
+  getMlbTotalsHybridFreeze,
+  suppressMlbTotalsHybridFreezeForMoneyline,
+  MLB_TOTALS_HYBRID_FREEZE_SPEC,
+} from './MlbTotalsHybridFreeze.js';
+import {
+  createPaperBetFromCandidate,
+  hasMlbPaperMoneylineBet,
+  listPendingMlbPaperMoneylineBets,
+} from './MlbPaperLedger.js';
+import {
   MLB_LOCKED_B_PACKAGE,
   buildLockedBPackageSnapshot,
 } from './MlbLockedBPackage.js';
@@ -1434,6 +1446,93 @@ function latestTruthRows({ from, to } = {}) {
   `).all(...params);
 }
 
+/**
+ * 放出窗內 TopK 場次：晉升 paper_candidate 並立即建紙上注（凍結選邊）。
+ * 不呼叫 promoteDailyLockedBPaperCandidates（其內部會再 getSlate，避免遞迴）。
+ */
+function ensureLockedBPaperFillsForReleasedTop(readyTopGames, nowMs) {
+  const update = db.prepare(`
+    UPDATE mlb_paper_candidates
+    SET status = 'paper_candidate',
+        rejection_reasons_json = ?
+    WHERE id = ?
+      AND status IN ('research_observation', 'value_watch', 'no_signal')
+  `);
+  let filled = 0;
+  for (const game of readyTopGames) {
+    if (!game?.candidateId) continue;
+    if (!game.dataReadiness?.recommendationAllowed) continue;
+    if (!game.research?.pick || !Number.isFinite(Number(game.research?.oddsDecimal))) continue;
+    if (!isWithinLockedBReleaseWindow(game.commenceTime, nowMs)) continue;
+    const commenceMs = Date.parse(game.commenceTime);
+    if (Number.isFinite(commenceMs) && commenceMs <= nowMs) continue;
+
+    if (!hasMlbPaperMoneylineBet(game.gameId)) {
+      const reasons = [
+        ...(Array.isArray(game.research?.rejectionReasons)
+          ? game.research.rejectionReasons
+          : []),
+        'path_gamma_locked_b_daily_slot',
+        `daily_rank_${game.dailyRank}`,
+        'slate_ensure_fill_on_release',
+        ...(Number(config.mlbLockedBReleaseHoursBefore) > 0
+          ? [`release_within_${config.mlbLockedBReleaseHoursBefore}h`]
+          : []),
+      ];
+      update.run(JSON.stringify(reasons), game.candidateId);
+      const created = createPaperBetFromCandidate(game.candidateId);
+      if (created.created || created.reason === 'game_market_already_recorded') {
+        filled += 1;
+      }
+    }
+    suppressMlbTotalsHybridFreezeForMoneyline(game.gameId);
+  }
+  return { filled };
+}
+
+function summarizePaperFrozenPick(bet, index) {
+  const release = lockedBReleaseWindowMeta(bet.commence_time);
+  return {
+    researchDay: new Date(bet.commence_time).toLocaleDateString('en-CA', {
+      timeZone: 'Asia/Hong_Kong',
+    }),
+    dailyRank: index + 1,
+    researchTier: 'paper_frozen',
+    rank: index + 1,
+    gameId: bet.game_id,
+    matchup: `${bet.away_team} @ ${bet.home_team}`,
+    commenceTime: bet.commence_time,
+    pick: bet.pick,
+    edge:
+      Number.isFinite(Number(bet.model_prob)) && Number.isFinite(Number(bet.market_prob))
+        ? Number(bet.model_prob) - Number(bet.market_prob)
+        : null,
+    ev:
+      Number.isFinite(Number(bet.model_prob)) && Number.isFinite(Number(bet.odds_decimal))
+        ? Number(bet.model_prob) * Number(bet.odds_decimal) - 1
+        : null,
+    modelProb: bet.model_prob,
+    marketProb: bet.market_prob,
+    modelProbability: bet.model_prob,
+    marketProbability: bet.market_prob,
+    expectedRunMargin: null,
+    expectedValue:
+      Number.isFinite(Number(bet.model_prob)) && Number.isFinite(Number(bet.odds_decimal))
+        ? Number(bet.model_prob) * Number(bet.odds_decimal) - 1
+        : null,
+    oddsDecimal: bet.odds_decimal,
+    status: 'paper_frozen',
+    recommendationAllowed: true,
+    dataScorePct: null,
+    missingCritical: [],
+    dataReadiness: null,
+    frozen: true,
+    frozenAt: bet.created_at,
+    paperBetId: bet.id,
+    releaseWindow: release,
+  };
+}
+
 export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const rows = latestTruthRows({ from, to });
   const mapped = rows.map((row) => {
@@ -1543,24 +1642,32 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       dataScorePct: readiness?.scorePct ?? null,
       missingCritical: readiness?.missingCritical || [],
       dataReadiness: readiness || null,
+      frozen: false,
     };
   }
 
   const topSummariesAll = readyTop.map((game, index) => summarizeTopPick(game, index));
   const nowMs = Date.now();
   const releaseHours = Number(config.mlbLockedBReleaseHoursBefore) || 0;
-  const topSummariesReleased = [];
+
+  // 放出窗內 TopK → 立即紙上 fill（凍結）；已 fill 不受後續 regime/重排影響
+  ensureLockedBPaperFillsForReleasedTop(readyTop, nowMs);
+
   const heldUntilRelease = [];
   for (const row of topSummariesAll) {
     const release = lockedBReleaseWindowMeta(row.commenceTime, nowMs);
-    const enriched = { ...row, releaseWindow: release };
-    if (release.released) topSummariesReleased.push(enriched);
-    else if (release.holdReason === `hold_until_t_minus_${releaseHours}h` || release.holdReason?.startsWith('hold_until')) {
-      heldUntilRelease.push(enriched);
+    if (hasMlbPaperMoneylineBet(row.gameId)) continue;
+    if (
+      release.holdReason === `hold_until_t_minus_${releaseHours}h` ||
+      release.holdReason?.startsWith('hold_until')
+    ) {
+      heldUntilRelease.push({ ...row, releaseWindow: release });
     }
   }
-  // 可看選邊＝僅已進入放出時窗者（嚴格；防過早下注）
-  const topSummaries = topSummariesReleased;
+
+  // 可看選邊＝未開賽紙上凍結注（只讀凍結帳）
+  const paperPending = listPendingMlbPaperMoneylineBets({ nowMs });
+  const topSummaries = paperPending.map((bet, index) => summarizePaperFrozenPick(bet, index));
 
   /** 同日 2 串：從可看選邊取賠率≤2.10、按排名，至少 2 腿（組合包主串） */
   const PARLAY_LEG_MAX_ODDS = 2.1;
@@ -1703,35 +1810,58 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       recommendationAllowed: Boolean(game.dataReadiness?.recommendationAllowed),
     };
   }).filter(Boolean);
+
+  /**
+   * Hybrid 日推＝T-8 凍結選邊（對齊回測成交時點）。
+   * 活體 EV／盤口漂不再改單、不默默撤「可下」。
+   */
+  const totalsHybridFrozenRows = [];
+  for (const c of totalsHybridCandidates) {
+    const release = lockedBReleaseWindowMeta(c.commenceTime, nowMs);
+    if (release.holdReason === 'already_started') continue;
+    if (!c.recommendationAllowed) continue;
+    // 獨贏優先：已有紙上獨贏則不出大小
+    if (hasMlbPaperMoneylineBet(c.gameId)) {
+      suppressMlbTotalsHybridFreezeForMoneyline(c.gameId);
+      continue;
+    }
+
+    let freeze = getMlbTotalsHybridFreeze(c.gameId);
+    if (!freeze && c.tier === 'actionable' && release.released && c.side) {
+      freeze = freezeMlbTotalsHybridOnRelease(c);
+    }
+    if (!freeze || freeze.status !== 'active') continue;
+
+    totalsHybridFrozenRows.push(
+      formatFrozenHybridPick(freeze, c, totalsHybridFrozenRows.length + 1)
+    );
+  }
+  totalsHybridFrozenRows.sort((a, b) =>
+    String(a.commenceTime || '').localeCompare(String(b.commenceTime || ''))
+  );
   const totalsHybridPicks = selectDailyTotalsSatellitePicks(
-    totalsHybridCandidates.filter(
-      (c) =>
-        c.tier === 'actionable' &&
-        c.recommendationAllowed &&
-        isWithinLockedBReleaseWindow(c.commenceTime, nowMs)
-    ),
+    totalsHybridFrozenRows.map((p) => ({
+      ...p,
+      tier: 'actionable',
+      researchDay: new Date(p.commenceTime).toLocaleDateString('en-CA', {
+        timeZone: 'Asia/Hong_Kong',
+      }),
+    })),
     MLB_TOTALS_SATELLITE_HYBRID_SPEC
   ).map((c, index) => ({
+    ...c,
     rank: index + 1,
-    gameId: c.gameId,
-    matchup: c.matchup,
-    commenceTime: c.commenceTime,
-    pick: c.pick,
-    side: c.side,
-    line: c.line,
-    oddsDecimal: c.oddsDecimal,
-    modelProbability: c.modelProbability,
-    marketProbability: c.marketProbability,
-    expectedValue: c.expectedValue,
-    absGap: c.absGap,
-    expectedTotal: c.expectedTotal,
-    hybridPath: c.hybridPath || null,
-    pitcherParkDebiasApplied: Boolean(c.pitcherParkDebiasApplied),
+    frozen: true,
   }));
 
   /** Hybrid：已過閘但未進 T-N 時窗／缺先發 — 只提示狀態不給選邊細節（防過早下） */
   const totalsHybridHeld = totalsHybridCandidates
-    .filter((c) => c.tier === 'actionable')
+    .filter(
+      (c) =>
+        c.tier === 'actionable' &&
+        !hasMlbPaperMoneylineBet(c.gameId) &&
+        !getMlbTotalsHybridFreeze(c.gameId)
+    )
     .map((c) => {
       const release = lockedBReleaseWindowMeta(c.commenceTime, nowMs);
       const ready = Boolean(c.recommendationAllowed);
@@ -1739,6 +1869,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       if (!ready) holdReason = 'data_incomplete_pitchers';
       else if (!release.released) holdReason = release.holdReason || 'outside_release_window';
       else holdReason = null;
+      if (holdReason === 'already_started') return null;
       if (!holdReason) return null;
       return {
         gameId: c.gameId,
@@ -1746,11 +1877,15 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         commenceTime: c.commenceTime,
         hoursUntilCommence: release.hoursUntilCommence,
         holdReason,
-        side: c.side,
-        line: c.line,
       };
     })
     .filter(Boolean);
+
+  /**
+   * 凍結政策下：不再用「活體 EV 回撤」當可跟訊號。
+   * withdrawn 僅保留空陣列佔位（相容前端）；診斷改看 liveGateWouldBlock。
+   */
+  const totalsHybridWithdrawn = [];
 
   /** 今日強訊號但被硬閘擋住（例如盤口>10 的小分）— 說明為何空倉 */
   const totalsHybridBlockedNotable = totalsHybridCandidates
@@ -1787,15 +1922,20 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     primaryMode: totalsPrimaryMode,
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
-    note: MLB_TOTALS_SATELLITE_HYBRID_SPEC.note,
+    note:
+      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。',
+    freezePolicy: MLB_TOTALS_HYBRID_FREEZE_SPEC,
     rules: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules,
     pitcherParkMuMinusLineOffset:
       MLB_TOTALS_SATELLITE_HYBRID_SPEC.pitcherParkMuMinusLineOffset,
     overMinAbsGap: MLB_TOTALS_SATELLITE_HYBRID_SPEC.overMinAbsGap,
+    overMinimumExpectedValue:
+      MLB_TOTALS_SATELLITE_HYBRID_SPEC.overMinimumExpectedValue,
     rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
     maxTotalLine: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules?.maxTotalLine ?? 10,
     picks: totalsHybridPicks,
     held: totalsHybridHeld,
+    withdrawn: totalsHybridWithdrawn,
     blockedNotable: totalsHybridBlockedNotable,
     blockedCount: totalsHybridCandidates.filter((c) => c.tier === 'blocked').length,
   };
@@ -2032,6 +2172,8 @@ export function promoteDailyLockedBPaperCandidates({ lookbackDays = 1, lookahead
     if (result.changes === 1) {
       promoted += 1;
       promotedGameIds.push(game.gameId);
+      createPaperBetFromCandidate(game.candidateId);
+      suppressMlbTotalsHybridFreezeForMoneyline(game.gameId);
     } else {
       skipped += 1;
     }

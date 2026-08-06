@@ -26,7 +26,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
     under: 'raw μ · gap≥0.6 · 01b 閘',
     over:
-      '投手公園 μ−0.70 去偏 · gap≥0.9；Over·raw 另限 absGap≤1.25 · 01b 閘',
+      '投手公園 μ−0.70 去偏 · gap≥0.9；Over·raw 另限 absGap≤1.25；Over EV≥5%；T-8 凍結選邊',
     rawOverMaxAbsGap: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rawOverMaxAbsGap,
     stakeUsd: 50,
     mixWithMoneylineTopK: false,
@@ -63,7 +63,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     '串關為組合包提示，非自動建單',
   ]),
   note:
-    '注碼：單場 $50（獨贏／Hybrid）；串關每票 $25。注意力看「現在可下」區塊即可。',
+    '注碼：單場 $50（獨贏／Hybrid）；串關每票 $25。獨贏／大小皆 T-8 凍結選邊；同場獨贏優先、大小互斥。只跟「現在可下」。',
 });
 
 function mapMlLeg(leg) {

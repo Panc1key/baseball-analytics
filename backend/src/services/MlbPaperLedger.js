@@ -230,7 +230,7 @@ export function createPaperBetFromCandidate(candidateId) {
     LIMIT 1
   `).get(candidate.game_id, candidate.market);
   if (existingGameBet) {
-    return { created: false, reason: 'game_market_already_recorded' };
+    return { created: false, reason: 'game_market_already_recorded', id: existingGameBet.id };
   }
 
   const releaseHours = Number(config.mlbLockedBReleaseHoursBefore) || 8;
@@ -272,6 +272,46 @@ export function createPaperBetFromCandidate(candidateId) {
   );
   return { created: result.changes === 1, id: result.lastInsertRowid || null };
 }
+
+/** 該場是否已有獨贏紙上凍結注（含已結算） */
+export function hasMlbPaperMoneylineBet(gameId) {
+  if (!gameId) return false;
+  const row = db
+    .prepare(
+      `SELECT id FROM mlb_paper_bets WHERE game_id = ? AND market = 'h2h' LIMIT 1`
+    )
+    .get(gameId);
+  return Boolean(row);
+}
+
+/**
+ * 未開賽、pending 的獨贏紙上注＝日推凍結可下來源
+ */
+export function listPendingMlbPaperMoneylineBets({ nowMs = Date.now() } = {}) {
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.game_id, p.pick, p.odds_decimal, p.market_prob, p.model_prob,
+              p.created_at, p.hours_to_commence_at_fill,
+              g.commence_time, g.home_team, g.away_team, g.completed, g.status
+       FROM mlb_paper_bets p
+       JOIN games g ON g.id = p.game_id
+       WHERE p.market = 'h2h'
+         AND p.result = 'pending'
+       ORDER BY datetime(g.commence_time) ASC`
+    )
+    .all();
+  return rows.filter((r) => {
+    if (Number(r.completed) === 1) return false;
+    const st = String(r.status || '').toLowerCase();
+    if (['canceled', 'cancelled', 'postponed', 'abandoned', 'void'].includes(st)) {
+      return false;
+    }
+    const commenceMs = Date.parse(r.commence_time);
+    if (!Number.isFinite(commenceMs) || commenceMs <= nowMs) return false;
+    return true;
+  });
+}
+
 
 export function autoCreateEligiblePaperBets() {
   const candidates = db.prepare(`

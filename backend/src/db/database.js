@@ -666,6 +666,67 @@ function migrateSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_mlb_il_events_kind_date
       ON mlb_il_transaction_events(event_kind, event_date);
+
+    /*
+     * Hybrid 大小 T-8 凍結：首次放出窗內 actionable 寫入後，日推跟凍結、不因 EV 漂撤單。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_totals_hybrid_freezes (
+      game_id TEXT PRIMARY KEY,
+      commence_time TEXT NOT NULL,
+      matchup TEXT,
+      side TEXT NOT NULL CHECK (side IN ('over', 'under')),
+      line REAL NOT NULL,
+      pick TEXT NOT NULL,
+      odds_decimal REAL NOT NULL,
+      expected_value REAL,
+      abs_gap REAL,
+      expected_total REAL,
+      model_probability REAL,
+      market_probability REAL,
+      hybrid_path TEXT,
+      pitcher_park_debias INTEGER NOT NULL DEFAULT 0,
+      spec_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'void')),
+      void_reason TEXT,
+      frozen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (game_id) REFERENCES games(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_totals_hybrid_freezes_status
+      ON mlb_totals_hybrid_freezes(status, commence_time);
+
+    -- NPB totals 研究紙上影子（非正式；不進日推主倉）
+    CREATE TABLE IF NOT EXISTS npb_totals_shadow_paper_bets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shadow_id TEXT NOT NULL,
+      game_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      commence_time TEXT,
+      home_team TEXT,
+      away_team TEXT,
+      side TEXT NOT NULL CHECK (side IN ('over', 'under')),
+      line REAL NOT NULL,
+      odds_decimal REAL NOT NULL,
+      model_prob REAL,
+      market_prob REAL,
+      edge REAL,
+      expected_value REAL,
+      abs_gap REAL,
+      stake_usd REAL NOT NULL DEFAULT 50,
+      result TEXT NOT NULL DEFAULT 'pending'
+        CHECK (result IN ('pending', 'win', 'loss', 'push')),
+      profit_usd REAL,
+      source TEXT NOT NULL DEFAULT 'live_fill',
+      filled_at TEXT NOT NULL DEFAULT (datetime('now')),
+      settled_at TEXT,
+      UNIQUE(shadow_id, game_id),
+      FOREIGN KEY (game_id) REFERENCES games(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_npb_totals_shadow_paper_result
+      ON npb_totals_shadow_paper_bets(shadow_id, result, day);
   `);
   addCol('ALTER TABLE mlb_prematch_truth_snapshots ADD COLUMN model_input_json TEXT');
   addCol('ALTER TABLE mlb_paper_bets ADD COLUMN release_odds_decimal REAL');

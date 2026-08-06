@@ -33,7 +33,10 @@
       </div>
 
       <div v-if="dailyTop.length" class="picks-block action-block">
-        <div class="block-label">獨贏主倉 · 各 ${{ packageStake }}</div>
+        <div class="block-label">獨贏主倉 · 凍結選邊 · 各 ${{ packageStake }}</div>
+        <p class="freeze-hint">
+          開賽前 8h 進入日 TopK 即寫入紙上凍結；之後 regime／重排不會撤單 — 只跟此表。
+        </p>
         <table class="picks-table">
           <thead>
             <tr>
@@ -59,7 +62,10 @@
       </div>
 
       <div v-if="totalsHybridPicks.length" class="picks-block action-block">
-        <div class="block-label">大小 Hybrid · 各 ${{ totalsSatStake }}（分帳）</div>
+        <div class="block-label">大小 Hybrid · 凍結選邊 · 各 ${{ totalsSatStake }}（分帳）</div>
+        <p class="freeze-hint">
+          開賽前 8h 首次過閘即鎖定盤口；同場已有獨贏凍結則不出大小；只跟此表。
+        </p>
         <table class="picks-table">
           <thead>
             <tr>
@@ -75,7 +81,10 @@
           <tbody>
             <tr v-for="item in totalsHybridPicks" :key="`tot-h-${item.gameId}`">
               <td class="col-rank">{{ item.rank }}</td>
-              <td class="matchup">{{ item.matchup }}</td>
+              <td class="matchup">
+                {{ item.matchup }}
+                <span v-if="item.liveGateWouldBlock" class="live-drift-tag">活體已漂（仍跟凍結）</span>
+              </td>
               <td class="pick">{{ item.pick || '—' }}</td>
               <td class="num">{{ item.line ?? '—' }}</td>
               <td class="num">{{ formatOdds(item.oddsDecimal) }}</td>
@@ -124,7 +133,7 @@
     </div>
 
     <div v-if="heldUntilRelease.length || totalsHybridHeld.length" class="picks-block held-block">
-      <div class="block-label">稍後放出（先別下）</div>
+      <div class="block-label">稍後放出（先別下・不露選邊）</div>
       <ul class="held-list">
         <li v-for="item in heldUntilRelease" :key="`held-ml-${item.gameId}`">
           <span class="held-tag">獨贏</span>
@@ -136,7 +145,7 @@
           {{ item.matchup }}
           <span class="held-eta">
             <template v-if="item.holdReason === 'data_incomplete_pitchers'">缺先發</template>
-            <template v-else>約 {{ formatHoursUntil(item.hoursUntilCommence) }}</template>
+            <template v-else>約 {{ formatHoursUntil(item.hoursUntilCommence) }} 後顯示選邊</template>
           </span>
         </li>
       </ul>
@@ -652,6 +661,31 @@ defineExpose({ loadTruth });
 .picks-block.held-block {
   border-color: #c4c4c4;
   background: #f7f7f7;
+}
+
+.freeze-hint {
+  margin: 0 12px 8px;
+  font-size: 11px;
+  color: #666;
+}
+
+.live-drift-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #8a5a00;
+  background: #fff3d6;
+  padding: 1px 5px;
+}
+
+.picks-block.withdrawn-block {
+  border-color: #c9a0a0;
+  background: #fbf4f4;
+}
+
+.picks-block.withdrawn-block .block-label {
+  color: #8a3030;
 }
 
 .picks-block.empty-picks .hint {

@@ -1,8 +1,9 @@
 /**
  * NPB 正式日推（research → formal）
- * 模型：ridge_mu025_if_dev_ge_15（主影子 cal_same + 條件 μ→league）
- * 閘門：mid（與影子 OOS 同口徑）；開賽前 8h 才放出選邊
- * 不寫 mlb_paper_*；KBO 不接；大小仍 research thin-year 不進主倉
+ * 獨贏：ridge_mu025_if_dev_ge_15（主影子 cal_same + 條件 μ→league）+ mid + 日 TopK=3
+ * 大小：edge03 Over + 砍 odds 1.85–2.00（2026-08-06 用戶升格；thin-year）
+ * 閘門：開賽前 8h 才放出選邊
+ * 不寫 mlb_paper_*；KBO 不接
  */
 import db from '../db/database.js';
 import { config } from '../config.js';
@@ -23,6 +24,12 @@ import {
   trainAsianRunsLinear,
 } from './AsianExpectedRunsLite.js';
 import { NPB_RESEARCH_SHADOW_SPEC } from './AsianNpbResearchShadow.js';
+import {
+  NPB_TOTALS_FORMAL_PACKAGE,
+  getNpbTotalsResearchShadowSlate,
+  settleNpbTotalsShadowPaperBets,
+  ensureNpbTotalsShadowPaperFills,
+} from './NpbTotalsResearchShadow.js';
 
 const LEAGUE = 'NPB';
 const GATE = NPB_RESEARCH_SHADOW_SPEC.gates.mid;
@@ -55,7 +62,7 @@ export const NPB_FORMAL_PACKAGE = Object.freeze({
     topKNote: 'auditNpbFormalOptRound5：日 TopK=3 → 238 注 ROI 15.3% @$50=+1826（Δ+$138 vs 不限）',
   }),
   note:
-    '正式日推：條件 μ→league（|μ−league|≥1.5）；mid gate；日 TopK=3；開賽前放出選邊；大小不進主倉；KBO 仍 pause',
+    '正式日推：獨贏（條件 μ + TopK=3）+ 大小（Over + 砍中賠；thin-year）；開賽前放出選邊；KBO 仍 pause',
 });
 
 function bestH2h(bookmakers, home, away) {
@@ -410,6 +417,29 @@ export function getNpbPrematchSlate({ from } = {}) {
       label: reasonLabels[reason] || reason,
     }));
 
+  const totalsEnabled = NPB_RESEARCH_SHADOW_SPEC.formalScope.totals === true;
+  let totalsSlate = null;
+  if (totalsEnabled) {
+    try {
+      settleNpbTotalsShadowPaperBets();
+      ensureNpbTotalsShadowPaperFills({ from });
+    } catch {
+      /* 紙上日更失敗不擋正式 slate */
+    }
+    totalsSlate = getNpbTotalsResearchShadowSlate({ from });
+  }
+
+  const totalsDailyTop = (totalsSlate?.dailyTop || []).map((r) => ({
+    ...r,
+    market: 'totals',
+    pick:
+      r.side && r.line != null
+        ? `${r.side === 'over' ? 'Over' : 'Under'} ${r.line}`
+        : r.side || null,
+    oddsDecimal: r.odds,
+  }));
+  const totalsHeld = totalsSlate?.heldUntilRelease || [];
+
   return {
     researchOnly: false,
     wiredToFormal: true,
@@ -424,6 +454,17 @@ export function getNpbPrematchSlate({ from } = {}) {
       gate: GATE,
       note: NPB_FORMAL_PACKAGE.note,
       paperEvidenceUsd50: NPB_FORMAL_PACKAGE.paperEvidenceUsd50,
+      totalsEnabled,
+      totalsPackage: totalsEnabled
+        ? {
+            id: NPB_TOTALS_FORMAL_PACKAGE.id,
+            label: NPB_TOTALS_FORMAL_PACKAGE.label,
+            dropOddsBand: NPB_TOTALS_FORMAL_PACKAGE.dropOddsBand,
+            thinYearWarning: NPB_TOTALS_FORMAL_PACKAGE.thinYearWarning,
+            paperEvidenceUsd50: NPB_TOTALS_FORMAL_PACKAGE.paperEvidenceUsd50,
+            note: NPB_TOTALS_FORMAL_PACKAGE.note,
+          }
+        : null,
     },
     modelReady: Boolean(state.ridge?.ok),
     trainGames: state.trainN,
@@ -433,6 +474,14 @@ export function getNpbPrematchSlate({ from } = {}) {
     },
     dailyTop: actionable,
     heldUntilRelease: held,
+    totalsDailyTop,
+    totalsHeldUntilRelease: totalsHeld,
+    totalsExcluded: (totalsSlate?.excluded || []).map((r) => ({
+      gameId: r.gameId,
+      matchup: r.matchup,
+      commenceTime: r.commenceTime,
+      reasons: r.reasons || [],
+    })),
     excluded: excluded.map((r) => ({
       gameId: r.gameId,
       matchup: r.matchup,
@@ -444,7 +493,9 @@ export function getNpbPrematchSlate({ from } = {}) {
     todayFunnel: {
       upcoming: upcoming.length,
       selected: actionable.length,
+      totalsSelected: totalsDailyTop.length,
       passedGatesHeld: held.length,
+      totalsHeld: totalsHeld.length,
       passedGatesTotal: passed.length,
       excluded: excluded.length,
       topKCut: cutByTopK.length,
