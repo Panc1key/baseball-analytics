@@ -162,6 +162,25 @@ export const config = {
     .trim()
     .toLowerCase(),
   /**
+   * 手術 A（高EV×客×hwp≥65%硬跳過）：off | compare | apply
+   * 預設 off — 已由 MLB_WINRATE_STRONG_HOME_SHADOW（hwp≥62%）承接，避免雙刀重砍。
+   * 僅在關掉強主場影子、要單獨回測舊刀時再開。
+   */
+  mlbSurgicalAwayStrongEvShadowMode: String(
+    process.env.MLB_SURGICAL_AWAY_STRONG_EV_SHADOW || 'off'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 手術 B（客×Rank1×中水1.95-2.10）：off | compare | apply
+   * 預設 apply＝可看選邊／紙上剔除；公司強主場影子未覆蓋此刀。
+   */
+  mlbSurgicalAwayR1MidoddsShadowMode: String(
+    process.env.MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
    * 大小分衛星主打：hybrid（預設）| under | both | off
    * 不混鎖定 B TopK；不寫入獨贏紙上帳本。
    */
@@ -200,6 +219,15 @@ export const config = {
     const n = parseFloat(raw);
     return Number.isFinite(n) && n > 0 ? n : 1.25;
   })(),
+  /**
+   * 大小 Under×投手公園：off | compare | apply
+   * 預設 apply＝從 Hybrid 可看選邊剔除；回退設 compare|off（不改 Hybrid v1.1 主常數）
+   */
+  mlbTotalsUnderPitcherShadowMode: String(
+    process.env.MLB_TOTALS_UNDER_PITCHER_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
   mlbPaperRuleProfile: process.env.MLB_PAPER_RULE_PROFILE || 'frozen_v1',
   /**
    * 鎖定 B「可看選邊」放出時窗：僅開賽前 N 小時內才對 UI／紙上晉升放出。

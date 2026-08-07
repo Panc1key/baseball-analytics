@@ -148,6 +148,16 @@ import {
   MLB_TOTALS_FRAGILE_UNDER_SPEC,
   resolveTotalsFragileUnderMode,
 } from './MlbTotalsFragileUnderShadow.js';
+import {
+  buildSurgicalAwayStrongEvShadowSlate,
+} from './MlbSurgicalAwayStrongEvShadow.js';
+import {
+  buildSurgicalAwayR1MidoddsShadowSlate,
+} from './MlbSurgicalAwayR1MidoddsShadow.js';
+import {
+  applyTotalsUnderPitcherShadow,
+  applyTotalsUnderPitcherToCandidate,
+} from './MlbTotalsUnderPitcherShadow.js';
 
 const STRATEGY_VERSION = 'mlb-expected-runs-rank-v2';
 const EVIDENCE_VERSION = 'mlb-prematch-evidence-v5';
@@ -1087,17 +1097,19 @@ async function collectEvidence(game) {
         specId: MLB_TOTALS_SATELLITE_SPEC.id,
       };
   const totalsSatelliteHybrid = expectedRunsPredictionRouted
-    ? applyTotalsFragileUnderShadow(
-        classifyMlbTotalsHybridCandidate({
-          prediction: expectedRunsPredictionRouted,
-          totalsMarket,
-          parkFactor: expectedRunsFeatures.parkFactor,
-          spec: {
-            ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
-            rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
-          },
-        }),
-        expectedRunsFeatures
+    ? applyTotalsUnderPitcherToCandidate(
+        applyTotalsFragileUnderShadow(
+          classifyMlbTotalsHybridCandidate({
+            prediction: expectedRunsPredictionRouted,
+            totalsMarket,
+            parkFactor: expectedRunsFeatures.parkFactor,
+            spec: {
+              ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+              rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+            },
+          }),
+          expectedRunsFeatures
+        )
       )
     : {
         tier: 'blocked',
@@ -1615,12 +1627,21 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const afterWinrate = winrateStrongHomeShadow.appliesToVisiblePicks
     ? winrateStrongHomeShadow.ranked
     : afterHighEv;
+  // 手術 A 預設 off（強主場影子已涵蓋更寬 hwp≥62%）；開 apply 時接在強主場後
+  const surgicalAwayStrongEvShadow =
+    buildSurgicalAwayStrongEvShadowSlate(afterWinrate);
+  const afterSurgicalA =
+    surgicalAwayStrongEvShadow.ranked || afterWinrate;
+  const surgicalAwayR1MidoddsShadow =
+    buildSurgicalAwayR1MidoddsShadowSlate(afterSurgicalA);
+  const afterSurgicalB =
+    surgicalAwayR1MidoddsShadow.ranked || afterSurgicalA;
   const directionBlendShadow = buildDirectionBlendDisagreeShadowSlate(
-    afterWinrate,
-    afterWinrate
+    afterSurgicalB,
+    afterSurgicalB
   );
   // 方向 blend 僅 compare：正式可看選邊永不吃此影子
-  const ranked = afterWinrate;
+  const ranked = afterSurgicalB;
   const topDirections = ranked
     .filter((game) =>
       game.researchTier === 'top1_observation' ||
@@ -1673,6 +1694,13 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       missingCritical: readiness?.missingCritical || [],
       dataReadiness: readiness || null,
       frozen: false,
+      homeWinPct: pick?.homeWinPct ?? null,
+      surgicalAwayStrongEvWouldSkip: Boolean(
+        pick?.surgicalAwayStrongEvWouldSkip
+      ),
+      surgicalAwayR1MidoddsWouldSkip: Boolean(
+        pick?.surgicalAwayR1MidoddsWouldSkip
+      ),
     };
   }
 
@@ -1823,7 +1851,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     picks: totalsSatelliteUnderOnlyPicks,
   };
 
-  const totalsHybridCandidates = ranked.map((game) => {
+  const totalsHybridCandidatesRaw = ranked.map((game) => {
     const sat = game.expectedRuns?.totalsSatelliteHybrid;
     if (!sat) return null;
     const day =
@@ -1840,6 +1868,12 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       recommendationAllowed: Boolean(game.dataReadiness?.recommendationAllowed),
     };
   }).filter(Boolean);
+  // Under×投手公園：與 FragileUnder（ERA≥5）互補；apply 時不進凍結
+  const totalsUnderPitcherShadow = applyTotalsUnderPitcherShadow(
+    totalsHybridCandidatesRaw
+  );
+  const totalsHybridCandidates =
+    totalsUnderPitcherShadow.annotated || totalsHybridCandidatesRaw;
 
   /**
    * Hybrid 日推＝T-8 凍結選邊（對齊回測成交時點）。
@@ -1925,6 +1959,8 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       const interesting =
         reasons.some((r) => String(r).includes('total_line_above_maximum')) ||
         reasons.some((r) => String(r).includes('fragile_under')) ||
+        reasons.some((r) => String(r).includes('totals_under_pitcher')) ||
+        Boolean(c.totalsUnderPitcherWouldSkip) ||
         (c.side === 'under' &&
           Number(c.absGap) >= 0.6 &&
           Number(c.expectedValue) >= 0.03);
@@ -1958,13 +1994,29 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
     note:
-      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。脆弱小分（先發 ERA≥5）已屏蔽。',
+      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。脆弱小分（先發 ERA≥5）與 Under×投手公園可開關屏蔽。',
     fragileUnderShadow: {
       mode: fragileUnderMode,
       specId: MLB_TOTALS_FRAGILE_UNDER_SPEC.id,
       skippedOrWouldSkip: fragileUnderSkipped.length,
       evidence: MLB_TOTALS_FRAGILE_UNDER_SPEC.evidence,
       note: MLB_TOTALS_FRAGILE_UNDER_SPEC.note,
+    },
+    totalsUnderPitcherShadow: {
+      mode: totalsUnderPitcherShadow.mode,
+      enabled: totalsUnderPitcherShadow.enabled,
+      appliesToVisiblePicks: Boolean(
+        totalsUnderPitcherShadow.appliesToVisiblePicks
+      ),
+      specId: totalsUnderPitcherShadow.spec?.id,
+      flagged: (totalsUnderPitcherShadow.flagged || []).slice(0, 12),
+      observation: totalsUnderPitcherShadow.observation,
+      note:
+        totalsUnderPitcherShadow.mode === 'apply'
+          ? 'Under×投手公園已從 Hybrid 可看選邊剔除'
+          : totalsUnderPitcherShadow.mode === 'compare'
+            ? 'Under×投手公園觀察中：正式 Hybrid 選邊未改'
+            : 'Under×投手公園關閉',
     },
     freezePolicy: MLB_TOTALS_HYBRID_FREEZE_SPEC,
     rules: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules,
@@ -2116,6 +2168,40 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
           : winrateStrongHomeShadow.mode === 'compare'
             ? '提勝率影子對照中：可看選邊未改；見 diff'
             : '提勝率強主影子關閉',
+    },
+    surgicalAwayStrongEvShadow: {
+      mode: surgicalAwayStrongEvShadow.mode,
+      enabled: surgicalAwayStrongEvShadow.enabled,
+      appliesToVisiblePicks: Boolean(
+        surgicalAwayStrongEvShadow.appliesToVisiblePicks
+      ),
+      specId: surgicalAwayStrongEvShadow.spec?.id,
+      flagged: (surgicalAwayStrongEvShadow.flagged || []).slice(0, 12),
+      diff: surgicalAwayStrongEvShadow.diff,
+      observation: surgicalAwayStrongEvShadow.observation,
+      note:
+        surgicalAwayStrongEvShadow.mode === 'apply'
+          ? '手術 A 已從可看選邊剔除（預設 off；優先用強主場影子）'
+          : surgicalAwayStrongEvShadow.mode === 'compare'
+            ? '手術 A 觀察中：正式選邊不變'
+            : '手術 A 關閉（由 WINRATE_STRONG_HOME 承接）',
+    },
+    surgicalAwayR1MidoddsShadow: {
+      mode: surgicalAwayR1MidoddsShadow.mode,
+      enabled: surgicalAwayR1MidoddsShadow.enabled,
+      appliesToVisiblePicks: Boolean(
+        surgicalAwayR1MidoddsShadow.appliesToVisiblePicks
+      ),
+      specId: surgicalAwayR1MidoddsShadow.spec?.id,
+      flagged: (surgicalAwayR1MidoddsShadow.flagged || []).slice(0, 12),
+      diff: surgicalAwayR1MidoddsShadow.diff,
+      observation: surgicalAwayR1MidoddsShadow.observation,
+      note:
+        surgicalAwayR1MidoddsShadow.mode === 'apply'
+          ? '手術 B 已從可看選邊剔除（客R1中水）'
+          : surgicalAwayR1MidoddsShadow.mode === 'compare'
+            ? '手術 B 觀察中：正式選邊不變'
+            : '手術 B 關閉',
     },
     directionBlendShadow: {
       mode: directionBlendShadow.mode,

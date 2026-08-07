@@ -1167,6 +1167,7 @@ export function classifyMlbMoneylineCandidate({
     modelProbability,
     modelProbabilityRaw: toxicShrinkApplied ? modelProbabilityRaw : undefined,
     toxicShrinkApplied: toxicShrinkApplied || undefined,
+    homeWinPct: Number.isFinite(homeWinPct) ? homeWinPct : null,
     marketProbability,
     odds,
     homeOdds,

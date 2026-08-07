@@ -16,6 +16,7 @@ export const MLB_LOCKED_B_PACKAGE = Object.freeze({
     profile: 'ev02_max230',
     overlay: 'frozen_b+shrink',
     highEvOverlay: 'shrink_w15_l15 (apply)',
+    surgicalOverlays: 'surgical_a + surgical_b (apply；只動獨贏)',
     releaseHoursBefore: 8,
     dailyTopK: 3,
     evidenceNote: '紙上主倉；均注 $50；日 TopK 維持 3（不升 4）',

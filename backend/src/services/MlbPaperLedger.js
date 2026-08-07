@@ -12,6 +12,9 @@ import { config } from '../config.js';
 import { decimalToImpliedProb, removeVig } from '../utils/odds.js';
 import { getFrozenBShadowObservationSummary } from './MlbFrozenBShadow.js';
 import { getHighEvShrinkShadowObservationSummary } from './MlbHighEvShrinkShadow.js';
+import { getSurgicalAwayStrongEvObservationSummary } from './MlbSurgicalAwayStrongEvShadow.js';
+import { getSurgicalAwayR1MidoddsObservationSummary } from './MlbSurgicalAwayR1MidoddsShadow.js';
+import { getTotalsUnderPitcherObservationSummary } from './MlbTotalsUnderPitcherShadow.js';
 
 /** 鎖定基準 KPI（@$50，見 MLB-B-BASELINE-LOCK.md）— 對照用，非活體帳本 */
 export const MLB_B_BASELINE_LOCK_KPI = Object.freeze({
@@ -599,6 +602,9 @@ export function buildMlbPathGammaPaperReport({
     drift,
     frozenBShadow: getFrozenBShadowObservationSummary(),
     highEvShrinkShadow: getHighEvShrinkShadowObservationSummary(),
+    surgicalAwayStrongEvShadow: getSurgicalAwayStrongEvObservationSummary(),
+    surgicalAwayR1MidoddsShadow: getSurgicalAwayR1MidoddsObservationSummary(),
+    totalsUnderPitcherShadow: getTotalsUnderPitcherObservationSummary(),
     operatingRules: [
       '正式紙上：ev02_max230 + 鎖定疊加 frozen_b+shrink（殘差 b + 毒客 shrink）',
       '禁止為抬勝率改選注常數／v4.5 權重／疊加係數',
@@ -607,6 +613,9 @@ export function buildMlbPathGammaPaperReport({
       '活體樣本不足勿下結論',
       'CLV 台帳：每筆記 T-release／成交／收盤／換投／CLV；≥40 完整筆再評撤單，不提前寫正式規則',
       '高 EV overlay：預設 apply（shrink_w15_l15）；回退 MLB_HIGH_EV_SHRINK_SHADOW=compare|off；不改 ev02／frozen_b 主常數',
+      '手術 A：預設 off（已由 WINRATE_STRONG_HOME hwp≥62% 承接）；避免雙刀；只動獨贏',
+      '手術 B：預設 apply（客×R1×中水1.95-2.10硬跳過）；回退 MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=compare|off；只動獨贏',
+      '大小 Under×投手公園：預設 apply（與 FragileUnder ERA≥5 互補）；回退 MLB_TOTALS_UNDER_PITCHER_SHADOW=compare|off；只動 Hybrid',
     ],
   };
 }

@@ -93,8 +93,49 @@ Hybrid v1.1（@$50，相對 v1 無 cap；`auditMlbTotalsHybridBestScheme`）：
 
 程式：`MlbHighEvShrinkShadow.js`
 
+### 現行可開關 overlay：手術 A `surgical_a_away_strong_ev10`（已降級）
+
+| 項 | 內容 |
+|----|------|
+| 開關 | `.env` → `MLB_SURGICAL_AWAY_STRONG_EV_SHADOW=off\|compare\|apply`（**預設 off**） |
+| 規則 | **EV≥10% 且選客 且 homeWinPct≥65%** → 從可看選邊／紙上剔除 |
+| 合併政策 | **已由** `MLB_WINRATE_STRONG_HOME_SHADOW`（hwp≥62%＋EV≥10%，預設 compare）**承接**；本刀預設 off 避免雙砍 |
+| 範圍 | **只動獨贏**；大小 Hybrid 不受影響 |
+| 紙上證據 | 砍 ~5.9% 注；HR +0.54pp、ROI +0.67pp、Δ$≈−70（@$50） |
+
+程式：`MlbSurgicalAwayStrongEvShadow.js`；報告：`reportMlbSurgicalAwayStrongEvObserve.mjs`  
+輸注反推：`auditMlbLossAutopsy.mjs`  
+公司繼任：`MlbWinrateStrongHomeShadow.js`（更寬門檻 0.62，可蓋釀酒人類）
+
+### 現行可開關 overlay：手術 B `surgical_b_away_r1_midodds`
+
+| 項 | 內容 |
+|----|------|
+| 開關 | `.env` → `MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=off\|compare\|apply`（**預設 apply**） |
+| 規則 | **選客 且 dailyRank=1 且賠率∈[1.95, 2.10)** → 從可看選邊／紙上剔除 |
+| 範圍 | **只動獨贏**；大小 Hybrid 不受影響 |
+| 病灶 | 模型約 56%、實約 47%；同中水客 R2／主 R1／客 R1 長水皆正常 → 像「日冠過度自信」 |
+| 紙上證據 | 砍 ~16.9%；HR +1.5pp、ROI +3.8pp、**Δ$≈+$264**；2024/25/26 三年皆正 |
+
+程式：`MlbSurgicalAwayR1MidoddsShadow.js`；報告：`reportMlbSurgicalAwayR1MidoddsObserve.mjs`
+
+### 現行可開關 overlay：大小 `totals_cut_under_pitcher_park`
+
+| 項 | 內容 |
+|----|------|
+| 開關 | `.env` → `MLB_TOTALS_UNDER_PITCHER_SHADOW=off\|compare\|apply`（**預設 apply**） |
+| 規則 | Hybrid **Under（raw_under）且 parkFactor&lt;0.97（投手公園）** → 從可看選邊剔除 |
+| 範圍 | **只動大小 Hybrid**；獨贏不受影響 |
+| 與公司 FragileUnder | **互補**：FragileUnder＝先發 ERA≥5 不下（預設 compare）；本刀＝投手公園 Under |
+| 升格閘 | `auditMlbTotalsUnderPitcherPromoteGate` **全過**（交叉項驗證，非整類幻覺） |
+| 紙上證據 | 砍 ~6.5%；HR +0.9pp、ROI +1.8pp、**Δ$≈+$326**；被砍片 ROI≈−13% |
+| 對照仍健康 | Under×mid/hitter ROI≈18%；投手 Over 去偏≈12%；Over·raw≈14% |
+
+程式：`MlbTotalsUnderPitcherShadow.js`；閘門：`auditMlbTotalsUnderPitcherPromoteGate.mjs`  
+輸注反推：`auditMlbTotalsHybridLossAutopsy.mjs`
+
 ---
 
 ## 4. 給下一手的一句話
 
-> 現行組合包 = 鎖定 B 獨贏 + Hybrid v1.1 大小（Over·raw absGap≤1.25，均注 $50）+ 串關（先同日獨贏 2 串，再 R1×Under）。不要拧殘差／毒客／大小 01b 主閘；raw cap 回滾用 `MLB_TOTALS_RAW_OVER_MAX_ABS_GAP=off`。
+> 現行組合包 = 鎖定 B 獨贏（手術 B apply；強主場／手術 A 預設不雙砍）+ Hybrid v1.1 大小（Under×投手公園 apply；FragileUnder 公司 compare）+ 串關。提勝率正式套用可開 `MLB_WINRATE_STRONG_HOME_SHADOW=apply`。回退大小刀：`MLB_TOTALS_UNDER_PITCHER_SHADOW=compare|off`。
