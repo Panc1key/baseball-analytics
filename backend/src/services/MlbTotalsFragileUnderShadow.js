@@ -5,7 +5,7 @@
  * - 小分輸單裡約 60% 是超大分打爆（實際−線≥3，平均超線約 6 分）
  * - skip maxStarterEra≥5：剩餘池勝率 +1.35pp、爆分率略降；勿自動翻大
  *
- * MLB_TOTALS_FRAGILE_UNDER_SHADOW=off|compare|apply（預設 compare）
+ * MLB_TOTALS_FRAGILE_UNDER_SHADOW=off|compare|apply（預設 apply）
  */
 import { config } from '../config.js';
 
@@ -29,7 +29,7 @@ export const MLB_TOTALS_FRAGILE_UNDER_SPEC = Object.freeze({
 export function resolveTotalsFragileUnderMode(
   raw = config.mlbTotalsFragileUnderShadowMode
 ) {
-  const v = String(raw || 'compare').trim().toLowerCase();
+  const v = String(raw || 'apply').trim().toLowerCase();
   if (v === 'off' || v === 'false' || v === '0') return 'off';
   if (v === 'compare' || v === 'shadow') return 'compare';
   return 'apply';

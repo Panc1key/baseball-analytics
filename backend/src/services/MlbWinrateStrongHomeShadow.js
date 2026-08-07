@@ -5,7 +5,7 @@
  * - flip_hwp062_ev10_rall：Δ勝率 +1.37pp、Δ$+294，可蓋 hwp≈0.62（釀酒人類）
  * - 正式毒客 shrink 仍為 0.65，蓋不住 0.625
  *
- * MLB_WINRATE_STRONG_HOME_SHADOW=off|compare|apply（預設 compare）
+ * MLB_WINRATE_STRONG_HOME_SHADOW=off|compare|apply（預設 apply）
  * MLB_WINRATE_STRONG_HOME_ACTION=flip|skip（預設 skip：屏蔽優於硬翻）
  */
 import { config } from '../config.js';
@@ -31,7 +31,7 @@ export const MLB_WINRATE_STRONG_HOME_SPEC = Object.freeze({
 export function resolveWinrateStrongHomeMode(
   raw = config.mlbWinrateStrongHomeShadowMode
 ) {
-  const v = String(raw || 'compare').trim().toLowerCase();
+  const v = String(raw || 'apply').trim().toLowerCase();
   if (v === 'off' || v === 'false' || v === '0') return 'off';
   if (v === 'compare' || v === 'shadow') return 'compare';
   return 'apply';

@@ -149,6 +149,11 @@ import {
   resolveTotalsFragileUnderMode,
 } from './MlbTotalsFragileUnderShadow.js';
 import {
+  applyTotalsUnderBlowupGapToCandidate,
+  MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC,
+  resolveTotalsUnderBlowupGapMode,
+} from './MlbTotalsUnderBlowupGapShadow.js';
+import {
   buildSurgicalAwayStrongEvShadowSlate,
 } from './MlbSurgicalAwayStrongEvShadow.js';
 import {
@@ -1098,16 +1103,19 @@ async function collectEvidence(game) {
       };
   const totalsSatelliteHybrid = expectedRunsPredictionRouted
     ? applyTotalsUnderPitcherToCandidate(
-        applyTotalsFragileUnderShadow(
-          classifyMlbTotalsHybridCandidate({
-            prediction: expectedRunsPredictionRouted,
-            totalsMarket,
-            parkFactor: expectedRunsFeatures.parkFactor,
-            spec: {
-              ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
-              rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
-            },
-          }),
+        applyTotalsUnderBlowupGapToCandidate(
+          applyTotalsFragileUnderShadow(
+            classifyMlbTotalsHybridCandidate({
+              prediction: expectedRunsPredictionRouted,
+              totalsMarket,
+              parkFactor: expectedRunsFeatures.parkFactor,
+              spec: {
+                ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+                rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+              },
+            }),
+            expectedRunsFeatures
+          ),
           expectedRunsFeatures
         )
       )
@@ -1960,7 +1968,10 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         reasons.some((r) => String(r).includes('total_line_above_maximum')) ||
         reasons.some((r) => String(r).includes('fragile_under')) ||
         reasons.some((r) => String(r).includes('totals_under_pitcher')) ||
+        reasons.some((r) => String(r).includes('totals_under_blowup')) ||
         Boolean(c.totalsUnderPitcherWouldSkip) ||
+        Boolean(c.underBlowupGapSkip) ||
+        Boolean(c.underBlowupGapShadow?.wouldSkip) ||
         (c.side === 'under' &&
           Number(c.absGap) >= 0.6 &&
           Number(c.expectedValue) >= 0.03);
@@ -1985,6 +1996,10 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const fragileUnderSkipped = totalsHybridCandidates.filter(
     (c) => c.fragileUnderSkip || c.fragileUnderShadow?.wouldSkip
   );
+  const underBlowupGapMode = resolveTotalsUnderBlowupGapMode();
+  const underBlowupGapSkipped = totalsHybridCandidates.filter(
+    (c) => c.underBlowupGapSkip || c.underBlowupGapShadow?.wouldSkip
+  );
   const totalsSatelliteHybrid = {
     available: totalsHybridPicks.length > 0,
     researchOnly: false,
@@ -1994,13 +2009,20 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
     note:
-      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。脆弱小分（先發 ERA≥5）與 Under×投手公園可開關屏蔽。',
+      'T-8 凍結選邊。正式刀：FragileUnder（ERA≥5）、blowup×薄gap、Under×投手公園。Over EV≥5%；Under EV≥3%。',
     fragileUnderShadow: {
       mode: fragileUnderMode,
       specId: MLB_TOTALS_FRAGILE_UNDER_SPEC.id,
       skippedOrWouldSkip: fragileUnderSkipped.length,
       evidence: MLB_TOTALS_FRAGILE_UNDER_SPEC.evidence,
       note: MLB_TOTALS_FRAGILE_UNDER_SPEC.note,
+    },
+    underBlowupGapShadow: {
+      mode: underBlowupGapMode,
+      specId: MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC.id,
+      skippedOrWouldSkip: underBlowupGapSkipped.length,
+      evidence: MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC.evidence,
+      note: MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC.note,
     },
     totalsUnderPitcherShadow: {
       mode: totalsUnderPitcherShadow.mode,

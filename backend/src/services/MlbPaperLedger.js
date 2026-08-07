@@ -613,10 +613,13 @@ export function buildMlbPathGammaPaperReport({
       '活體樣本不足勿下結論',
       'CLV 台帳：每筆記 T-release／成交／收盤／換投／CLV；≥40 完整筆再評撤單，不提前寫正式規則',
       '高 EV overlay：預設 apply（shrink_w15_l15）；回退 MLB_HIGH_EV_SHRINK_SHADOW=compare|off；不改 ev02／frozen_b 主常數',
-      '手術 A：預設 off（不進正式；Frozen B 歷史強主場 skip 傷美元）',
-      '手術 B：正式 apply（客×R1×中水1.95-2.10）；回退 MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=compare|off；只動獨贏',
-      '大小 Under×投手公園：正式 apply（歷史 Δ$+$326）；回退 MLB_TOTALS_UNDER_PITCHER_SHADOW=compare|off；只動 Hybrid',
-      '強主場／FragileUnder／高EV shrink／方向 blend：預設 compare，不進正式',
+      '手術 A：預設 off（不進正式）',
+      '手術 B：正式 apply（客×R1×中水1.95-2.10）',
+      '強主場：正式 apply＋skip（客+hwp≥62%+EV≥10%；串關腿勝率）',
+      '大小 FragileUnder：正式 apply（Under×ERA≥5）',
+      '大小 blowup×薄gap：正式 apply（Under×blowup≥1×gap<0.8）',
+      '大小 Under×投手公園：正式 apply',
+      '高EV shrink／方向 blend：預設 compare，不進正式',
     ],
   };
 }

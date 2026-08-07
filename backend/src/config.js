@@ -130,11 +130,11 @@ export const config = {
     .trim()
     .toLowerCase(),
   /**
-   * 提勝率：強主場推客 → 改推主（hwp≥0.62 + EV≥10%）。
-   * off | compare | apply（預設 compare）。
+   * 提勝率：強主場推客 → 不下（hwp≥0.62 + EV≥10%）。
+   * off | compare | apply（預設 apply＝正式；串關腿勝率優先）。
    */
   mlbWinrateStrongHomeShadowMode: String(
-    process.env.MLB_WINRATE_STRONG_HOME_SHADOW || 'compare'
+    process.env.MLB_WINRATE_STRONG_HOME_SHADOW || 'apply'
   )
     .trim()
     .toLowerCase(),
@@ -146,10 +146,19 @@ export const config = {
     .toLowerCase(),
   /**
    * 大小分脆弱小分：任一方先發 ERA≥5 → 不下（不翻大）。
-   * off | compare | apply（預設 compare）。
+   * off | compare | apply（預設 apply＝正式）。
    */
   mlbTotalsFragileUnderShadowMode: String(
-    process.env.MLB_TOTALS_FRAGILE_UNDER_SHADOW || 'compare'
+    process.env.MLB_TOTALS_FRAGILE_UNDER_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 大小 Under × 近況爆分 × 薄 gap&lt;0.8 → 不下。
+   * off | compare | apply（預設 apply＝正式；與 FragileUnder 疊加抬勝率）。
+   */
+  mlbTotalsUnderBlowupGapShadowMode: String(
+    process.env.MLB_TOTALS_UNDER_BLOWUP_GAP_SHADOW || 'apply'
   )
     .trim()
     .toLowerCase(),
