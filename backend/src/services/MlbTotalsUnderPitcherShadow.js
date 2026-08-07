@@ -1,14 +1,14 @@
 /**
  * 大小 Hybrid 可開關 overlay：Under × 投手公園 → 不下
  *
- * 狀態：已套用（不改 Hybrid v1.1 主常數）
+ * 狀態：正式套用（不改 Hybrid v1.1 主常數）
  * - off：關閉
  * - compare：正式 Hybrid 選邊不變，標註 wouldSkip
- * - apply：從 Hybrid 可看選邊剔除（預設；仍可一鍵關）
+ * - apply：從 Hybrid 可看選邊剔除（預設＝正式）
  *
  * 環境變數：MLB_TOTALS_UNDER_PITCHER_SHADOW=off|compare|apply（預設 apply）
  *
- * 升格證據：auditMlbTotalsUnderPitcherPromoteGate.mjs（閘門全過）
+ * 正式升格依據：auditMlbTotalsUnderPitcherPromoteGate + Frozen 重放
  * 病灶：raw_under ∩ parkFactor&lt;0.97；紙上 n=51 HR45% ROI−13%；
  * 對照 Under×mid/hitter、Over·投手去偏、Over·raw 皆仍健康 → 交叉項而非整類幻覺
  */
@@ -28,9 +28,10 @@ const LIVE_SNAPSHOT = path.join(
 export const MLB_TOTALS_UNDER_PITCHER_SPEC = Object.freeze({
   id: 'totals_cut_under_pitcher_park',
   experimentId: 'totals-under-pitcher-shadow-2026-08-06',
-  role: 'switchable_overlay_applied',
+  role: 'formal_overlay_applied',
   openedAt: '2026-08-06',
   appliedAt: '2026-08-07',
+  formalAt: '2026-08-08',
   parentHybridSpecId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
   promoteGate: Object.freeze({
     script: 'scripts/auditMlbTotalsUnderPitcherPromoteGate.mjs',
@@ -98,7 +99,7 @@ export const MLB_TOTALS_UNDER_PITCHER_SPEC = Object.freeze({
       '已 apply；若活體淨 Δ@$50 ≤ −120 或 2026 明顯拖後腿 → 設 compare|off 回退',
   }),
   note:
-    '已套用可看 Hybrid 選邊（非改 v1.1 主常數）；回退 MLB_TOTALS_UNDER_PITCHER_SHADOW=compare|off；只動大小',
+    '正式套用可看 Hybrid 選邊（非改 v1.1 主常數）；回退 MLB_TOTALS_UNDER_PITCHER_SHADOW=compare|off；只動大小',
 });
 
 export function resolveTotalsUnderPitcherMode(

@@ -2013,7 +2013,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       observation: totalsUnderPitcherShadow.observation,
       note:
         totalsUnderPitcherShadow.mode === 'apply'
-          ? 'Under×投手公園已從 Hybrid 可看選邊剔除'
+          ? '正式：Under×投手公園已從 Hybrid 可看選邊剔除'
           : totalsUnderPitcherShadow.mode === 'compare'
             ? 'Under×投手公園觀察中：正式 Hybrid 選邊未改'
             : 'Under×投手公園關閉',
@@ -2198,7 +2198,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       observation: surgicalAwayR1MidoddsShadow.observation,
       note:
         surgicalAwayR1MidoddsShadow.mode === 'apply'
-          ? '手術 B 已從可看選邊剔除（客R1中水）'
+          ? '正式：手術 B 已從可看選邊剔除（客R1中水）'
           : surgicalAwayR1MidoddsShadow.mode === 'compare'
             ? '手術 B 觀察中：正式選邊不變'
             : '手術 B 關閉',

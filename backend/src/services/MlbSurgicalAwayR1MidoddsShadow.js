@@ -1,16 +1,16 @@
 /**
- * 影子觀察：客 × Rank1 × 中水賠率 1.95–2.10 → 不下
+ * 正式 overlay：客 × Rank1 × 中水賠率 1.95–2.10 → 不下
  *
- * 狀態：可開關 overlay（不改 Locked B / ev02 主常數）
+ * 狀態：正式套用（不改 Locked B / ev02 主常數）
  * - off：關閉
  * - compare：正式選邊不變，slate 標註 wouldSkip
- * - apply：從可看選邊／紙上晉升剔除（預設；仍可一鍵關）
+ * - apply：從可看選邊／紙上晉升剔除（預設＝正式）
  *
  * 環境變數：MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=off|compare|apply（預設 apply）
  *
- * 病灶證據（Frozen B 影子 @$50）：
+ * 正式升格依據（Frozen B @$50，2024–2026）：
  * - 切片 n=118 HR47.5% ROI−4.5% −$264
- * - 砍後 n=579 HR56.5% ROI17.9% +$5186（Δ+$264）；2024/25/26 三年皆正
+ * - 砍後 n=579 HR56.5% ROI17.9% +$5186（Δ+$264）；三年皆正
  * - 對照：同賠率客 R2、主 R1、客 R1 長水≥2.10 皆正常 → 病灶在「客+日冠+中水」交叉
  */
 import fs from 'fs';
@@ -28,9 +28,10 @@ const LIVE_SNAPSHOT = path.join(
 export const MLB_SURGICAL_AWAY_R1_MIDODDS_SPEC = Object.freeze({
   id: 'surgical_b_away_r1_midodds',
   experimentId: 'surgical-away-r1-midodds-2026-08-06',
-  role: 'switchable_overlay_applied',
+  role: 'formal_overlay_applied',
   openedAt: '2026-08-06',
-  appliedAt: '2026-08-06',
+  appliedAt: '2026-08-08',
+  formalAt: '2026-08-08',
   parentLockId: 'B-baseline-2026-07-30',
   rule: Object.freeze({
     pickAway: true,
@@ -96,7 +97,7 @@ export const MLB_SURGICAL_AWAY_R1_MIDODDS_SPEC = Object.freeze({
       '活體達標且三年滾動不翻車 → 再議 apply；可先試更窄子刀（如僅 2.00–2.05 或 P<56）',
   }),
   note:
-    '已套用可看選邊（非升格常數）；回退 MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=compare|off；只動獨贏',
+    '正式套用可看選邊／紙上（非升格常數）；回退 MLB_SURGICAL_AWAY_R1_MIDODDS_SHADOW=compare|off；只動獨贏',
 });
 
 export function resolveSurgicalAwayR1MidoddsMode(

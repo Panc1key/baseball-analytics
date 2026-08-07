@@ -6,28 +6,32 @@
 import { MLB_TOTALS_SATELLITE_HYBRID_SPEC } from './MlbTotalsSatellite.js';
 
 export const MLB_LOCKED_B_PACKAGE = Object.freeze({
-  id: 'locked_b_package_v2026-08-04_star',
+  id: 'locked_b_package_v2026-08-08_formal_knives',
   label: '鎖定 B 組合包',
   lockedAt: '2026-08-04',
+  formalizedAt: '2026-08-08',
   flatStakeUsd: 50,
   moneyline: Object.freeze({
     role: 'primary',
     modelVersion: 'mlb-expected-runs-nb-v4.5',
     profile: 'ev02_max230',
     overlay: 'frozen_b+shrink',
-    highEvOverlay: 'shrink_w15_l15 (apply)',
-    surgicalOverlays: 'surgical_a + surgical_b (apply；只動獨贏)',
+    highEvOverlay: 'shrink_w15_l15 (compare；不進正式)',
+    surgicalOverlays:
+      'surgical_b apply（客R1中水）；surgical_a off；winrate_strong_home compare',
     releaseHoursBefore: 8,
     dailyTopK: 3,
-    evidenceNote: '紙上主倉；均注 $50；日 TopK 維持 3（不升 4）',
+    evidenceNote:
+      '紙上主倉均注 $50；正式刀＝手術 B（歷史 Δ$+$264）；強主場／手術 A 不進正式',
   }),
   totals: Object.freeze({
     role: 'co_primary_satellite',
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
-    under: 'raw μ · gap≥0.6 · 01b 閘',
+    under: 'raw μ · gap≥0.6 · 01b 閘；Under×投手公園 apply',
     over:
       '投手公園 μ−0.70 去偏 · gap≥0.9；Over·raw 另限 absGap≤1.25；Over EV≥5%；T-8 凍結選邊',
+    formalKnife: 'totals_cut_under_pitcher_park (apply；歷史 Δ$+$326)',
     rawOverMaxAbsGap: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rawOverMaxAbsGap,
     stakeUsd: 50,
     mixWithMoneylineTopK: false,
