@@ -336,28 +336,89 @@ function toxicStats(bets) {
   };
 }
 
+/** 方向／校準（不看 EV 選注）：μ 誰大誰贏 + 強主場偏客切片 */
+function directionMetrics(rows, model) {
+  let n = 0;
+  let dirHit = 0;
+  let maeHome = 0;
+  let maeAway = 0;
+  let brier = 0;
+  let strongN = 0;
+  let strongAwayPick = 0;
+  let strongAwayPickHomeActual = 0;
+  let strongAwayPickHit = 0;
+  for (const row of rows) {
+    const pred = predictGame(model, row);
+    const ph = pred.homeExpectedRuns;
+    const pa = pred.awayExpectedRuns;
+    const homeWins = row.homeScore > row.awayScore;
+    const pickHome = ph >= pa;
+    n += 1;
+    if (pickHome === homeWins) dirHit += 1;
+    maeHome += Math.abs(ph - row.homeScore);
+    maeAway += Math.abs(pa - row.awayScore);
+    const pHome = +pred.markets.homeWinProbability;
+    brier += (pHome - (homeWins ? 1 : 0)) ** 2;
+    const hwp = row.homeWinPct;
+    if (hwp != null && hwp >= STRONG) {
+      strongN += 1;
+      if (!pickHome) {
+        strongAwayPick += 1;
+        if (homeWins) strongAwayPickHomeActual += 1;
+        if (!homeWins) strongAwayPickHit += 1;
+      }
+    }
+  }
+  if (!n) {
+    return {
+      games: 0,
+      directionHitRate: null,
+      maeHome: null,
+      maeAway: null,
+      moneylineBrier: null,
+      strongHome: null,
+    };
+  }
+  return {
+    games: n,
+    directionHitRate: Number((dirHit / n).toFixed(4)),
+    maeHome: Number((maeHome / n).toFixed(4)),
+    maeAway: Number((maeAway / n).toFixed(4)),
+    moneylineBrier: Number((brier / n).toFixed(5)),
+    strongHome: {
+      games: strongN,
+      muPicksAway: strongAwayPick,
+      muPicksAwayRate: strongN
+        ? Number((strongAwayPick / strongN).toFixed(4))
+        : null,
+      whenMuPicksAwayHomeActualWinRate: strongAwayPick
+        ? Number((strongAwayPickHomeActual / strongAwayPick).toFixed(4))
+        : null,
+      whenMuPicksAwayAwayHitRate: strongAwayPick
+        ? Number((strongAwayPickHit / strongAwayPick).toFixed(4))
+        : null,
+    },
+  };
+}
+
 function evalModel(label, model, evalSets, prodBaselineByWindow) {
   const byWindow = {};
   const all = [];
+  const allRows = [];
   for (const set of evalSets) {
     const bets = selectLockedB(set.rows, model);
     all.push(...bets.map((b) => ({ ...b, window: set.key })));
+    allRows.push(...set.rows);
     const s = summarize(bets);
     const prod = prodBaselineByWindow[set.key];
     byWindow[set.key] = {
       ...s,
       deltaUsdVsProd: prod ? s.usd50 - prod.usd50 : null,
       ...toxicStats(bets),
+      direction: directionMetrics(set.rows, model),
     };
   }
   const overall = summarize(all);
-  const prodAll = summarize(
-    EVAL_WINDOWS.flatMap((w) => {
-      // reconstruct from byWindow prod only totals — pass overall prod separately
-      return [];
-    })
-  );
-  void prodAll;
   let winNonNeg = 0;
   for (const w of EVAL_WINDOWS) {
     const d = byWindow[w.key]?.deltaUsdVsProd;
@@ -377,6 +438,7 @@ function evalModel(label, model, evalSets, prodBaselineByWindow) {
     byWindow,
     windowsNonNegVsProd: winNonNeg,
     toxicAll: toxicStats(all),
+    directionAll: directionMetrics(allRows, model),
   };
 }
 
@@ -439,6 +501,7 @@ for (const set of evalSets) {
 }
 const prodOverall = summarize(prodAllBets);
 
+const prodAllRows = evalSets.flatMap((s) => s.rows);
 const results = [
   {
     label: 'prod_v45',
@@ -449,14 +512,19 @@ const results = [
     },
     overall: prodOverall,
     byWindow: Object.fromEntries(
-      EVAL_WINDOWS.map((w) => [
-        w.key,
-        {
-          ...prodByWindow[w.key],
-          deltaUsdVsProd: 0,
-          ...toxicStats(selectLockedB(evalSets.find((s) => s.key === w.key).rows, prodModel)),
-        },
-      ])
+      EVAL_WINDOWS.map((w) => {
+        const set = evalSets.find((s) => s.key === w.key);
+        const bets = selectLockedB(set.rows, prodModel);
+        return [
+          w.key,
+          {
+            ...prodByWindow[w.key],
+            deltaUsdVsProd: 0,
+            ...toxicStats(bets),
+            direction: directionMetrics(set.rows, prodModel),
+          },
+        ];
+      })
     ),
     windowsNonNegVsProd: 3,
     toxicAll: toxicStats(
@@ -467,6 +535,7 @@ const results = [
         }))
       )
     ),
+    directionAll: directionMetrics(prodAllRows, prodModel),
   },
 ];
 
@@ -513,9 +582,30 @@ const out = {
   recommendation: {
     wireSuggested: false,
     persistModel: false,
-    note: bestPass
-      ? '重訓+主場特徵相對正式 v4.5 三窗不傷且總$更高：可列為下一版模型候選（仍不自動 persist）'
-      : '主場特徵重訓尚未穩定勝過正式 v4.5；保留 shrink 影子，特徵方向需再調或拉長訓練窗',
+    note: (() => {
+      const prodDir = results.find((r) => r.label === 'prod_v45')?.directionAll;
+      const bestDir = [...results]
+        .filter((r) => r.label !== 'prod_v45')
+        .sort(
+          (a, b) =>
+            (b.directionAll?.directionHitRate || 0) -
+            (a.directionAll?.directionHitRate || 0)
+        )[0];
+      const dirLift =
+        bestDir?.directionAll?.directionHitRate != null &&
+        prodDir?.directionHitRate != null
+          ? bestDir.directionAll.directionHitRate - prodDir.directionHitRate
+          : null;
+      if (bestPass && dirLift != null && dirLift >= 0.005) {
+        return '主場特徵重訓：Locked B 三窗不傷且方向命中有升——可列下一版候選（仍不 persist）';
+      }
+      if (dirLift != null && dirLift >= 0.005) {
+        return '方向命中有升但 Locked B USD 未穩過正式版——值得再調訓練窗，暫不升格';
+      }
+      return bestPass
+        ? '重訓+主場特徵相對正式 v4.5 三窗不傷且總$更高：可列為下一版模型候選（仍不自動 persist）'
+        : '主場特徵重訓尚未穩定勝過正式 v4.5；保留 shrink 影子，特徵方向需再調或拉長訓練窗';
+    })(),
   },
 };
 
@@ -525,13 +615,18 @@ fs.writeFileSync(
 );
 
 console.log('\nPROD', prodOverall, prodByWindow);
+console.log('PROD direction', results[0].directionAll);
 console.log('\nRESULTS:');
 for (const r of results) {
+  const d = r.directionAll;
   console.log(
     `${r.label.padEnd(28)} $=${r.overall.usd50} hr=${r.overall.hitRate} winVsProd=${r.windowsNonNegVsProd}/3 toxicR1=${r.toxicAll.toxicRank1N} hiEv=${r.toxicAll.toxicRank1HighEvN}`
   );
   console.log(
     `  24:${r.byWindow['2024']?.usd50}(Δ${r.byWindow['2024']?.deltaUsdVsProd}) 25:${r.byWindow['2025']?.usd50}(Δ${r.byWindow['2025']?.deltaUsdVsProd}) 26:${r.byWindow['2026']?.usd50}(Δ${r.byWindow['2026']?.deltaUsdVsProd})`
+  );
+  console.log(
+    `  dirHit=${d?.directionHitRate} brier=${d?.moneylineBrier} strongAwayPickRate=${d?.strongHome?.muPicksAwayRate} whenAwayHomeActual=${d?.strongHome?.whenMuPicksAwayHomeActualWinRate}`
   );
   console.log('  weights', r.weightsHome);
 }

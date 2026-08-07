@@ -137,6 +137,17 @@ import {
 import {
   buildHighEvShrinkShadowSlate,
 } from './MlbHighEvShrinkShadow.js';
+import {
+  buildWinrateStrongHomeShadowSlate,
+} from './MlbWinrateStrongHomeShadow.js';
+import {
+  buildDirectionBlendDisagreeShadowSlate,
+} from './MlbDirectionBlendDisagreeShadow.js';
+import {
+  applyTotalsFragileUnderShadow,
+  MLB_TOTALS_FRAGILE_UNDER_SPEC,
+  resolveTotalsFragileUnderMode,
+} from './MlbTotalsFragileUnderShadow.js';
 
 const STRATEGY_VERSION = 'mlb-expected-runs-rank-v2';
 const EVIDENCE_VERSION = 'mlb-prematch-evidence-v5';
@@ -1060,10 +1071,13 @@ async function collectEvidence(game) {
     ? buildPregameRegimeSignals(expectedRunsFeatures)
     : null;
   const totalsSatellite = expectedRunsPredictionRouted
-    ? classifyMlbTotalsSatelliteCandidate({
-        prediction: expectedRunsPredictionRouted,
-        totalsMarket,
-      })
+    ? applyTotalsFragileUnderShadow(
+        classifyMlbTotalsSatelliteCandidate({
+          prediction: expectedRunsPredictionRouted,
+          totalsMarket,
+        }),
+        expectedRunsFeatures
+      )
     : {
         tier: 'blocked',
         market: 'totals',
@@ -1073,15 +1087,18 @@ async function collectEvidence(game) {
         specId: MLB_TOTALS_SATELLITE_SPEC.id,
       };
   const totalsSatelliteHybrid = expectedRunsPredictionRouted
-    ? classifyMlbTotalsHybridCandidate({
-        prediction: expectedRunsPredictionRouted,
-        totalsMarket,
-        parkFactor: expectedRunsFeatures.parkFactor,
-        spec: {
-          ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
-          rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
-        },
-      })
+    ? applyTotalsFragileUnderShadow(
+        classifyMlbTotalsHybridCandidate({
+          prediction: expectedRunsPredictionRouted,
+          totalsMarket,
+          parkFactor: expectedRunsFeatures.parkFactor,
+          spec: {
+            ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+            rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+          },
+        }),
+        expectedRunsFeatures
+      )
     : {
         tier: 'blocked',
         market: 'totals',
@@ -1590,7 +1607,20 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
 
   const formalRanked = attachDailyResearchRanks(mapped);
   const highEvShrinkShadow = buildHighEvShrinkShadowSlate(mapped, formalRanked);
-  const ranked = highEvShrinkShadow.ranked || formalRanked;
+  const afterHighEv = highEvShrinkShadow.ranked || formalRanked;
+  const winrateStrongHomeShadow = buildWinrateStrongHomeShadowSlate(
+    afterHighEv,
+    afterHighEv
+  );
+  const afterWinrate = winrateStrongHomeShadow.appliesToVisiblePicks
+    ? winrateStrongHomeShadow.ranked
+    : afterHighEv;
+  const directionBlendShadow = buildDirectionBlendDisagreeShadowSlate(
+    afterWinrate,
+    afterWinrate
+  );
+  // 方向 blend 僅 compare：正式可看選邊永不吃此影子
+  const ranked = afterWinrate;
   const topDirections = ranked
     .filter((game) =>
       game.researchTier === 'top1_observation' ||
@@ -1894,6 +1924,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       const reasons = c.reasons || [];
       const interesting =
         reasons.some((r) => String(r).includes('total_line_above_maximum')) ||
+        reasons.some((r) => String(r).includes('fragile_under')) ||
         (c.side === 'under' &&
           Number(c.absGap) >= 0.6 &&
           Number(c.expectedValue) >= 0.03);
@@ -1914,6 +1945,10 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
         .slice(0, 4),
     }));
 
+  const fragileUnderMode = resolveTotalsFragileUnderMode();
+  const fragileUnderSkipped = totalsHybridCandidates.filter(
+    (c) => c.fragileUnderSkip || c.fragileUnderShadow?.wouldSkip
+  );
   const totalsSatelliteHybrid = {
     available: totalsHybridPicks.length > 0,
     researchOnly: false,
@@ -1923,7 +1958,14 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
     note:
-      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。',
+      'T-8 首次過閘凍結選邊／盤口／賠率；跟「現在可下」凍結單即可，勿追活體重算。Over EV≥5%；Under EV≥3%。脆弱小分（先發 ERA≥5）已屏蔽。',
+    fragileUnderShadow: {
+      mode: fragileUnderMode,
+      specId: MLB_TOTALS_FRAGILE_UNDER_SPEC.id,
+      skippedOrWouldSkip: fragileUnderSkipped.length,
+      evidence: MLB_TOTALS_FRAGILE_UNDER_SPEC.evidence,
+      note: MLB_TOTALS_FRAGILE_UNDER_SPEC.note,
+    },
     freezePolicy: MLB_TOTALS_HYBRID_FREEZE_SPEC,
     rules: MLB_TOTALS_SATELLITE_HYBRID_SPEC.rules,
     pitcherParkMuMinusLineOffset:
@@ -2058,6 +2100,35 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
           : highEvShrinkShadow.mode === 'compare'
             ? '影子對照中：下方可看選邊仍為鎖定 B；差異見 shadowDailyTop'
             : '影子 overlay 關閉',
+    },
+    winrateStrongHomeShadow: {
+      mode: winrateStrongHomeShadow.mode,
+      enabled: winrateStrongHomeShadow.enabled,
+      appliesToVisiblePicks: Boolean(winrateStrongHomeShadow.appliesToVisiblePicks),
+      action: winrateStrongHomeShadow.action,
+      specId: winrateStrongHomeShadow.spec?.id,
+      diff: winrateStrongHomeShadow.diff,
+      shadowDailyTop: (winrateStrongHomeShadow.shadowTop || []).slice(0, 12),
+      evidence: winrateStrongHomeShadow.spec?.evidence || null,
+      note:
+        winrateStrongHomeShadow.mode === 'apply'
+          ? '提勝率：強主場推客（hwp≥62%＋EV≥10%）已改推主／剔除'
+          : winrateStrongHomeShadow.mode === 'compare'
+            ? '提勝率影子對照中：可看選邊未改；見 diff'
+            : '提勝率強主影子關閉',
+    },
+    directionBlendShadow: {
+      mode: directionBlendShadow.mode,
+      enabled: directionBlendShadow.enabled,
+      appliesToVisiblePicks: false,
+      specId: directionBlendShadow.spec?.id,
+      logisticFreezeLoaded: Boolean(directionBlendShadow.logisticFreezeLoaded),
+      diff: (directionBlendShadow.diff || []).slice(0, 20),
+      slotDiff: directionBlendShadow.slotDiff || null,
+      shadowDailyTop: (directionBlendShadow.shadowTop || []).slice(0, 12),
+      formalDailyTop: (directionBlendShadow.formalTop || []).slice(0, 12),
+      evidence: directionBlendShadow.evidence || null,
+      note: directionBlendShadow.note || '方向 blend 影子',
     },
     dailyTop: topSummaries,
     expectedRunsTop: topSummaries,

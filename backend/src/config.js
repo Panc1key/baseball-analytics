@@ -122,10 +122,42 @@ export const config = {
   mlbLockedBOverlayEnabled: process.env.MLB_LOCKED_B_OVERLAY !== 'false',
   /**
    * 高 EV 收縮 overlay（shrink_w15_l15）：off | compare | apply
-   * 預設 apply＝可看選邊／紙上套用；回退設 compare 或 off（不改 ev02／frozen_b 主常數）
+   * 預設 compare＝只對照不改正式選邊／紙上；要套用設 apply（不改 ev02／frozen_b 主常數）
    */
   mlbHighEvShrinkShadowMode: String(
-    process.env.MLB_HIGH_EV_SHRINK_SHADOW || 'apply'
+    process.env.MLB_HIGH_EV_SHRINK_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 提勝率：強主場推客 → 改推主（hwp≥0.62 + EV≥10%）。
+   * off | compare | apply（預設 compare）。
+   */
+  mlbWinrateStrongHomeShadowMode: String(
+    process.env.MLB_WINRATE_STRONG_HOME_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /** flip=改推主；skip=直接剔除不出（預設 skip：屏蔽毒客） */
+  mlbWinrateStrongHomeAction: String(
+    process.env.MLB_WINRATE_STRONG_HOME_ACTION || 'skip'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 大小分脆弱小分：任一方先發 ERA≥5 → 不下（不翻大）。
+   * off | compare | apply（預設 compare）。
+   */
+  mlbTotalsFragileUnderShadowMode: String(
+    process.env.MLB_TOTALS_FRAGILE_UNDER_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 方向 blend_disagree_only 影子：off | compare（預設 compare；apply 會被降級）
+   */
+  mlbDirectionBlendShadowMode: String(
+    process.env.MLB_DIRECTION_BLEND_SHADOW || 'compare'
   )
     .trim()
     .toLowerCase(),

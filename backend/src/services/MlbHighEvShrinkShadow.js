@@ -6,7 +6,7 @@
  * - compare：計算影子日 Top，正式可看選邊／紙上不變
  * - apply：對可看選邊／紙上晉升套用（仍可一鍵關）；主倉常數仍凍
  *
- * 環境變數：MLB_HIGH_EV_SHRINK_SHADOW=off|compare|apply（預設 apply）
+ * 環境變數：MLB_HIGH_EV_SHRINK_SHADOW=off|compare|apply（預設 compare）
  */
 import fs from 'fs';
 import path from 'path';
@@ -71,7 +71,7 @@ export const MLB_HIGH_EV_SHRINK_SHADOW_SPEC = Object.freeze({
 });
 
 export function resolveHighEvShrinkShadowMode(raw = config.mlbHighEvShrinkShadowMode) {
-  const v = String(raw || 'apply').trim().toLowerCase();
+  const v = String(raw || 'compare').trim().toLowerCase();
   if (v === 'off' || v === 'false' || v === '0') return 'off';
   if (v === 'compare' || v === 'shadow') return 'compare';
   return 'apply';
