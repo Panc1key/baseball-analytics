@@ -11,9 +11,6 @@
     </header>
 
     <p class="schedule-note">港時查看：今晚 <strong>20:00–23:00</strong> · 只下「現在可下」（開賽前 {{ releaseHoursBefore || 8 }}h）</p>
-    <p v-if="winrateStrongHomeNote" class="winrate-note">{{ winrateStrongHomeNote }}</p>
-    <p v-if="fragileUnderNote" class="winrate-note">{{ fragileUnderNote }}</p>
-    <p v-if="directionBlendNote" class="winrate-note">{{ directionBlendNote }}</p>
 
     <div class="action-board">
       <div class="action-head">
@@ -161,10 +158,6 @@
       <span>資料未齊 {{ todayFunnel.pendingData }}</span>
       <span v-if="topFunnelReason">主因 {{ topFunnelReason }}</span>
     </div>
-
-    <p v-if="highEvShrinkNote" class="shadow-overlay-note quiet" :class="{ apply: highEvShrinkApply }">
-      {{ highEvShrinkNote }}
-    </p>
 
     <details class="diag-fold">
       <summary>診斷與對照線（一般下注可忽略）</summary>
@@ -350,65 +343,6 @@ function hybridPathLabel(item) {
   return item?.side === 'under' ? 'Under' : item?.side === 'over' ? 'Over' : '—';
 }
 const todayFunnel = computed(() => truth.value?.todayFunnel || null);
-const highEvShrink = computed(() => truth.value?.highEvShrinkShadow || null);
-const winrateStrongHome = computed(() => truth.value?.winrateStrongHomeShadow || null);
-const directionBlend = computed(() => truth.value?.directionBlendShadow || null);
-const winrateStrongHomeNote = computed(() => {
-  const s = winrateStrongHome.value;
-  if (!s?.enabled) return '';
-  const n = Array.isArray(s.diff) ? s.diff.length : 0;
-  const action = s.action === 'skip' ? '剔除' : '改推主';
-  if (s.appliesToVisiblePicks) {
-    if (!n) return s.note || '';
-    return `提勝率已套用：${n} 場強主推客已${action}（hwp≥62%＋EV≥10%）。`;
-  }
-  if (s.mode === 'compare') {
-    return n
-      ? `提勝率影子對照：${n} 場本會${action}（正式選邊未改）。`
-      : '提勝率影子對照中（今日無差異）。';
-  }
-  return '';
-});
-const directionBlendNote = computed(() => {
-  const s = directionBlend.value;
-  if (!s?.enabled || s.mode === 'off') return '';
-  const flips = Number(s.slotDiff?.sideFlips ?? 0);
-  const overrides = Number(s.slotDiff?.overrides ?? (s.diff || []).length);
-  const freeze = s.logisticFreezeLoaded ? 'logistic凍結' : '市場代理';
-  if (!overrides) return `方向 blend 影子對照中（${freeze}；今日無分歧改邊）。`;
-  return `方向 blend 影子對照：${overrides} 場分歧改寫／${flips} 場翻邊（${freeze}；正式選邊未改）。`;
-});
-const fragileUnderNote = computed(() => {
-  const s = totalsSatelliteHybrid.value?.fragileUnderShadow;
-  if (!s || s.mode === 'off') return '';
-  const n = Number(s.skippedOrWouldSkip) || 0;
-  if (s.mode === 'apply') {
-    return n
-      ? `大小分提勝率：今日 ${n} 場脆弱小分已屏蔽（任一方先發 ERA≥5，不翻大）。`
-      : '大小分提勝率：脆弱小分屏蔽已開啟（先發 ERA≥5）。';
-  }
-  return n
-    ? `大小分脆弱小分對照：${n} 場本會屏蔽（尚未改正式選邊）。`
-    : '';
-});
-const highEvShrinkApply = computed(() => Boolean(highEvShrink.value?.appliesToVisiblePicks));
-const highEvShrinkNote = computed(() => {
-  const s = highEvShrink.value;
-  if (!s?.enabled && s?.mode === 'off') return null;
-  if (!s?.mode || s.mode === 'off') return null;
-  const diff = s.diff;
-  const deltaBits =
-    diff && !diff.sameSlots
-      ? ` · 對照差：+${(diff.added || []).length}/−${(diff.dropped || []).length} 場`
-      : diff?.sameSlots
-        ? ' · 今日與正式名額相同'
-        : '';
-  const obs = s.observation?.status ? ` · 觀察：${s.observation.status}` : '';
-  if (s.mode === 'apply') {
-    return `影子 overlay shrink_w15_l15 已套用至可看選邊（非升格常數）${obs}`;
-  }
-  return `影子 overlay shrink_w15_l15 對照中（正式選邊不變）${deltaBits}${obs}`;
-});
 
 const selectedIds = computed(() => new Set(dailyTop.value.map((row) => row.gameId)));
 const heldIds = computed(() => new Set(heldUntilRelease.value.map((row) => row.gameId)));
@@ -674,31 +608,6 @@ defineExpose({ loadTruth });
   margin: 0;
   font-size: 12px;
   color: #555;
-}
-
-.winrate-note {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: #6b4f00;
-  background: #fff8e6;
-  border: 1px solid #f0d78c;
-  border-radius: 6px;
-  padding: 8px 10px;
-}
-
-.shadow-overlay-note {
-  margin: 0 0 12px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: #444;
-  border-left: 3px solid #888;
-  background: #f7f7f7;
-}
-
-.shadow-overlay-note.apply {
-  border-left-color: #333;
-  background: #f0f0f0;
-  font-weight: 500;
 }
 
 .picks-block {
@@ -1164,16 +1073,6 @@ defineExpose({ loadTruth });
   color: #777;
   background: transparent;
   border-color: #eee;
-}
-
-.shadow-overlay-note.quiet {
-  margin: 0;
-  padding: 6px 10px;
-  font-size: 11px;
-  font-weight: 400;
-  color: #888;
-  background: transparent;
-  border-left: 2px solid #ddd;
 }
 
 .diag-fold {
