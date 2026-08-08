@@ -6,8 +6,12 @@
  */
 export const MLB_INFERENCE_FREEZE = Object.freeze({
   frozenAt: '2026-07-25',
-  updatedAt: '2026-07-30',
+  updatedAt: '2026-08-08',
   skeleton: 'expected-runs-score-distribution',
+  /** 業務分層基準：類型→路由→估分→定價（強制） */
+  layeredArchitecture: 'mlb-layered-arch-v1',
+  layeredArchitectureDoc: 'docs/expansion/MLB-LAYERED-ARCHITECTURE.md',
+  layeredArchitectureModule: 'MlbLayeredArchitecture.buildMlbLayeredDecision',
   formalPredictor: 'predictMlbGameRuns',
   formalOverlay: 'frozen_b+shrink (applyFormalLockedBResidual + toxic shrink in classify)',
   /** soft 調均值／方差：僅 audit scripts，禁止進 PrematchTruth 正式路徑 */
@@ -47,6 +51,6 @@ export function describeMlbInferenceFreeze() {
   return {
     ...MLB_INFERENCE_FREEZE,
     rule:
-      '唯一準確率／方向來源 = ExpectedRuns 均值 + 凍結疊加 frozen_b+shrink 與其導出市場概率；篩選門檻只影響紙上規則，不開第二套預測骨架。',
+      '唯一準確率／方向來源 = ExpectedRuns 均值 + 凍結疊加 frozen_b+shrink 與其導出市場概率；篩選門檻只影響紙上規則，不開第二套預測骨架。業務改動必須遵守 mlb-layered-arch-v1（類型→路由→估分→定價）。',
   };
 }

@@ -238,8 +238,13 @@ export const MLB_MONEYLINE_RULE_PROFILES = Object.freeze({
     ...MLB_MONEYLINE_RULES_BASE,
     ...MLB_PAPER_RULE_FREEZE.rules,
     id: 'ev02_max230',
-    label: 'EV≥2% + maxOdds≤2.50 + dropR3/R2 + early軟罰0.20',
-    minimumExpectedValue: 0.02,
+    label: 'EV≥1.5% + maxOdds≤2.50 + dropR3/R2 + early軟罰0.20 + μ/price stack',
+    /**
+     * 2026-08-08：在 μ+price stack apply 底座上，minEv 0.02→0.015
+     * 加壓 tmp-stack-minEv-stress.json：+$77／LOY 非負／月合計 +$32 → apply
+     * （profile id 仍 ev02_max230，相容舊 env／腳本名）
+     */
+    minimumExpectedValue: 0.015,
     maximumPickOdds: 2.5,
     minimumPickOdds: 1.85,
     requireBothPitcherIdentities: true,

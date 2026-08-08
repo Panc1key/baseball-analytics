@@ -171,6 +171,88 @@ export const config = {
     .trim()
     .toLowerCase(),
   /**
+   * 雙強先發＋總分線≤7.5 → 禁 Over（不翻小）。
+   * off | compare | apply（預設 compare；昨日低開大球原型）
+   */
+  mlbTotalsOverStrongSpDuelShadowMode: String(
+    process.env.MLB_TOTALS_OVER_STRONG_SP_DUEL_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 賽事形態影子（投手對決 / 強主）：off | compare | apply
+   * 預設 compare — 只標註與路由建議，不改正式選邊常數。
+   */
+  mlbGameShapeShadowMode: String(
+    process.env.MLB_GAME_SHAPE_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * 赛前现场打 DeepSeek 形态标签（有缓存则复用）。
+   * 默认 true：正式日推也打标（展示/强主提示）；禁大分主靠规则。
+   */
+  mlbGameShapeLlmLive: process.env.MLB_GAME_SHAPE_LLM_LIVE !== 'false',
+  /**
+   * 禁大分是否要求规则+LLM 双确认。
+   * 默认 false：紧刀规则已过历史回放；双确认等语料够再开。
+   */
+  mlbGameShapeDualConfirm: process.env.MLB_GAME_SHAPE_DUAL_CONFIRM === 'true',
+  /**
+   * 强主+推客 软降权（日排序扣分，不硬切）：off | compare | apply
+   * 默认 compare — 回测整体略正但 2025 不稳，不进正式。
+   */
+  mlbStrongHomeSoftShadowMode: String(
+    process.env.MLB_STRONG_HOME_SOFT_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * R3 對決局獨贏軟降權（日排序扣分，不硬切）：off | compare | apply
+   * 預設 compare — 需過 auditMlbDuelMlSoftOnLockedB 年份閘才升 apply。
+   */
+  mlbDuelMlSoftShadowMode: String(
+    process.env.MLB_DUEL_ML_SOFT_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * R5 unclear 減倉（日排序扣分／少進 TopK）：off | compare | apply
+   * 預設 compare — 需過 auditMlbUnclearReduceOnLockedB 才升 apply。
+   */
+  mlbUnclearReduceShadowMode: String(
+    process.env.MLB_UNCLEAR_REDUCE_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * T4b 缺任一邊 ERA 軟降權：off | compare | apply
+   * 預設 compare — 類型+路由影子過關，但切片本身正 EV，不默認進正式排序。
+   */
+  mlbMissingEraSoftShadowMode: String(
+    process.env.MLB_MISSING_ERA_SOFT_SHADOW || 'compare'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * μ：normal×客勝 勝率向市場收縮：off | compare | apply
+   * 預設 apply — 固定 w=0.38 全窗+LOY 正；w≥0.40 翻車；月度選參 WF 過擬合禁止。
+   */
+  mlbNormalAwayMarketShrinkMode: String(
+    process.env.MLB_NORMAL_AWAY_MARKET_SHRINK || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
+   * Price：type 感知排序微調：off | compare | apply
+   * 預設 apply — 與 μ shrink 固定參數疊用過 expanding/LOY 全閘（+$568）。
+   */
+  mlbTypeAwareRankShadowMode: String(
+    process.env.MLB_TYPE_AWARE_RANK_SHADOW || 'apply'
+  )
+    .trim()
+    .toLowerCase(),
+  /**
    * 手術 A（高EV×客×hwp≥65%硬跳過）：off | compare | apply
    * 預設 off — Frozen B 歷史重放：強主場 skip 傷美元；本刀也不進正式。
    */

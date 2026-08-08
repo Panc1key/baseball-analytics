@@ -5,6 +5,14 @@
 
 > 目的：建立可稽核的賽前資料、紙上帳本與樣本外驗證流程；未通過驗證前不宣稱盈利。
 
+## MLB 分層架構基準（強制）
+
+之後 MLB 改動必須遵守四層：**類型 → 路由 → 估分 → 定價**。
+
+- 說明：[`docs/expansion/MLB-LAYERED-ARCHITECTURE.md`](docs/expansion/MLB-LAYERED-ARCHITECTURE.md)
+- 程式：`backend/src/services/MlbLayeredArchitecture.js`（`buildMlbLayeredDecision`）
+- 與推理凍結並存：`docs/expansion/MLB-INFERENCE-FREEZE.md`
+
 ## 功能
 
 - 初盤賠率抓取（The Odds API）

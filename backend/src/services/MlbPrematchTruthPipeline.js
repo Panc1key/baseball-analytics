@@ -149,6 +149,28 @@ import {
   resolveTotalsFragileUnderMode,
 } from './MlbTotalsFragileUnderShadow.js';
 import {
+  applyTotalsOverStrongSpDuelToCandidate,
+  MLB_TOTALS_OVER_STRONG_SP_DUEL_SPEC,
+  resolveTotalsOverStrongSpDuelMode,
+} from './MlbTotalsOverStrongSpDuelShadow.js';
+import {
+  applyGameShapeToTotalsCandidate,
+  buildGameShapeShadow,
+  MLB_GAME_SHAPE_SHADOW_SPEC,
+  resolveGameShapeShadowMode,
+} from './MlbGameShapeShadow.js';
+import {
+  ensureLiveGameShapeLabel,
+  isDeepseekConfigured,
+} from './MlbGameShapeLlmService.js';
+import { applyStrongHomeSoftToClassification } from './MlbStrongHomeSoftShadow.js';
+import { applyDuelMlSoftToClassification } from './MlbDuelMlSoftShadow.js';
+import { applyUnclearReduceToClassification } from './MlbUnclearReduceShadow.js';
+import { applyMissingEraSoftToClassification } from './MlbMissingEraSoftShadow.js';
+import { applyNormalAwayMarketShrinkToClassification } from './MlbNormalAwayMarketShrinkShadow.js';
+import { applyTypeAwareRankToClassification } from './MlbTypeAwareRankShadow.js';
+import { buildMlbLayeredDecision } from './MlbLayeredArchitecture.js';
+import {
   applyTotalsUnderBlowupGapToCandidate,
   MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC,
   resolveTotalsUnderBlowupGapMode,
@@ -1101,23 +1123,83 @@ async function collectEvidence(game) {
         researchOnly: true,
         specId: MLB_TOTALS_SATELLITE_SPEC.id,
       };
-  const totalsSatelliteHybrid = expectedRunsPredictionRouted
-    ? applyTotalsUnderPitcherToCandidate(
-        applyTotalsUnderBlowupGapToCandidate(
-          applyTotalsFragileUnderShadow(
-            classifyMlbTotalsHybridCandidate({
-              prediction: expectedRunsPredictionRouted,
-              totalsMarket,
-              parkFactor: expectedRunsFeatures.parkFactor,
-              spec: {
-                ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
-                rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
-              },
-            }),
+  const totalsSatelliteHybridRaw = expectedRunsPredictionRouted
+    ? applyTotalsOverStrongSpDuelToCandidate(
+        applyTotalsUnderPitcherToCandidate(
+          applyTotalsUnderBlowupGapToCandidate(
+            applyTotalsFragileUnderShadow(
+              classifyMlbTotalsHybridCandidate({
+                prediction: expectedRunsPredictionRouted,
+                totalsMarket,
+                parkFactor: expectedRunsFeatures.parkFactor,
+                spec: {
+                  ...MLB_TOTALS_SATELLITE_HYBRID_SPEC,
+                  rawOverMaxAbsGap: config.mlbTotalsRawOverMaxAbsGap,
+                },
+              }),
+              expectedRunsFeatures
+            ),
             expectedRunsFeatures
-          ),
-          expectedRunsFeatures
-        )
+          )
+        ),
+        expectedRunsFeatures
+      )
+    : null;
+
+  let liveGameShapeLabel = null;
+  const gameShapeLive =
+    config.mlbGameShapeLlmLive === true ||
+    String(config.mlbGameShapeLlmLive || '').toLowerCase() === 'true' ||
+    resolveGameShapeShadowMode() === 'apply';
+  if (gameShapeLive && expectedRunsFeatures && isDeepseekConfigured()) {
+    const eras = {
+      homeEra: expectedRunsFeatures?.pitchers?.home?.era ?? null,
+      awayEra: expectedRunsFeatures?.pitchers?.away?.era ?? null,
+    };
+    const facts = {
+      id: game.id,
+      matchup: `${game.away_team} @ ${game.home_team}`,
+      homePitcher: expectedRunsFeatures?.pitchers?.homeIdentity?.name || pitchers?.home?.name || null,
+      awayPitcher: expectedRunsFeatures?.pitchers?.awayIdentity?.name || pitchers?.away?.name || null,
+      homeEra: eras.homeEra,
+      awayEra: eras.awayEra,
+      homeRecentEra: expectedRunsFeatures?.pitchers?.homeRecent?.recent3Era ?? null,
+      awayRecentEra: expectedRunsFeatures?.pitchers?.awayRecent?.recent3Era ?? null,
+      homeRpg: expectedRunsFeatures?.home?.recentRunsPerGame ?? null,
+      awayRpg: expectedRunsFeatures?.away?.recentRunsPerGame ?? null,
+      totalsLine: totalsMarket?.line ?? totalsSatelliteHybridRaw?.line ?? null,
+      homeOdds: market?.homeOdds ?? null,
+    };
+    try {
+      const live = await ensureLiveGameShapeLabel({
+        gameId: game.id,
+        commenceTime: game.commence_time,
+        facts,
+      });
+      if (live.ok) liveGameShapeLabel = live.label;
+    } catch (err) {
+      console.warn(`[mlb-truth] game-shape LLM ${game.id}:`, err?.message || err);
+    }
+  }
+
+  const gameShapeShadow = expectedRunsFeatures
+    ? buildGameShapeShadow({
+        features: expectedRunsFeatures,
+        totalsLine: totalsMarket?.line ?? totalsSatelliteHybridRaw?.line ?? null,
+        homeOdds: market?.homeOdds ?? market?.home?.odds ?? null,
+        gameId: game.id,
+        llmLabel: liveGameShapeLabel,
+      })
+    : null;
+  const totalsSatelliteHybrid = totalsSatelliteHybridRaw
+    ? applyGameShapeToTotalsCandidate(
+        totalsSatelliteHybridRaw,
+        expectedRunsFeatures,
+        {
+          totalsLine: totalsMarket?.line ?? totalsSatelliteHybridRaw?.line,
+          gameId: game.id,
+          llmLabel: liveGameShapeLabel,
+        }
       )
     : {
         tier: 'blocked',
@@ -1148,6 +1230,79 @@ async function collectEvidence(game) {
       },
     })
     : null;
+  if (moneylineClassification && gameShapeShadow) {
+    moneylineClassification = {
+      ...moneylineClassification,
+      gameShapeShadow,
+      reasons: [
+        ...(moneylineClassification.reasons || []),
+        ...(gameShapeShadow.wouldLeanHome ? ['game_shape_lean_home'] : []),
+        ...(gameShapeShadow.pitcherDuel?.matched
+          ? ['game_shape_pitcher_duel']
+          : []),
+      ],
+    };
+  }
+  const routeTotalsLine =
+    totalsMarket?.line ?? totalsSatelliteHybrid?.line ?? null;
+  const layeredArchitecture = expectedRunsFeatures
+    ? buildMlbLayeredDecision({
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+        homeOdds: market?.homeOdds ?? null,
+        gameId: game.id,
+        llmLabel: liveGameShapeLabel,
+      })
+    : null;
+  if (moneylineClassification && expectedRunsFeatures) {
+    moneylineClassification = applyStrongHomeSoftToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        homeOdds: market?.homeOdds ?? null,
+      }
+    );
+    moneylineClassification = applyDuelMlSoftToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+      }
+    );
+    moneylineClassification = applyUnclearReduceToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+        breadth: 'strict',
+      }
+    );
+    moneylineClassification = applyMissingEraSoftToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+      }
+    );
+    moneylineClassification = applyNormalAwayMarketShrinkToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+        homeOdds: market?.homeOdds ?? null,
+        gameType: layeredArchitecture?.gameType ?? null,
+      }
+    );
+    moneylineClassification = applyTypeAwareRankToClassification(
+      moneylineClassification,
+      {
+        features: expectedRunsFeatures,
+        totalsLine: routeTotalsLine,
+        homeOdds: market?.homeOdds ?? null,
+        gameType: layeredArchitecture?.gameType ?? null,
+      }
+    );
+  }
   if (
     moneylineClassification &&
     marketPlan &&
@@ -1222,6 +1377,7 @@ async function collectEvidence(game) {
             }
           : null,
         moneylineClassification,
+        layeredArchitecture,
         highWeightFeatureSync,
         starterSnapshotWrite,
       }
@@ -1260,6 +1416,7 @@ async function collectEvidence(game) {
             }
           : null,
         moneylineClassification: null,
+        layeredArchitecture: null,
         highWeightFeatureSync,
         starterSnapshotWrite,
       };
@@ -2000,6 +2157,18 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
   const underBlowupGapSkipped = totalsHybridCandidates.filter(
     (c) => c.underBlowupGapSkip || c.underBlowupGapShadow?.wouldSkip
   );
+  const overStrongSpDuelMode = resolveTotalsOverStrongSpDuelMode();
+  const overStrongSpDuelSkipped = totalsHybridCandidates.filter(
+    (c) => c.overStrongSpDuelSkip || c.overStrongSpDuelShadow?.wouldSkip
+  );
+  const gameShapeMode = resolveGameShapeShadowMode();
+  const gameShapeFlagged = totalsHybridCandidates.filter(
+    (c) =>
+      c.gameShapeSkipOver ||
+      c.gameShapeShadow?.wouldSkipOver ||
+      c.gameShapeShadow?.pitcherDuel?.matched ||
+      c.gameShapeShadow?.strongHome?.matched
+  );
   const totalsSatelliteHybrid = {
     available: totalsHybridPicks.length > 0,
     researchOnly: false,
@@ -2009,7 +2178,7 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
     specId: MLB_TOTALS_SATELLITE_HYBRID_SPEC.id,
     label: MLB_TOTALS_SATELLITE_HYBRID_SPEC.label,
     note:
-      'T-8 凍結選邊。正式刀：FragileUnder（ERA≥5）、blowup×薄gap、Under×投手公園。Over EV≥5%；Under EV≥3%。',
+      'T-8 凍結選邊。正式刀：FragileUnder（ERA≥5）、blowup×薄gap、Under×投手公園。影子：雙強先發低開禁 Over。Over EV≥5%；Under EV≥3%。',
     fragileUnderShadow: {
       mode: fragileUnderMode,
       specId: MLB_TOTALS_FRAGILE_UNDER_SPEC.id,
@@ -2023,6 +2192,40 @@ export function getMlbPrematchTruthSlate({ from, to } = {}) {
       skippedOrWouldSkip: underBlowupGapSkipped.length,
       evidence: MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC.evidence,
       note: MLB_TOTALS_UNDER_BLOWUP_GAP_SPEC.note,
+    },
+    overStrongSpDuelShadow: {
+      mode: overStrongSpDuelMode,
+      specId: MLB_TOTALS_OVER_STRONG_SP_DUEL_SPEC.id,
+      skippedOrWouldSkip: overStrongSpDuelSkipped.length,
+      evidence: MLB_TOTALS_OVER_STRONG_SP_DUEL_SPEC.evidence,
+      note: MLB_TOTALS_OVER_STRONG_SP_DUEL_SPEC.note,
+      flagged: overStrongSpDuelSkipped.slice(0, 8).map((c) => ({
+        matchup: c.matchup,
+        pick: c.pick,
+        line: c.line,
+        eras: c.overStrongSpDuelShadow?.pair
+          ? [
+              c.overStrongSpDuelShadow.pair.awayEra,
+              c.overStrongSpDuelShadow.pair.homeEra,
+            ]
+          : null,
+        wouldSkip: Boolean(c.overStrongSpDuelShadow?.wouldSkip),
+        skipped: Boolean(c.overStrongSpDuelSkip),
+      })),
+    },
+    gameShapeShadow: {
+      mode: gameShapeMode,
+      specId: MLB_GAME_SHAPE_SHADOW_SPEC.id,
+      note: MLB_GAME_SHAPE_SHADOW_SPEC.note,
+      flagged: gameShapeFlagged.slice(0, 10).map((c) => ({
+        matchup: c.matchup,
+        pick: c.pick,
+        plain: c.gameShapeShadow?.routes?.plain || null,
+        pitcherDuel: Boolean(c.gameShapeShadow?.pitcherDuel?.matched),
+        strongHome: Boolean(c.gameShapeShadow?.strongHome?.matched),
+        wouldSkipOver: Boolean(c.gameShapeShadow?.wouldSkipOver),
+        skipped: Boolean(c.gameShapeSkipOver),
+      })),
     },
     totalsUnderPitcherShadow: {
       mode: totalsUnderPitcherShadow.mode,

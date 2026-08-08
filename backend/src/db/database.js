@@ -568,6 +568,29 @@ function migrateSchema() {
       ON mlb_pitcher_injury_intel_cache(fetched_at DESC);
 
     /*
+     * 賽事形態 LLM 標註快取（賽前數字 → pitcher_duel / strong_home）。
+     * 用於大規模標註與規則蒸餾；正式選邊預設仍走規則影子。
+     */
+    CREATE TABLE IF NOT EXISTS mlb_game_shape_llm_cache (
+      game_id TEXT PRIMARY KEY,
+      commence_time TEXT,
+      facts_json TEXT NOT NULL,
+      label_json TEXT NOT NULL,
+      model TEXT,
+      prompt_version TEXT NOT NULL,
+      usage_json TEXT,
+      status TEXT NOT NULL,
+      error TEXT,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_game_shape_llm_fetched
+      ON mlb_game_shape_llm_cache(fetched_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_mlb_game_shape_llm_status
+      ON mlb_game_shape_llm_cache(status);
+
+    /*
      * 外部資料源健康與事故帳。
      * 已發布的 truth snapshot 保持不可變；錯誤版本透過 incident 作廢。
      */

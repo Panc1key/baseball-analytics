@@ -20,6 +20,11 @@ import {
   compareMlbMoneylineDailyRank,
   scoreMlbMoneylineDailyRank,
 } from './MlbExpectedRunsModel.js';
+import { strongHomeSoftRankPenaltyFromClassification } from './MlbStrongHomeSoftShadow.js';
+import { duelMlSoftRankPenaltyFromClassification } from './MlbDuelMlSoftShadow.js';
+import { unclearReduceRankPenaltyFromClassification } from './MlbUnclearReduceShadow.js';
+import { missingEraSoftRankPenaltyFromClassification } from './MlbMissingEraSoftShadow.js';
+import { typeAwareRankDeltaFromClassification } from './MlbTypeAwareRankShadow.js';
 
 const RESEARCH_STRATEGY = 'mlb-expected-runs-rank-v3-p2';
 
@@ -242,6 +247,12 @@ export function attachDailyResearchRanks(
       const expectedValue = Number(classification?.expectedValue);
       const odds = Number(classification?.odds);
       const pickEarlyExitsHigher = Boolean(classification?.pickEarlyExitsHigher);
+      const strongHomePen = strongHomeSoftRankPenaltyFromClassification(classification);
+      const duelMlPen = duelMlSoftRankPenaltyFromClassification(classification);
+      const unclearPen = unclearReduceRankPenaltyFromClassification(classification);
+      const missingEraPen = missingEraSoftRankPenaltyFromClassification(classification);
+      const typeAwareDelta = typeAwareRankDeltaFromClassification(classification);
+      const routePen = strongHomePen + duelMlPen + unclearPen + missingEraPen;
       return {
         ...row,
         _tier: tier,
@@ -250,16 +261,25 @@ export function attachDailyResearchRanks(
         _expectedValue: expectedValue,
         _odds: odds,
         _pickEarlyExitsHigher: pickEarlyExitsHigher,
-        _dailyRankScore: scoreMlbMoneylineDailyRank(
-          { expectedValue, modelProbability, pickEarlyExitsHigher },
-          rules
-        ),
+        _strongHomePen: strongHomePen,
+        _duelMlPen: duelMlPen,
+        _unclearPen: unclearPen,
+        _missingEraPen: missingEraPen,
+        _typeAwareDelta: typeAwareDelta,
+        _dailyRankScore:
+          scoreMlbMoneylineDailyRank(
+            { expectedValue, modelProbability, pickEarlyExitsHigher },
+            rules
+          ) -
+          routePen +
+          typeAwareDelta,
       };
     });
     const recommendations = decorated
       .filter((row) => row._tier === 'recommendation')
       .sort(
         (a, b) =>
+          (b._dailyRankScore - a._dailyRankScore) ||
           compareMlbMoneylineDailyRank(
             {
               expectedValue: a._expectedValue,
@@ -289,6 +309,7 @@ export function attachDailyResearchRanks(
         _expectedValue,
         _odds,
         _pickEarlyExitsHigher,
+        _strongHomePen,
         _dailyRankScore,
         ...rest
       } = row;
